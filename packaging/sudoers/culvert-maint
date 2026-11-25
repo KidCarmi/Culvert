@@ -132,6 +132,13 @@ Defaults!CULVERT_MAINT_PASSPHRASE_CMNDS env_keep += "CULVERT_BACKUP_PASSPHRASE"
 # ─── compose.status (D1.6a) ─────────────────────────────────────────
 culvert-maint ALL=(root) NOPASSWD: /usr/bin/docker compose -f {compose_path} ps --format json
 
+# ─── compose.status.all (ADR-0062 slice 4) ──────────────────────────
+# Read-only: the same listing including stopped and created containers. The
+# startup reconcile reads it only to find the "created" proxy container that a
+# death inside `compose up` leaves behind, the evidence restore_prior requires.
+# Without this line restore_prior never starts anything (fails closed).
+culvert-maint ALL=(root) NOPASSWD: /usr/bin/docker compose -f {compose_path} ps -a --format json
+
 # ─── compose.cli.backup.list (D1.6b) ────────────────────────────────
 # Fixed argv, no variable part: allowlisted directly.
 culvert-maint ALL=(root) NOPASSWD: /usr/bin/docker compose -f {compose_path} --profile cli run --rm cli --list-backups --backup-dir /backup

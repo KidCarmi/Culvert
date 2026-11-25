@@ -386,6 +386,11 @@ type reconcileCase struct {
 	rec  *journal.Record
 	in   reconcileInputsV2
 	out  ReconcileRecord
+	// ownUpReturned: this reconcile's own `compose up` has returned. From
+	// then on what Docker shows is this process's doing (Compose's tidy-only
+	// pass removes the "created" leftover), so rechecks keep the up evidence
+	// read before it instead of reading it again.
+	ownUpReturned bool
 }
 
 // reconcileOne decides and (maybe) acts on one record, and returns its result.
@@ -412,6 +417,9 @@ func (s *Server) reconcileOne(ctx context.Context, opID, recID string, dockerRea
 			Reason: "terminal_cleanup_pending", Outcome: OutcomeDeferred}
 	}
 	c := &reconcileCase{opID: opID, rec: rec, in: s.reconcileInputsFor(rec)}
+	// The attribution is taken here, once (ADR-0062 slice 4, obligation 1):
+	// whatever this record decides, it is not offered again in this process.
+	c.in.UpInterrupted = s.takeCommandAttribution(rec.OpID) == journal.MutationComposeUp
 	c.out = ReconcileRecord{OpID: rec.OpID, Kind: reportKind(rec.Kind)}
 	// Docker was tested and does not answer: there is nothing to observe, so
 	// there is nothing to wait for either. The settle wait exists to make
@@ -432,7 +440,7 @@ func (s *Server) reconcileOne(ctx context.Context, opID, recID string, dockerRea
 			c.out.Decision, c.out.Reason = actV2RecoveryRequired.String(), "settle_wait_cut_short"
 			return s.keepRecord(c, OutcomeRecoveryRequired)
 		}
-		s.readReconcileFacts(ctx, rec, &c.in)
+		s.readReconcileFacts(ctx, rec, &c.in, true)
 	}
 	if reconcileNeedsProbe(c.in) {
 		c.in.Probe = s.probeReadiness(ctx)
@@ -476,8 +484,10 @@ func (s *Server) reconcileInputsFor(rec *journal.Record) reconcileInputsV2 {
 
 // readReconcileFacts fills the Docker half of in. A record's references reach
 // Docker only after validateReconcileRefs accepted them; a data or unknown
-// record is decided without reading Docker at all.
-func (s *Server) readReconcileFacts(ctx context.Context, rec *journal.Record, in *reconcileInputsV2) {
+// record is decided without reading Docker at all. readEvidence: read
+// UpEvidence afresh (otherwise the value in in is kept; see
+// reconcileCase.ownUpReturned).
+func (s *Server) readReconcileFacts(ctx context.Context, rec *journal.Record, in *reconcileInputsV2, readEvidence bool) {
 	imageKind := (in.Kind == ops.KindUpgradeApply && in.Mode == "") || (in.Kind == ops.KindRollbackCreate && in.Mode == "image")
 	in.DockerReadable = false
 	if !imageKind {
@@ -496,6 +506,9 @@ func (s *Server) readReconcileFacts(ctx context.Context, rec *journal.Record, in
 	if pc.Present {
 		in.RunningImageID, in.ContainerRunning, in.RunningDigests = pc.ImageID, pc.Running, pc.RepoDigests
 	}
+	if readEvidence {
+		in.UpEvidence = s.readUpEvidence(ctx, in, pc.Present)
+	}
 	in.TargetLocalID, in.PriorLocalID = "", ""
 	if !in.RefValid {
 		return
@@ -510,6 +523,26 @@ func (s *Server) readReconcileFacts(ctx context.Context, rec *journal.Record, in
 			in.PriorLocalID = id
 		}
 	}
+}
+
+// readUpEvidence reads the Docker-side evidence of a death inside `compose up`
+// (reconcileInputsV2.UpEvidence), only where it can decide anything: an
+// upgrade this start attributed to such a death, with no proxy container
+// listed. Everywhere else it is not read, so an install whose sudoers file
+// predates the read issues it only when it would otherwise restore.
+func (s *Server) readUpEvidence(ctx context.Context, in *reconcileInputsV2, proxyListed bool) upEvidence {
+	if !in.UpInterrupted || proxyListed || in.Kind != ops.KindUpgradeApply || in.Mode != "" {
+		return upEvidenceNotRead
+	}
+	left, err := s.opts.Runner.ProxyCreatedLeftover(ctx)
+	switch {
+	case err != nil:
+		log.Printf("culvert-maint: WARN: the restore evidence could not be read (compose ps -a), so nothing is restored: %q", err.Error())
+		return upEvidenceUnreadable
+	case left:
+		return upEvidencePresent
+	}
+	return upEvidenceAbsent
 }
 
 // probeReadiness runs the configured health probe once. Only ReadyOK counts.
@@ -528,7 +561,7 @@ func (s *Server) probeReadiness(ctx context.Context) probeState {
 // (the probe result of the first read is kept).
 func (s *Server) stillDecides(ctx context.Context, c *reconcileCase, v reconcileVerdictV2) bool {
 	again := c.in
-	s.readReconcileFacts(ctx, c.rec, &again)
+	s.readReconcileFacts(ctx, c.rec, &again, !c.ownUpReturned)
 	return reconcileDecisionV2(again) == v
 }
 
@@ -557,7 +590,7 @@ func (s *Server) act(ctx context.Context, c *reconcileCase, v reconcileVerdictV2
 			_ = s.auditReconciled(c, audit.OutcomeFailed) // best-effort: the record is kept either way
 			return s.keepRecord(c, OutcomeRecoveryRequired)
 		}
-		if err := s.performStep(ctx, c, st.op); err != nil {
+		if err := s.performStep(ctx, c, st.op, st.expect); err != nil {
 			c.out.Reason = err.Error()
 			_ = s.auditReconciled(c, audit.OutcomeFailed) // best-effort: the record is kept either way
 			return s.keepRecord(c, OutcomeRecoveryRequired)
@@ -609,7 +642,7 @@ func (e errReconcileStep) Error() string { return string(e) }
 // always goes to the record's validated PriorRef (never any other reference),
 // and `compose up` runs only after act's recheck decided finish_rollback, which
 // requires the tag to be on the validated prior image already.
-func (s *Server) performStep(ctx context.Context, c *reconcileCase, op reconcileStepOp) error {
+func (s *Server) performStep(ctx context.Context, c *reconcileCase, op reconcileStepOp, expect reconcileVerdictV2) error {
 	switch op {
 	case stepTagPrior:
 		c.out.Actions = append(c.out.Actions, "tag:prior")
@@ -619,10 +652,17 @@ func (s *Server) performStep(ctx context.Context, c *reconcileCase, op reconcile
 		return nil
 	case stepUp:
 		c.out.Actions = append(c.out.Actions, "up")
-		if _, err := s.composeUp(ctx); err != nil {
+		// Under the record's operation: if the agent dies in this `up`, the next
+		// start finds the intent in this record (ADR-0062 slice 3) and may try
+		// once more; the attempt cap ends it there.
+		_, err := s.composeUp(ops.WithOpID(ctx, c.rec.OpID))
+		c.ownUpReturned = true
+		if err != nil {
 			return errReconcileStep("up_failed")
 		}
 		return nil
+	case stepUpAgain:
+		return s.upAgainStep(ctx, c, expect)
 	case stepGate:
 		// A fresh gate of what this reconcile's `up` started. A failure stops
 		// here: no second `up`, the record is kept.
@@ -636,13 +676,36 @@ func (s *Server) performStep(ctx context.Context, c *reconcileCase, op reconcile
 	return errReconcileStep("unexpected_action")
 }
 
+// upAgainStep is stepUpAgain. A proxy container that runs means the `up`
+// before it did its work: nothing to do (the gate and the verification by
+// image id that follow decide). Otherwise the decision on fresh facts must
+// still be expect, and `up` runs once more, under the record's operation.
+// Docker that cannot be read is not assumed to be anything: the step stops.
+func (s *Server) upAgainStep(ctx context.Context, c *reconcileCase, expect reconcileVerdictV2) error {
+	pc, err := s.opts.Runner.ReadProxyContainer(ctx)
+	if err != nil {
+		return errReconcileStep("docker_unreadable_before_up_again")
+	}
+	if pc.Running {
+		return nil
+	}
+	if !s.stillDecides(ctx, c, expect) {
+		return errReconcileStep("docker_changed_before_up_again")
+	}
+	c.out.Actions = append(c.out.Actions, "up")
+	if _, err := s.composeUp(ops.WithOpID(ctx, c.rec.OpID)); err != nil {
+		return errReconcileStep("up_failed")
+	}
+	return nil
+}
+
 // probeStep is stepProbe: a fresh read and, where reconcileNeedsProbe asks for
 // it, a fresh readiness probe; the decision must be verdictArmedPriorReady. A
 // prior that is not ready (or could not be probed) keeps the record with that
 // decision's reason; anything else means Docker changed under the reconcile.
 func (s *Server) probeStep(ctx context.Context, c *reconcileCase) error {
 	now := c.in
-	s.readReconcileFacts(ctx, c.rec, &now)
+	s.readReconcileFacts(ctx, c.rec, &now, false)
 	now.Probe = probeNotRun
 	if reconcileNeedsProbe(now) {
 		now.Probe = s.probeReadiness(ctx)
@@ -662,7 +725,7 @@ func (s *Server) probeStep(ctx context.Context, c *reconcileCase) error {
 // recorded prior image.
 func (s *Server) verifiedOnPrior(ctx context.Context, c *reconcileCase) bool {
 	after := c.in
-	s.readReconcileFacts(ctx, c.rec, &after)
+	s.readReconcileFacts(ctx, c.rec, &after, false)
 	p := normID(after.PriorImageID)
 	c.out.RunningImage, c.out.PinnedTag = classOf(&after, after.RunningImageID), classOf(&after, after.TagImageID)
 	return after.DockerReadable && after.ContainerRunning && p != "" &&

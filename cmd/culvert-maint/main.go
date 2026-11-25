@@ -169,7 +169,7 @@ func run(configPath string) error {
 	}
 	defer func() { _ = srv.Close() }()
 
-	armStartupReconcile(cfg, stp, srv)
+	armStartupReconcile(cfg, stp, srv, diedIn)
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
@@ -414,10 +414,14 @@ func startupRecord(jnl *journal.Journal, al *audit.Logger, rec *journal.Record, 
 // interrupted op; the reconcile is a separate op that takes the instance lock
 // and the maintenance lock here and starts its work once Serve has bound the
 // socket.
-func armStartupReconcile(cfg *config.Config, stp *status.Provider, srv *server.Server) {
+//
+// diedIn is what this start concluded about command attribution; only the
+// reconcile acts on it (status shows its own copy).
+func armStartupReconcile(cfg *config.Config, stp *status.Provider, srv *server.Server, diedIn map[string]string) {
 	if cfg.ReconcileOnStartup != config.ReconcileConverge {
 		return
 	}
+	srv.SetCommandAttribution(diedIn)
 	rt := server.NewReconcileTracker()
 	stp.WithReconcile(rt)
 	srv.PrepareStartupReconcile(rt)

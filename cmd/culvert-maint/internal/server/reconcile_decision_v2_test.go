@@ -60,6 +60,8 @@ func TestReconcileDecisionV2_FailureMatrix(t *testing.T) {
 		in.RunningImageID, in.TagImageID, in.Probe = idT, idT, probeReady
 	}
 	armed := func(in *reconcileInputsV2) { in.RollbackArmed = true }
+	upCut := func(in *reconcileInputsV2) { in.UpInterrupted, in.UpEvidence = true, upEvidencePresent }
+	evidence := func(e upEvidence) func(*reconcileInputsV2) { return func(in *reconcileInputsV2) { in.UpEvidence = e } }
 	probe := func(p probeState) func(*reconcileInputsV2) {
 		return func(in *reconcileInputsV2) { in.Probe = p }
 	}
@@ -81,6 +83,25 @@ func TestReconcileDecisionV2_FailureMatrix(t *testing.T) {
 		{"A7 restarted T/T TID=T", all(runTag(idT, idT), func(in *reconcileInputsV2) { in.TargetImageID = idT }), actV2RecoveryRequired, "target_live_ungated"},
 		{"A8 restarted ok_stale P/T TID=P", all(runTag(idP, idT), func(in *reconcileInputsV2) { in.TargetImageID = idP }), actV2Realign, "tag_ahead_container_on_prior"},
 		{"A9 restarted, prior down, none/T", all(runTag("", idT), func(in *reconcileInputsV2) { in.PriorImageID, in.PriorRefPresent, in.PriorLocalID = "", false, "" }), actV2RecoveryRequired, "stack_down"},
+		// Slice 4: the stack is down and this start found the agent died inside
+		// this operation's own `compose up`.
+		{"S1 restarting, stack down, own `up` cut, tag still on prior", all(ph(journal.PhaseRestarting), runTag("", idP), upCut), actV2RestorePrior, "stack_down_up_interrupted"},
+		{"S2 restarting, stack down, own `up` cut, tag on target", all(ph(journal.PhaseRestarting), runTag("", idT), upCut), actV2RestorePrior, "stack_down_up_interrupted"},
+		{"S3 restarted, stack down, own `up` cut", all(runTag("", idT), upCut), actV2RestorePrior, "stack_down_up_interrupted"},
+		{"S4 restarted, stack down, NOT attributed", runTag("", idT), actV2RecoveryRequired, "stack_down"},
+		{"S5 verified, stack down, own `up` cut: a good upgrade is not undone", all(ph(journal.PhaseVerified), runTag("", idT), upCut), actV2RecoveryRequired, "stack_down_after_verified"},
+		{"S6 verified and armed, stack down, own `up` cut", all(ph(journal.PhaseVerified), runTag("", idP), armed, upCut), actV2RecoveryRequired, "stack_down_after_verified"},
+		{"S7 restarted, stack down, own `up` cut, tag on a third image", all(runTag("", idX), upCut), actV2RecoveryRequired, "stack_down_tag_unrecognised"},
+		{"S8 restarted, stack down, own `up` cut, prior image no longer local", all(runTag("", idT), upCut, func(in *reconcileInputsV2) { in.PriorLocalID = "" }), actV2RecoveryRequired, "prior_not_restorable"},
+		{"S9 restarted, stack down, own `up` cut, prior ref resolves to another image", all(runTag("", idT), upCut, func(in *reconcileInputsV2) { in.PriorLocalID = idX }), actV2RecoveryRequired, "prior_not_restorable"},
+		{"S10 rb armed, stack down, own `up` cut", all(runTag("", idP), armed, upCut), actV2RestorePrior, "stack_down_up_interrupted"},
+		{"S11 safe phase, stack down, `up` cut (journal says nothing moved)", all(ph(journal.PhasePulled), runTag("", idP), upCut), actV2RecoveryRequired, "stack_down_unverifiable"},
+		{"S12 standalone rollback, stack down, `up` cut", all(standalone, runTag("", idP), upCut), actV2RecoveryRequired, "stack_down"},
+		{"S13 restarted, own `up` cut, but a container runs the prior", all(runTag(idP, idT), upCut), actV2Realign, "tag_ahead_container_on_prior"},
+		{"S14 restarted, stack down, `up` attributed, no created container (an operator's `compose down`, B1)", all(runTag("", idT), upCut, evidence(upEvidenceAbsent)), actV2RecoveryRequired, "stack_down_no_up_evidence"},
+		{"S15 restarted, stack down, `up` attributed, `compose ps -a` unreadable", all(runTag("", idT), upCut, evidence(upEvidenceUnreadable)), actV2RecoveryRequired, "up_evidence_unreadable"},
+		{"S16 restarted, stack down, `up` attributed, evidence not read", all(runTag("", idT), upCut, evidence(upEvidenceNotRead)), actV2RecoveryRequired, "up_evidence_unreadable"},
+		{"S17 verified, stack down, attributed, no evidence: verified is reported first", all(ph(journal.PhaseVerified), runTag("", idT), upCut, evidence(upEvidenceAbsent)), actV2RecoveryRequired, "stack_down_after_verified"},
 		{"A10 verified T/T, ready", verified, actV2Adopt, "verified_target_live"},
 		{"A10 verified T/T, not ready", all(verified, func(in *reconcileInputsV2) { in.Probe = probeNotReady }), actV2RecoveryRequired, "verified_target_not_ready"},
 		{"A10 verified T/T, probe not run", all(verified, func(in *reconcileInputsV2) { in.Probe = probeNotRun }), actV2RecoveryRequired, "readiness_not_probed"},
@@ -200,6 +221,15 @@ type v2Docker struct {
 	readable, running bool
 	run, tag, tl, pl  string
 	digests           []string
+	// upCut: this start found the agent died inside the operation's own
+	// `compose up` (UpInterrupted). Enumerated both ways only where no proxy
+	// container runs, the only states in which it can change a verdict: that
+	// keeps the space about a fifth larger instead of twice as large. RV18 and
+	// v2AttributionViolation check it cannot matter anywhere else.
+	upCut bool
+	// ev: the up evidence read with it (see appendV2Locals); upEvidenceNotRead
+	// wherever the agent does not read it (no attribution, or a container listed).
+	ev upEvidence
 }
 
 // dockerCombos lists the Docker fact combinations. An unreadable Docker is a
@@ -219,10 +249,44 @@ func (d *v2Domains) dockerCombos(full bool) []v2Docker {
 			}
 			for _, tag := range tags {
 				for _, tl := range tls {
-					for _, pl := range pls {
-						for _, dg := range dgs {
-							out = append(out, v2Docker{true, running, run, tag, tl, pl, dg})
-						}
+					out = appendV2Locals(out, v2Docker{readable: true, running: running, run: run, tag: tag, tl: tl}, pls, dgs, full, run != "")
+				}
+			}
+		}
+	}
+	return out
+}
+
+// appendV2Locals adds base with every prior-local id and digest list; with
+// withCut, also with the attribution set (see v2Docker.upCut). Where a
+// container is present (present), the attribution must change nothing (RV18)
+// and the agent reads no up evidence, so the restorable prior with one digest
+// list per base is enough to catch a decision that lets it act there. Where
+// none is, the attribution comes with present evidence on every pairing, and
+// with absent or unreadable evidence on that one pairing: those are decided
+// before the prior is looked at, and RV18 requires present evidence for any
+// restore.
+func appendV2Locals(out []v2Docker, base v2Docker, pls []string, dgs [][]string, withCut, present bool) []v2Docker {
+	for _, pl := range pls {
+		for j, dg := range dgs {
+			dk := base
+			dk.pl, dk.digests = pl, dg
+			out = append(out, dk)
+			if !withCut {
+				continue
+			}
+			one := pl == idP && j == 0
+			dk.upCut = true
+			switch {
+			case present && one:
+				out = append(out, dk)
+			case !present:
+				dk.ev = upEvidencePresent
+				out = append(out, dk)
+				if one {
+					for _, e := range []upEvidence{upEvidenceAbsent, upEvidenceUnreadable} {
+						dk.ev = e
+						out = append(out, dk)
 					}
 				}
 			}
@@ -268,6 +332,7 @@ func forEachV2Input(fn func(*reconcileInputsV2) bool) int {
 			dk := &dockers[i]
 			in.DockerReadable, in.ContainerRunning, in.RunningImageID = dk.readable, dk.running, dk.run
 			in.TagImageID, in.TargetLocalID, in.PriorLocalID, in.RunningDigests = dk.tag, dk.tl, dk.pl, dk.digests
+			in.UpInterrupted, in.UpEvidence = dk.upCut, dk.ev
 		}})
 		idx := make([]int, len(axes))
 		for {
@@ -363,9 +428,12 @@ func v2PropertyViolations(in *reconcileInputsV2, v reconcileVerdictV2, decide fu
 			return "RV7 only an upgrade in the danger window is acted on"
 		case !in.RefValid || !in.PriorRefPresent || ids.prior == "" || ids.priorLocal != ids.prior:
 			return "RV7 act only with a validated PriorRef that resolves locally to the recorded prior"
-		case !in.ContainerRunning:
-			return "RV7 act only on a running container"
+		case !in.ContainerRunning && v.Action != actV2RestorePrior:
+			return "RV7 act only on a running container (restore_prior: see RV18)"
 		}
+	}
+	if viol := v2RestorePriorViolation(in, v, ids); viol != "" {
+		return viol
 	}
 	switch v.Action {
 	case actV2Realign:
@@ -404,6 +472,54 @@ func v2PropertyViolations(in *reconcileInputsV2, v reconcileVerdictV2, decide fu
 		return "RV11 verdict must not depend on id/digest notation"
 	}
 	return ""
+}
+
+// v2RestorePriorViolation: RV18, the owner's conditions for starting the prior
+// image when no proxy container runs (ADR-0062 slice 4), and that the
+// attribution changes nothing anywhere else.
+func v2RestorePriorViolation(in *reconcileInputsV2, v reconcileVerdictV2, ids v2ids) string {
+	if v.Action == actV2RestorePrior {
+		switch {
+		case ids.run != "":
+			return "RV18 restore_prior only when no proxy container is running"
+		case !in.UpInterrupted:
+			return "RV18 restore_prior only when this start found the agent died inside this operation's `compose up`"
+		case in.UpEvidence != upEvidencePresent:
+			return "RV18 restore_prior only when Docker shows the created container a death inside `up` leaves (B1)"
+		case in.Kind != ops.KindUpgradeApply || in.Mode != "" || safeBoundary(in.Phase):
+			return "RV18 restore_prior only for an upgrade in the danger window"
+		case in.Phase == journal.PhaseVerified:
+			return "RV18 never undo a verified upgrade by restoring the prior image"
+		case ids.tag != ids.prior && (ids.target == "" || ids.tag != ids.target):
+			return "RV18 restore_prior only with the fixed tag on the prior or on the target"
+		}
+	}
+	if !in.UpInterrupted {
+		return ""
+	}
+	// The attribution may only turn a stack_down report into restore_prior;
+	// every other verdict is the one the same facts give without it.
+	c := *in
+	c.UpInterrupted, c.UpEvidence = false, upEvidenceNotRead
+	without := reconcileDecisionV2(c)
+	if v == without {
+		return ""
+	}
+	if without != rr("stack_down") || !v2AttributedStackDown[v] {
+		return "RV18 the attribution changed a verdict other than a stack_down report"
+	}
+	return ""
+}
+
+// v2AttributedStackDown is every verdict the attribution may turn a
+// stack_down report into: the restore, or a more specific report of why not.
+var v2AttributedStackDown = map[reconcileVerdictV2]bool{
+	verdictRestorePrior:               true,
+	rr("stack_down_after_verified"):   true,
+	rr("prior_not_restorable"):        true,
+	rr("stack_down_tag_unrecognised"): true,
+	rr("stack_down_no_up_evidence"):   true,
+	rr("up_evidence_unreadable"):      true,
 }
 
 // v2ArmedOnPriorViolation: RV16. An armed record found with container and tag
@@ -446,35 +562,105 @@ func v2PlanViolations(in *reconcileInputsV2, v reconcileVerdictV2, decide func(r
 	if viol := v2PlanShape(steps, v); viol != "" {
 		return viol
 	}
-	cur := *in
-	prior := normID(in.PriorImageID)
-	for _, st := range steps {
-		if st.op.mutates() && decide(cur) != st.expect {
-			return "RV15 a recheck is not passed by the state the plan's own steps leave"
+	// Two worlds: every `up` works; and, for restore_prior (which always
+	// follows an interrupted recreate), the first `up` only tidies up, as
+	// Compose does after a recreate cut between its stop and its delete. A
+	// restore plan must leave the prior running in both.
+	for _, tidyFirstUp := range []bool{false, true} {
+		if tidyFirstUp && v.Action != actV2RestorePrior {
+			continue
 		}
-		switch st.op {
-		case stepTagPrior:
-			cur.TagImageID = cur.PriorLocalID
-		case stepUp:
-			if st.expect != verdictFinishRollback || prior == "" || normID(cur.TagImageID) != prior || normID(cur.PriorLocalID) != prior {
-				return "RV14 an `up` only with the tag on the validated prior image id"
-			}
-			cur.RunningImageID, cur.ContainerRunning = cur.TagImageID, true
-		case stepProbe:
-			ready := cur
-			ready.Probe = probeReady
-			if decide(ready) != st.expect {
-				return "RV15 a ready prior does not pass the probe after the plan's own steps"
-			}
+		if viol := v2SimulatePlan(in, steps, decide, tidyFirstUp); viol != "" {
+			return viol
 		}
-	}
-	if len(steps) > 0 && (prior == "" || normID(cur.RunningImageID) != prior || normID(cur.TagImageID) != prior) {
-		return "RV15 an acting plan must leave container and tag on the prior image"
 	}
 	if v.Action == actV2RetagFinishRollback && (len(steps) == 0 || steps[0].op != stepTagPrior) {
 		return "RV15 a T/T-armed finish retags to PriorRef before anything else"
 	}
 	return v2ArmedRetireViolation(in, steps)
+}
+
+// v2SimulatePlan runs steps on a copy of in, as Docker would see them, and
+// checks every recheck and the end state (RV14, RV15). tidyFirstUp: the first
+// `up` starts nothing and leaves no running container.
+func v2SimulatePlan(in *reconcileInputsV2, steps []reconcileStep, decide func(reconcileInputsV2) reconcileVerdictV2, tidyFirstUp bool) string {
+	sim := v2PlanSim{cur: *in, prior: normID(in.PriorImageID), decide: decide, tidyFirstUp: tidyFirstUp}
+	for _, st := range steps {
+		if st.op.mutates() && decide(sim.cur) != st.expect {
+			return "RV15 a recheck is not passed by the state the plan's own steps leave"
+		}
+		if viol := sim.apply(st); viol != "" {
+			return viol
+		}
+	}
+	cur := sim.cur
+	if len(steps) > 0 && (sim.prior == "" || normID(cur.RunningImageID) != sim.prior || normID(cur.TagImageID) != sim.prior) {
+		if tidyFirstUp {
+			return "RV15 after a tidy-only first `up` the plan must still leave container and tag on the prior image"
+		}
+		return "RV15 an acting plan must leave container and tag on the prior image"
+	}
+	return ""
+}
+
+// v2PlanSim is the symbolic Docker state v2SimulatePlan threads through a plan.
+type v2PlanSim struct {
+	cur         reconcileInputsV2
+	prior       string
+	decide      func(reconcileInputsV2) reconcileVerdictV2
+	tidyFirstUp bool
+	upRan       bool
+}
+
+// apply executes one step on the symbolic state and returns any violation.
+func (s *v2PlanSim) apply(st reconcileStep) string {
+	switch st.op {
+	case stepTagPrior:
+		s.cur.TagImageID = s.cur.PriorLocalID
+	case stepUp:
+		return s.up(st)
+	case stepUpAgain:
+		return s.upAgain(st)
+	case stepProbe:
+		ready := s.cur
+		ready.Probe = probeReady
+		if s.decide(ready) != st.expect {
+			return "RV15 a ready prior does not pass the probe after the plan's own steps"
+		}
+	}
+	return ""
+}
+
+func (s *v2PlanSim) up(st reconcileStep) string {
+	if (st.expect != verdictFinishRollback && st.expect != verdictRestorePrior) ||
+		s.prior == "" || normID(s.cur.TagImageID) != s.prior || normID(s.cur.PriorLocalID) != s.prior {
+		return "RV14 an `up` only with the tag on the validated prior image id"
+	}
+	if s.tidyFirstUp && !s.upRan {
+		// Compose removed the leftover and started nothing.
+		s.cur.RunningImageID, s.cur.ContainerRunning = "", false
+	} else {
+		s.cur.RunningImageID, s.cur.ContainerRunning = s.cur.TagImageID, true
+	}
+	s.upRan = true
+	return ""
+}
+
+func (s *v2PlanSim) upAgain(st reconcileStep) string {
+	if st.expect != verdictRestorePrior {
+		return "RV14 a second `up` only within restore_prior"
+	}
+	if s.cur.ContainerRunning {
+		return "" // the first `up` worked: nothing to do
+	}
+	if s.decide(s.cur) != st.expect {
+		return "RV15 the recheck before a second `up` is not passed by the state a tidy-only `up` leaves"
+	}
+	if s.prior == "" || normID(s.cur.TagImageID) != s.prior {
+		return "RV14 a second `up` only with the tag on the validated prior image id"
+	}
+	s.cur.RunningImageID, s.cur.ContainerRunning = s.cur.TagImageID, true
+	return ""
 }
 
 // v2ArmedRetireViolation: RV17. No acting plan retires an armed record without
@@ -493,36 +679,68 @@ func v2ArmedRetireViolation(in *reconcileInputsV2, steps []reconcileStep) string
 
 // v2PlanShape is the structural half of RV13.
 func v2PlanShape(steps []reconcileStep, v reconcileVerdictV2) string {
-	ups, tags := 0, 0
+	ups, upAgains, tags := 0, 0, 0
 	for i, st := range steps {
 		switch st.op {
 		case stepTagPrior:
 			tags++
 		case stepUp:
 			ups++
-			if i+1 >= len(steps) || steps[i+1].op != stepGate {
-				return "RV13 every `up` is immediately followed by a fresh gate"
-			}
-		case stepGate:
-			if i == 0 || steps[i-1].op != stepUp {
-				return "RV13 a gate only right after an `up`"
-			}
-		case stepProbe:
-			if i != len(steps)-1 || ups > 0 {
-				return "RV13 a probe only as the last step of a plan that restarts nothing"
-			}
-		default:
-			return "RV13 a step outside the closed set"
+		case stepUpAgain:
+			upAgains++
 		}
-		if st.op.mutates() && !st.expect.Action.mutatesDocker() {
-			return "RV13 every mutation is guarded by a recheck of an acting verdict"
+		if viol := v2StepShape(steps, i, ups); viol != "" {
+			return viol
+		}
+		if st.op.mayMutate() && !st.expect.Action.mutatesDocker() {
+			return "RV13 every step that can change Docker is guarded by a recheck of an acting verdict"
 		}
 	}
-	if ups > 1 || tags > 1 {
-		return "RV13 a plan restarts at most once and tags at most once"
+	if ups > 1 || upAgains > 1 || tags > 1 {
+		return "RV13 a plan has at most one `up` (plus at most one second `up` right after it, within restore_prior) and tags at most once"
 	}
 	if len(steps) > 0 && steps[0].expect != v {
 		return "RV13 the first recheck is the verdict being executed"
+	}
+	return ""
+}
+
+// v2StepShape: where steps[i] may stand. ups counts the `up` steps so far.
+func v2StepShape(steps []reconcileStep, i, ups int) string {
+	st := steps[i]
+	prev := func() reconcileStepOp {
+		if i == 0 {
+			return -1
+		}
+		return steps[i-1].op
+	}
+	switch st.op {
+	case stepTagPrior:
+	case stepUp:
+		next := i + 1
+		if next < len(steps) && steps[next].op == stepUpAgain {
+			next++
+		}
+		if next >= len(steps) || steps[next].op != stepGate {
+			return "RV13 every `up` is followed by a fresh gate (at most a second `up` in between)"
+		}
+	case stepUpAgain:
+		if prev() != stepUp {
+			return "RV13 a second `up` only right after an `up`"
+		}
+		if !st.expect.Action.mutatesDocker() {
+			return "RV13 a second `up` is guarded by a recheck of an acting verdict"
+		}
+	case stepGate:
+		if p := prev(); p != stepUp && p != stepUpAgain {
+			return "RV13 a gate only right after an `up`"
+		}
+	case stepProbe:
+		if i != len(steps)-1 || ups > 0 {
+			return "RV13 a probe only as the last step of a plan that restarts nothing"
+		}
+	default:
+		return "RV13 a step outside the closed set"
 	}
 	return ""
 }
@@ -597,6 +815,9 @@ func TestReconcileDecisionV2_ExhaustiveProperties(t *testing.T) {
 		"recovery_required/target_digest_unverified", "recovery_required/verified_target_not_ready",
 		"recovery_required/readiness_not_probed", "recovery_required/tag_on_prior_rollback_unproven",
 		"recovery_required/docker_state_unrecognised", "recovery_required/rollback_target_partially_applied",
+		"restore_prior/stack_down_up_interrupted", "recovery_required/stack_down_after_verified",
+		"recovery_required/stack_down_tag_unrecognised",
+		"recovery_required/stack_down_no_up_evidence", "recovery_required/up_evidence_unreadable",
 	}
 	for _, w := range wantVerdicts {
 		if seen[w] == 0 {
@@ -678,9 +899,18 @@ func TestReconcileDecisionV2_NegativeControls(t *testing.T) {
 			return reconcileDecisionV2(in)
 		},
 	}
-	for k, m := range v2ArmedFinishMutants() {
-		mutants[k] = m
+	for _, more := range []map[string]func(reconcileInputsV2) reconcileVerdictV2{v2ArmedFinishMutants(), v2RestorePriorMutants(), v2UpEvidenceMutants()} {
+		for k, m := range more {
+			mutants[k] = m
+		}
 	}
+	runV2DecisionMutants(t, mutants)
+}
+
+// runV2DecisionMutants requires the property check to catch every mutant
+// somewhere in the bounded space.
+func runV2DecisionMutants(t *testing.T, mutants map[string]func(reconcileInputsV2) reconcileVerdictV2) {
+	t.Helper()
 	for name, m := range mutants {
 		caught := ""
 		forEachV2Input(func(in *reconcileInputsV2) bool {
@@ -692,6 +922,102 @@ func TestReconcileDecisionV2_NegativeControls(t *testing.T) {
 		} else {
 			t.Logf("mutant %q killed: %s", name, caught)
 		}
+	}
+}
+
+// v2RestorePriorMutants are the negative controls for restore_prior (ADR-0062
+// slice 4). Each drops exactly one of the owner's conditions; the property
+// check must catch every one somewhere in the bounded space.
+func v2RestorePriorMutants() map[string]func(reconcileInputsV2) reconcileVerdictV2 {
+	stackDown := func(in reconcileInputsV2) bool {
+		return in.Kind == ops.KindUpgradeApply && in.Mode == "" && in.DockerReadable && in.RunningImageID == "" &&
+			reconcileDecisionV2(in).Reason == "stack_down"
+	}
+	// restorableIf: the verdict the decision would give with the one dropped
+	// condition forced to hold.
+	restorableIf := func(force func(*reconcileInputsV2)) func(reconcileInputsV2) reconcileVerdictV2 {
+		return func(in reconcileInputsV2) reconcileVerdictV2 {
+			c := in
+			force(&c)
+			if v := reconcileDecisionV2(c); v.Action == actV2RestorePrior {
+				return v
+			}
+			return reconcileDecisionV2(in)
+		}
+	}
+	return map[string]func(reconcileInputsV2) reconcileVerdictV2{
+		"restore a present but stopped container": func(in reconcileInputsV2) reconcileVerdictV2 {
+			if in.UpInterrupted && in.DockerReadable && in.RunningImageID != "" && !in.ContainerRunning &&
+				reconcileDecisionV2(in).Reason == "container_not_running" {
+				return verdictRestorePrior
+			}
+			return reconcileDecisionV2(in)
+		},
+		"restore without the attribution": func(in reconcileInputsV2) reconcileVerdictV2 {
+			if stackDown(in) && !in.UpInterrupted {
+				c := in
+				c.UpInterrupted, c.UpEvidence = true, upEvidencePresent
+				if v := reconcileDecisionV2(c); v.Action == actV2RestorePrior {
+					return v
+				}
+			}
+			return reconcileDecisionV2(in)
+		},
+		"restore over a verified upgrade": func(in reconcileInputsV2) reconcileVerdictV2 {
+			if in.Phase == journal.PhaseVerified && in.UpInterrupted && in.RunningImageID == "" &&
+				reconcileDecisionV2(in).Reason == "stack_down_after_verified" {
+				return verdictRestorePrior
+			}
+			return reconcileDecisionV2(in)
+		},
+		"restore a prior that is not the recorded image": restorableIf(func(c *reconcileInputsV2) { c.PriorLocalID = c.PriorImageID }),
+		"restore with the tag on a third image": func(in reconcileInputsV2) reconcileVerdictV2 {
+			if v := reconcileDecisionV2(in); v.Reason == "stack_down_tag_unrecognised" {
+				return verdictRestorePrior
+			}
+			return reconcileDecisionV2(in)
+		},
+		"restore while a container runs": func(in reconcileInputsV2) reconcileVerdictV2 {
+			if v := reconcileDecisionV2(in); v.Action == actV2Realign {
+				return verdictRestorePrior
+			}
+			return reconcileDecisionV2(in)
+		},
+		"restore at a safe phase": func(in reconcileInputsV2) reconcileVerdictV2 {
+			if v := reconcileDecisionV2(in); v.Reason == "stack_down_unverifiable" && in.UpInterrupted {
+				return verdictRestorePrior
+			}
+			return reconcileDecisionV2(in)
+		},
+		"restore for a standalone rollback": func(in reconcileInputsV2) reconcileVerdictV2 {
+			if in.Kind == ops.KindRollbackCreate && in.UpInterrupted && reconcileDecisionV2(in).Reason == "stack_down" {
+				return verdictRestorePrior
+			}
+			return reconcileDecisionV2(in)
+		},
+		"attribution changes another verdict": func(in reconcileInputsV2) reconcileVerdictV2 {
+			if v := reconcileDecisionV2(in); in.UpInterrupted && v.Reason == "prior_not_restorable" {
+				return reconcileVerdictV2{actV2Noop, "already_on_prior"}
+			}
+			return reconcileDecisionV2(in)
+		},
+	}
+}
+
+// v2UpEvidenceMutants: restore_prior decided without Docker's evidence of a
+// death inside `up` (B1), each mutant promoting one report to a restore.
+func v2UpEvidenceMutants() map[string]func(reconcileInputsV2) reconcileVerdictV2 {
+	promote := func(reason string) func(reconcileInputsV2) reconcileVerdictV2 {
+		return func(in reconcileInputsV2) reconcileVerdictV2 {
+			if v := reconcileDecisionV2(in); v.Reason == reason {
+				return verdictRestorePrior
+			}
+			return reconcileDecisionV2(in)
+		}
+	}
+	return map[string]func(reconcileInputsV2) reconcileVerdictV2{
+		"restore without Docker's evidence (B1)": promote("stack_down_no_up_evidence"),
+		"restore on unreadable evidence":         promote("up_evidence_unreadable"),
 	}
 }
 
@@ -796,6 +1122,9 @@ func TestReconcilePlan_NegativeControls(t *testing.T) {
 			return reconcilePlan(v)
 		},
 	}
+	for k, m := range v2RestorePriorPlanMutants() {
+		mutants[k] = m
+	}
 	for name, m := range mutants {
 		caught := ""
 		forEachV2Input(func(in *reconcileInputsV2) bool {
@@ -807,5 +1136,53 @@ func TestReconcilePlan_NegativeControls(t *testing.T) {
 		} else {
 			t.Logf("mutant plan %q killed: %s", name, caught)
 		}
+	}
+}
+
+// v2RestorePriorPlanMutants: restore_prior plans that break one plan property.
+func v2RestorePriorPlanMutants() map[string]func(reconcileVerdictV2) []reconcileStep {
+	return map[string]func(reconcileVerdictV2) []reconcileStep{
+		"restore_prior without the retag": func(v reconcileVerdictV2) []reconcileStep {
+			if v == verdictRestorePrior {
+				return []reconcileStep{{stepUp, v}, {stepUpAgain, v}, {op: stepGate}}
+			}
+			return reconcilePlan(v)
+		},
+		"restore_prior without the second `up`": func(v reconcileVerdictV2) []reconcileStep {
+			if v == verdictRestorePrior {
+				return []reconcileStep{{stepTagPrior, v}, {stepUp, v}, {op: stepGate}}
+			}
+			return reconcilePlan(v)
+		},
+		"restore_prior: two second `up`s": func(v reconcileVerdictV2) []reconcileStep {
+			if v == verdictRestorePrior {
+				return []reconcileStep{{stepTagPrior, v}, {stepUp, v}, {stepUpAgain, v}, {stepUpAgain, v}, {op: stepGate}}
+			}
+			return reconcilePlan(v)
+		},
+		"restore_prior without the gate": func(v reconcileVerdictV2) []reconcileStep {
+			if v == verdictRestorePrior {
+				return []reconcileStep{{stepTagPrior, v}, {stepUp, v}, {stepUpAgain, v}}
+			}
+			return reconcilePlan(v)
+		},
+		"restore_prior: second `up` before the first": func(v reconcileVerdictV2) []reconcileStep {
+			if v == verdictRestorePrior {
+				return []reconcileStep{{stepTagPrior, v}, {stepUpAgain, v}, {stepUp, v}, {op: stepGate}}
+			}
+			return reconcilePlan(v)
+		},
+		"restore_prior: second `up` with no recheck": func(v reconcileVerdictV2) []reconcileStep {
+			if v == verdictRestorePrior {
+				return []reconcileStep{{stepTagPrior, v}, {stepUp, v}, {op: stepUpAgain}, {op: stepGate}}
+			}
+			return reconcilePlan(v)
+		},
+		"restore_prior: a second `up` grafted onto a finish": func(v reconcileVerdictV2) []reconcileStep {
+			if v == verdictFinishRollback {
+				return []reconcileStep{{stepUp, v}, {stepUpAgain, v}, {op: stepGate}}
+			}
+			return reconcilePlan(v)
+		},
 	}
 }

@@ -48,6 +48,23 @@ type reconWorld struct {
 	down        bool   // Docker does not answer: every command fails
 	onUp        func() // called while `up` runs (outside the lock)
 	onDown      func() // called while `down` runs (outside the lock)
+	// upNoop: this many `up` calls exit 0 having only tidied up, as Compose
+	// does after a recreate interrupted between its stop and its delete.
+	upNoop int
+	// onTag is called (under the world's lock) right after a `docker tag`.
+	onTag func(w *reconWorld)
+	// leftover: `compose ps -a` lists a "created" proxy container, what a
+	// death inside `compose up` leaves behind. Any `up` consumes it (a full
+	// one recreates, a tidy-only one removes it).
+	leftover bool
+	// psAllFail: `compose ps -a` fails (an install whose sudoers file does
+	// not allow it); psAllCount counts how often it was issued.
+	psAllFail  bool
+	psAllCount int
+	// oneOffRun: `compose ps -a` also lists a "created" one-off of the proxy
+	// service, what a `compose run` without --rm whose start failed leaves;
+	// `compose down` does not remove it.
+	oneOffRun bool
 }
 
 func (w *reconWorld) idFor(ref string) string {
@@ -118,6 +135,8 @@ func (w *reconWorld) start(cmd *exec.Cmd) error {
 		return nil
 	}
 	switch {
+	case has("ps") && has("-a"):
+		w.answerPSAll(cmd)
 	case has("ps"):
 		if w.running != "" {
 			_, _ = cmd.Stdout.Write([]byte(`{"Service":"proxy","State":"running","ID":"abcdef012345"}`))
@@ -135,13 +154,42 @@ func (w *reconWorld) start(cmd *exec.Cmd) error {
 		w.mutating = append(w.mutating, "tag:"+w.idFor(args[len(args)-2]))
 		w.tagRefs = append(w.tagRefs, args[len(args)-2])
 		w.pinned = w.idFor(args[len(args)-2])
+		if w.onTag != nil {
+			w.onTag(w)
+		}
 	case has("up"):
 		w.mutating = append(w.mutating, "up")
+		w.leftover = false
+		if w.upNoop > 0 {
+			w.upNoop--
+			break
+		}
 		if !w.upStale {
 			w.running = w.pinned
 		}
 	}
 	return nil
+}
+
+// answerPSAll answers `compose ps -a` (called under the world's lock): the
+// running proxy and the "created" leftover, or a failure with psAllFail.
+func (w *reconWorld) answerPSAll(cmd *exec.Cmd) {
+	w.psAllCount++
+	if w.psAllFail {
+		w.failed[cmd] = true
+		return
+	}
+	var lines []string
+	if w.running != "" {
+		lines = append(lines, `{"Service":"proxy","State":"running","ID":"abcdef012345"}`)
+	}
+	if w.leftover {
+		lines = append(lines, `{"Service":"proxy","State":"created","ID":"0123456789ab","Labels":"com.docker.compose.oneoff=False,com.docker.compose.service=proxy"}`)
+	}
+	if w.oneOffRun {
+		lines = append(lines, `{"Service":"proxy","State":"created","ID":"d0c4cf477b2d","Name":"culvert-proxy-run-33918bcd22bd","Labels":"com.docker.compose.oneoff=True,com.docker.compose.service=proxy"}`)
+	}
+	_, _ = cmd.Stdout.Write([]byte(strings.Join(lines, "\n")))
 }
 
 func (w *reconWorld) wait(cmd *exec.Cmd) error {

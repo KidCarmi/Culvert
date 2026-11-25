@@ -74,6 +74,7 @@ func TestParity_SudoersAreFullyPathBound(t *testing.T) {
 func TestParity_D16bRegistryShape(t *testing.T) {
 	wantIDs := map[TemplateID]struct{}{
 		TemplateComposeStatus:               {},
+		TemplateComposeStatusAll:            {},
 		TemplateComposeCLIBackupEncrypted:   {},
 		TemplateComposeCLIBackupUnencrypted: {},
 		TemplateComposeCLIBackupList:        {},

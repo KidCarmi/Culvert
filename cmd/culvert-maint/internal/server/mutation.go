@@ -187,3 +187,27 @@ func (s *Server) startIntentRetry() {
 		}
 	}()
 }
+
+// SetCommandAttribution hands the server what this agent start concluded
+// about command attribution (op id → command). Call once, before Serve. The
+// map is copied: the status provider keeps its own for display.
+func (s *Server) SetCommandAttribution(m map[string]string) {
+	cp := make(map[string]string, len(m))
+	for k, v := range m {
+		cp[k] = v
+	}
+	s.attributionMu.Lock()
+	s.attribution = cp
+	s.attributionMu.Unlock()
+}
+
+// takeCommandAttribution returns the command the previous agent process died
+// inside for opID, and forgets it: a decision takes the attribution once per
+// process (ADR-0062 slice 4, obligation 1).
+func (s *Server) takeCommandAttribution(opID string) string {
+	s.attributionMu.Lock()
+	defer s.attributionMu.Unlock()
+	c := s.attribution[opID]
+	delete(s.attribution, opID)
+	return c
+}

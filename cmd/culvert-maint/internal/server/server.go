@@ -216,6 +216,12 @@ type Server struct {
 	// unfinished; startSettled is set once Docker showed that it is over
 	// (settle.go, mutation.go). settlePoll is how often Docker is asked.
 	mutations *journal.MutationLog
+	// attribution: op id → the docker command the previous agent process
+	// died inside, as THIS start found it (main.go takeCommandIntents), until
+	// the startup reconcile takes it. Guarded by attributionMu.
+	attributionMu sync.Mutex
+	attribution   map[string]string
+
 	// failGen / clearedGen: whether a command intent's close could not be
 	// written and is being retried (Server.staleIntents in mutation.go).
 	// intentRetryEvery is the retry period (0: default).

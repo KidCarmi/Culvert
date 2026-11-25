@@ -50,6 +50,13 @@ const (
 	// only template that exists in D1.6a.
 	TemplateComposeStatus TemplateID = "compose.status"
 
+	// TemplateComposeStatusAll runs
+	// `docker compose -f <compose_path> ps -a --format json`: the same
+	// read including containers that are not running. Read-only. Used
+	// only by the startup reconcile's restore_prior evidence
+	// (ProxyCreatedLeftover; ADR-0062 slice 4).
+	TemplateComposeStatusAll TemplateID = "compose.status.all"
+
 	// TemplateComposeCLIBackupEncrypted runs the encrypted-backup
 	// flow via the compose `cli` profile. See templates_d16b.go for
 	// argv shape and validators. State-changing.
@@ -137,6 +144,12 @@ func Registry() []Template {
 			ID:            TemplateComposeStatus,
 			BaseArgv:      []string{"docker", "compose", "-f", "{compose_path}", "ps", "--format", "json"},
 			SudoersLines:  []string{"/usr/bin/docker compose -f {compose_path} ps --format json"},
+			StateChanging: false,
+		},
+		{
+			ID:            TemplateComposeStatusAll,
+			BaseArgv:      []string{"docker", "compose", "-f", "{compose_path}", "ps", "-a", "--format", "json"},
+			SudoersLines:  []string{"/usr/bin/docker compose -f {compose_path} ps -a --format json"},
 			StateChanging: false,
 		},
 	}
