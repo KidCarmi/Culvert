@@ -457,6 +457,48 @@ gaps and make the #2051 executor the single path every recovery takes.
   `failed(agent_restart_interrupted)`; the resumption is its own audited
   `:resumed` event with its own outcome.
 - AGT-900 extension text, model property and real-Docker cases ship with it.
+- **Owner decision (2026-11-25): slice 7 also covers a gate that never
+  began** (`up_done_unrecorded`): the agent died after the target's `up`
+  returned and before `gate:target` was written, so there is no checkpoint.
+  With no checkpoint there is no epoch or attempt count, so the rules below
+  take them from the record instead, and are stricter.
+- **As designed (amended):**
+  - **Switch.** `resume_interrupted_gate`, default `false`, effective only
+    with `reconcile_on_startup = "converge"`. Converge users are qualified
+    without resumption; turning it on for them silently would change what
+    their appliance does after a crash. It is independently qualified, as
+    owner decision 4 asks.
+  - **Epoch, precisely.** The start counts `interrupted_seen` before the
+    reconcile decides. "No start but this one has seen the record since the
+    gate began" is therefore `checkpoint.epoch == interrupted_seen - 1`; for a
+    gate that never began, `interrupted_seen == 1`. At the counter's cap the
+    count stops, the equality cannot hold, and nothing is resumed.
+  - **Decided as `resume_gate`** (reasons `target_gate_interrupted`,
+    `target_gate_not_begun`) only for an `upgrades.apply` record at
+    `restarted` whose target id was digest-verified by the restart, with
+    container and tag freshly read on that id, and none of the never-resume
+    rules above. Every other record decides exactly as before.
+  - **Its plan changes nothing in Docker until the gate has failed:**
+    (1) write the checkpoint ahead, FAIL-CLOSED: `gate:target`, attempts
+    raised (1 for a gate that never began), epoch = the current
+    `interrupted_seen`; (2) a fresh production gate; (3) verify container and
+    tag by image id and the running digest against the record's target
+    digest. Each step is preceded by a fresh read that must still decide
+    `resume_gate`.
+  - **Gate or verify passes:** the target is adopted and the record retired
+    with one `upgrades.apply:resumed` audit entry (outcome succeeded). The
+    original operation stays `failed(agent_restart_interrupted)`.
+  - **Gate or verify fails:** the result (`failed:<detail>`) and
+    `rollback_armed` are written FAIL-CLOSED, and the reconcile decides
+    again in the same start. Converge runs only at startup, so leaving the
+    rollback for "the next start" would leave a target that failed its gate
+    serving until some later restart. The new decision is #2051's T/T-armed
+    finish, run on the same executor within the persisted attempt cap; it
+    is never a replay of the original `tag`/`up`. If those writes fail, the
+    record keeps its open checkpoint with an attempt spent and is reported.
+  - **Attempts cap: 2 gate runs begun** per record (an interrupted original
+    plus one resumption; a gate that never began gets two resumptions,
+    since none had begun).
 
 ### Not doing
 
