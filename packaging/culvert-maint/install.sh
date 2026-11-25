@@ -509,6 +509,17 @@ case "$PROJECT_DIR" in
     *)  die "compose_project_dir must be absolute, got '$PROJECT_DIR'" ;;
 esac
 reject_unsafe "compose_project_dir" "$PROJECT_DIR"
+# The agent canonicalizes this value with filepath.Clean and builds `-f` with
+# filepath.Join, and sudo matches Cmnd arguments literally. Render the SAME
+# path: drop trailing slashes (a common hand edit), and refuse the forms
+# Clean would rewrite rather than install a rule the agent can never match.
+while [ "$PROJECT_DIR" != "/" ] && [ "${PROJECT_DIR%/}" != "$PROJECT_DIR" ]; do
+    PROJECT_DIR=${PROJECT_DIR%/}
+done
+case "$PROJECT_DIR" in
+    *//* | */./* | */../* | */. | */..)
+        die "compose_project_dir must be a clean absolute path (no '//', '.' or '..' segments), got '$PROJECT_DIR'" ;;
+esac
 
 # Validate compose_file: bare filename, not "." / "..", no unsafe chars.
 case "$COMPOSE_FILE" in
