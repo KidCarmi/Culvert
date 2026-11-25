@@ -34,16 +34,18 @@ func decideWithResume(resume func(*reconcileInputsV2, v2ids) (reconcileVerdictV2
 }
 
 // resumeRegion: the only inputs where resume can apply: an upgrade at
-// restarted with container, tag, the target's local id and the restart's
-// recorded id all the same image. Every other input is still checked, with
-// the switch on and off, by the plain equality and RV19's "the switch changes
-// nothing else"; only the resume dimensions are not varied there, as they
-// cannot matter.
+// restarted or restarting with container, tag and the target's local id all
+// the same image (whatever the recorded id and the digests say: those are
+// what RV19 checks). Every other input is still checked, with the switch on
+// and off, by the plain equality and RV19's "the switch changes nothing
+// else"; only the resume dimensions are not varied there, as they cannot
+// matter.
 func resumeRegion(in *reconcileInputsV2) bool {
 	run := normID(in.RunningImageID)
-	return in.Kind == ops.KindUpgradeApply && in.Mode == "" && in.Phase == journal.PhaseRestarted &&
+	return in.Kind == ops.KindUpgradeApply && in.Mode == "" &&
+		(in.Phase == journal.PhaseRestarted || in.Phase == journal.PhaseRestarting) &&
 		in.DockerReadable && in.ContainerRunning && run != "" &&
-		run == normID(in.TagImageID) && run == normID(in.TargetLocalID) && run == normID(in.TargetImageID)
+		run == normID(in.TagImageID) && run == normID(in.TargetLocalID)
 }
 
 // resumeRegionBases: every generated input in resumeRegion, collected once.
@@ -62,9 +64,24 @@ var resumeRegionBases = sync.OnceValue(func() []reconcileInputsV2 {
 	return out
 })
 
-// forEachResumeVariant runs fn over the resume dimensions of base.
+// forEachResumeVariant runs fn over the resume dimensions of base, and over a
+// death inside the operation's `compose up` found by this start: the generator
+// varies that only where no container runs (where it decided anything before
+// resume existed), but a container the cut `up` had already started runs.
 func forEachResumeVariant(base reconcileInputsV2, fn func(*reconcileInputsV2) bool) bool {
-	tid := base.TargetImageID
+	if !forEachResumeDims(base, fn) {
+		return false
+	}
+	if base.UpInterrupted {
+		return true
+	}
+	cut := base
+	cut.UpInterrupted, cut.UpEvidence = true, upEvidencePresent
+	return forEachResumeDims(cut, fn)
+}
+
+func forEachResumeDims(base reconcileInputsV2, fn func(*reconcileInputsV2) bool) bool {
+	tid := base.TargetLocalID // the image resumeIdentity would name
 	cks := []ckFacts{
 		{},
 		{Present: true, Step: journal.StepGateTarget, Attempts: 1, Epoch: 0, ImageID: tid},
@@ -115,15 +132,22 @@ func resumeViolation(in *reconcileInputsV2, decide func(reconcileInputsV2) recon
 		return "RV19 resume_gate with resume_interrupted_gate off"
 	case vOff != rr("target_live_ungated"):
 		return "RV19 resume_gate where the switch-off decision is not target_live_ungated"
-	case in.Kind != ops.KindUpgradeApply || in.Mode != "" || in.Phase != journal.PhaseRestarted:
-		return "RV19 resume_gate only for an upgrade at restarted"
+	case in.Kind != ops.KindUpgradeApply || in.Mode != "" ||
+		(in.Phase != journal.PhaseRestarted && in.Phase != journal.PhaseRestarting):
+		return "RV19 resume_gate only for an upgrade at restarted or restarting"
 	case in.UpInterrupted:
 		return "RV19 never resume after a death inside the op's compose up"
 	case in.RollbackArmed:
 		return "RV19 never resume an armed record"
-	case !in.DockerReadable || !in.ContainerRunning || ids.tid == "" ||
-		ids.run != ids.tid || ids.tag != ids.tid || ids.target != ids.tid:
-		return "RV19 resume only with container and tag on the restart's digest-verified target id"
+	case !in.DockerReadable || !in.ContainerRunning || ids.target == "" ||
+		ids.run != ids.target || ids.tag != ids.target || ids.target == ids.prior:
+		return "RV19 resume only with container, tag and the validated target reference on one id, not the prior"
+	case !digestListed(in.RunningDigests, in.TargetDigest):
+		return "RV19 resume only for an image that carries the pinned digest"
+	case in.Phase == journal.PhaseRestarted && ids.tid != ids.target:
+		return "RV19 at restarted the recorded id must be that id"
+	case in.Phase == journal.PhaseRestarting && ids.tid != "":
+		return "RV19 at restarting no id may be recorded yet"
 	case v.Action.mutatesDocker():
 		return "RV19 resume_gate changes Docker by itself"
 	}
@@ -141,7 +165,7 @@ func resumeViolation(in *reconcileInputsV2, decide func(reconcileInputsV2) recon
 		switch {
 		case !ck.Present || ck.Step != journal.StepGateTarget || ck.Result != "":
 			return "RV19 target_gate_interrupted only from an open gate:target checkpoint"
-		case normID(ck.ImageID) != ids.tid:
+		case normID(ck.ImageID) != ids.target:
 			return "RV19 the checkpoint must name the target id"
 		case ck.Epoch != in.Seen-1:
 			return "RV19 resume only when no start but this one saw the record since the gate began"
@@ -168,6 +192,9 @@ func TestReconcileResume_ExhaustiveProperties(t *testing.T) {
 				t.Fatalf("decideWithResume is not the real decision: %+v real=%v composed=%v", *in, got, want)
 			}
 			seen[got.Action.String()+"/"+got.Reason]++
+			if got.Action == actV2ResumeGate {
+				seen["resume at "+string(in.Phase)]++
+			}
 			if viol := resumeViolation(in, reconcileDecisionV2); viol != "" {
 				if fails < 10 {
 					t.Errorf("PROPERTY %s\n input=%+v verdict=%v", viol, *in, got)
@@ -188,7 +215,8 @@ func TestReconcileResume_ExhaustiveProperties(t *testing.T) {
 		t.Fatal("the resume region is empty: the generator never reaches an upgrade at restarted with container and tag agreeing")
 	}
 	for _, w := range []string{"resume_gate/target_gate_interrupted", "resume_gate/target_gate_not_begun",
-		"resume_gate/resumed_not_retired", "recovery_required/target_live_ungated"} {
+		"resume_gate/resumed_not_retired", "recovery_required/target_live_ungated",
+		"resume at " + string(journal.PhaseRestarted), "resume at " + string(journal.PhaseRestarting)} {
 		if seen[w] == 0 {
 			t.Errorf("VACUOUS: verdict %q never produced", w)
 		}
@@ -197,22 +225,54 @@ func TestReconcileResume_ExhaustiveProperties(t *testing.T) {
 		seen["resume_gate/target_gate_interrupted"], seen["resume_gate/target_gate_not_begun"], seen["resume_gate/resumed_not_retired"])
 }
 
-// TestReconcileResume_NegativeControls: each mutant drops one RV19 condition
-// from resumeGateV2 and must be caught somewhere in the space.
-func TestReconcileResume_NegativeControls(t *testing.T) {
+// resumeMutant is resumeGateV2 with one RV19 condition dropped.
+type resumeMutant struct {
+	name string
+	fn   func(*reconcileInputsV2, v2ids) (reconcileVerdictV2, bool)
+}
+
+//nolint:funlen,gocognit // one flat table of mutants, each a few lines
+func resumeMutants() []resumeMutant {
 	open := func(in *reconcileInputsV2, ids v2ids) bool {
-		return in.ResumeEnabled && in.Kind == ops.KindUpgradeApply && in.Mode == "" && in.Phase == journal.PhaseRestarted &&
-			ids.tid != "" && ids.tid == ids.target && ids.run == ids.tid && ids.tag == ids.tid && in.ContainerRunning
+		_, ok := resumeIdentity(in, ids)
+		return in.ResumeEnabled && in.Kind == ops.KindUpgradeApply && in.Mode == "" && ok
 	}
-	type mutant struct {
-		name string
-		fn   func(*reconcileInputsV2, v2ids) (reconcileVerdictV2, bool)
+	// loose: resumeGateV2 with id in place of resumeIdentity.
+	loose := func(id func(*reconcileInputsV2, v2ids) (string, bool)) func(*reconcileInputsV2, v2ids) (reconcileVerdictV2, bool) {
+		return func(in *reconcileInputsV2, ids v2ids) (reconcileVerdictV2, bool) {
+			if !in.ResumeEnabled || in.Kind != ops.KindUpgradeApply || in.Mode != "" || in.UpInterrupted || in.RollbackArmed {
+				return reconcileVerdictV2{}, false
+			}
+			t, ok := id(in, ids)
+			if !ok {
+				return reconcileVerdictV2{}, false
+			}
+			if in.ResumeAudited {
+				return verdictResumeRetire, true
+			}
+			c := in.Ck
+			if !c.Present {
+				if in.Seen != 1 {
+					return reconcileVerdictV2{}, false
+				}
+				return verdictResumeNotBegun, true
+			}
+			if c.Step != journal.StepGateTarget || c.Result != "" || normID(c.ImageID) != t || c.Epoch != in.Seen-1 ||
+				c.Attempts < 1 || c.Attempts >= resumeMaxGateRuns {
+				return reconcileVerdictV2{}, false
+			}
+			return verdictResumeInterrupted, true
+		}
 	}
-	mutants := []mutant{
+	sameImage := func(in *reconcileInputsV2, ids v2ids) bool {
+		t := ids.target
+		return t != "" && ids.run == t && ids.tag == t && t != ids.prior && in.ContainerRunning
+	}
+	return []resumeMutant{
 		{"ignores the epoch", func(in *reconcileInputsV2, ids v2ids) (reconcileVerdictV2, bool) {
 			c := in.Ck
 			if open(in, ids) && !in.UpInterrupted && c.Present && c.Step == journal.StepGateTarget && c.Result == "" &&
-				normID(c.ImageID) == ids.tid && c.Attempts >= 1 && c.Attempts < resumeMaxGateRuns {
+				normID(c.ImageID) == ids.target && c.Attempts >= 1 && c.Attempts < resumeMaxGateRuns {
 				return verdictResumeInterrupted, true
 			}
 			return resumeGateV2(in, ids)
@@ -231,7 +291,7 @@ func TestReconcileResume_NegativeControls(t *testing.T) {
 		{"ignores the cap", func(in *reconcileInputsV2, ids v2ids) (reconcileVerdictV2, bool) {
 			c := in.Ck
 			if open(in, ids) && !in.UpInterrupted && c.Present && c.Step == journal.StepGateTarget && c.Result == "" &&
-				normID(c.ImageID) == ids.tid && c.Epoch == in.Seen-1 && c.Attempts >= 1 {
+				normID(c.ImageID) == ids.target && c.Epoch == in.Seen-1 && c.Attempts >= 1 {
 				return verdictResumeInterrupted, true
 			}
 			return resumeGateV2(in, ids)
@@ -248,6 +308,21 @@ func TestReconcileResume_NegativeControls(t *testing.T) {
 			x.Ck.Result = ""
 			return resumeGateV2(&x, ids)
 		}},
+		{"ignores the pinned digest", loose(func(in *reconcileInputsV2, ids v2ids) (string, bool) {
+			ok := sameImage(in, ids) && ((in.Phase == journal.PhaseRestarted && ids.tid == ids.target) ||
+				(in.Phase == journal.PhaseRestarting && ids.tid == ""))
+			return ids.target, ok
+		})},
+		{"accepts a recorded id at restarting", loose(func(in *reconcileInputsV2, ids v2ids) (string, bool) {
+			ok := sameImage(in, ids) && digestListed(in.RunningDigests, in.TargetDigest) &&
+				((in.Phase == journal.PhaseRestarted && ids.tid == ids.target) || in.Phase == journal.PhaseRestarting)
+			return ids.target, ok
+		})},
+		{"ignores the recorded id at restarted", loose(func(in *reconcileInputsV2, ids v2ids) (string, bool) {
+			ok := sameImage(in, ids) && digestListed(in.RunningDigests, in.TargetDigest) &&
+				(in.Phase == journal.PhaseRestarted || (in.Phase == journal.PhaseRestarting && ids.tid == ""))
+			return ids.target, ok
+		})},
 		{"retires without the :resumed entry", func(in *reconcileInputsV2, ids v2ids) (reconcileVerdictV2, bool) {
 			if open(in, ids) && !in.UpInterrupted && in.Ck.Present && in.Ck.Result == journal.CheckpointPassed {
 				return verdictResumeRetire, true
@@ -255,6 +330,12 @@ func TestReconcileResume_NegativeControls(t *testing.T) {
 			return resumeGateV2(in, ids)
 		}},
 	}
+}
+
+// TestReconcileResume_NegativeControls: each mutant drops one RV19 condition
+// from resumeGateV2 and must be caught somewhere in the space.
+func TestReconcileResume_NegativeControls(t *testing.T) {
+	mutants := resumeMutants()
 	for _, m := range mutants {
 		start := time.Now()
 		decide := decideWithResume(m.fn)
