@@ -162,17 +162,48 @@ gaps and make the #2051 executor the single path every recovery takes.
 - This is the precondition for every later field.
 
 **Slice 3 — step checkpoints, starting with the gate (gaps 3, 6).**
-- Add an optional `checkpoint` object: `{step, intent_at, budget,
-  result, result_at, image_id}`. It is written fail-closed **before** a
-  gate starts (`gate:target`, `gate:prior`) and best-effort after it ends
-  (`passed` / `failed:<detail>`).
+- Add an optional `checkpoint` object: `{step, intent_at, attempts,
+  epoch, result, result_at, image_id}` (amended: `budget` was ambiguous
+  between "left" and "used"; `attempts` counts the gate runs begun for
+  `step`, written ahead and only ever raised, like `ReconcileAttempts`.
+  `epoch` is the record's `interrupted_seen` at `intent_at`, for the reason
+  rule 5 gives command intents: a start that counted in between makes the
+  checkpoint history, not an interruption to resume). It is written **before** a gate starts
+  (`gate:target`, `gate:prior`) and best-effort after it ends (`passed` /
+  `failed:<detail>`). Which write may refuse what is decided per write,
+  by rule 1's test (amended; the first text made every intent
+  fail-closed):
+  - **`gate:target` intent: fail-closed.** A write that fails is treated
+    as a failed gate, so the inline rollback runs; refusing can only lead
+    to the conservative branch. `image_id` is the target's id as the
+    restart captured and digest-verified it (empty when that capture
+    failed; slice 7 then has nothing to resume on). The cost is
+    availability, not safety: on a state directory that cannot be written
+    a healthy target is rolled back. It is reported under its own
+    `failure_reason` (`checkpoint_unwritable`), never as a plain gate
+    failure, so an operator can tell the two apart.
+  - **`gate:prior` intent: best-effort.** Fail-closed would refuse the
+    inline rollback's own gate on a full disk and leave the failed target
+    serving (rule 1). A missing `gate:prior` intent only withholds a later
+    resumption of that gate.
+  - **`gate:target` result `failed`: attempted before `rollback_pull`,
+    never blocking.** Blocking would keep a target that failed its gate
+    serving. If it cannot be written the record says "gate begun, no
+    result" although the gate failed. Slice 7 must not read that as
+    "interrupted": see its exclusions.
+  - `passed` is best-effort: `verified` already records it, and a lost
+    `passed` only withholds a resumption that is not needed.
 - Standalone image rollback records its prior (ref, image id) at capture
   and a barrier phase before its tag move, reusing `writeBarrier`.
 - The inline rollback's gate failure becomes durable in `checkpoint`
   before `rollback_pull` (today it is only an audit line until the
-  best-effort arm).
+  best-effort arm), under the rule above.
 - Decisions gain facts, not new actions: `restarted` + `checkpoint
-  gate:target failed` is no longer confused with "pending".
+  gate:target failed` is no longer confused with "pending". **Moved to
+  slice 7** (amended): the checkpoint lands first as record-and-report,
+  with no decision change, so it does not collide with slice 4's work on
+  the decision table, and its only consumer arrives with the rules that
+  constrain it.
 - **Command attribution is first-class** (rules from three independent
   reviews of #2093; its third review found it not merge-safe and it is
   parked):
@@ -336,9 +367,25 @@ gaps and make the #2051 executor the single path every recovery takes.
   container and pinned tag both resolve to the checkpoint's immutable image
   id, freshly read; no conflicting external change (no other open intent, no
   marker command of another op, identity unchanged across the gate); the
-  settle window is over; the persistent resume budget is not exhausted
-  (written ahead, like `ReconcileAttempts`); and a **fresh production health
-  gate** passes.
+  settle window is over; the checkpoint's `attempts` is below the resume
+  cap, raised and written ahead of the resumed gate (like
+  `ReconcileAttempts`); the checkpoint's `epoch` is the record's current
+  `interrupted_seen`; and a **fresh production health gate** passes.
+- Never resume (amended, from slice 3's write rules and slice 4's review):
+  - when `rollback_armed` is set, or container or tag is not on the
+    checkpoint's `image_id`: the inline rollback was already under way;
+  - when the checkpoint has no `image_id`: identity is unknown;
+  - when this start's command attribution says the agent died inside that
+    operation's `compose up`: the restart itself is in doubt, and a proxy
+    that is down is slice 4's `restore_prior`;
+  - when `attempts` has reached the cap. `attempts` counts the original
+    gate as one, so "gate begun, `failed` lost" (slice 3's residual) is
+    resumed at most `cap - 1` times. That residual is the
+    one case where a resumption can adopt a target that failed a gate
+    once: the state directory could not be written when it failed, the
+    agent then died before the rollback moved the tag, and the target now
+    passes a fresh production gate. It is stated, not closed: closing it
+    means refusing the rollback on a full disk, which rule 1 forbids.
 - Then the op's remaining non-mutating steps run (verify by id and digest);
   the target is adopted and the record retired exactly once. Gate fails →
   the existing armed-rollback path (#2051) with its own gate, never a
