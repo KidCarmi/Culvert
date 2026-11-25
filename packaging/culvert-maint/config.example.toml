@@ -158,11 +158,12 @@ proxy_repo = "ghcr.io/kidcarmi/culvert"
 #         image, or after starting it and before checking it, is reported
 #         (recovery_required, target_live_ungated) and the new image keeps
 #         serving unchecked until you act.
-#   true  the next start runs that health check itself, once: only when the
-#         restart recorded the new image's id (after checking its digest),
-#         container and tag are still on that id, no rollback was armed, the
-#         agent did not die inside that upgrade's `compose up`, and no other
-#         start has seen the entry since the check began. It first records
+#   true  the next start runs that health check itself, once: only when
+#         container, tag and the pinned upgrade reference are on one image
+#         that carries the pinned digest (and, if the restart recorded the
+#         new image's id, it is that one), no rollback was armed, the agent
+#         did not die inside that upgrade's `compose up`, and no other start
+#         has seen the entry since the check began. It first records
 #         that it is checking (if it cannot, nothing runs), then checks
 #         /ready, then container, tag and the running digest. Passed: the new
 #         image is accepted with nothing changed in Docker (audit

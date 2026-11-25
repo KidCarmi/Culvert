@@ -499,6 +499,31 @@ gaps and make the #2051 executor the single path every recovery takes.
   - **Attempts cap: 2 gate runs begun** per record (an interrupted original
     plus one resumption; a gate that never began gets two resumptions,
     since none had begun).
+- **Correction (2026-11-25, found by the real-Docker qualification).** The
+  owner decision above describes `up_done_unrecorded` correctly, but the
+  design restricted `resume_gate` to records at `restarted`. In that case
+  the agent died after `compose up` returned and *before* it recorded the
+  restart, so the record is still at `restarting` and holds no target id:
+  the restart captures the id in that same lost write. As designed, slice 7
+  covered only the moment between the `restarted` write and the checkpoint
+  write, not the owner's case. Amended:
+  - **Identity is established on fresh facts** (`resumeIdentity`):
+    container, fixed tag and the validated `TargetRef` resolve to one local
+    image id, not the prior's, whose RepoDigests list the record's pinned
+    digest. That is the check the restart itself makes before it records
+    the id (F1), made now instead of read from the record. At `restarted`
+    the recorded id must also be that id; at `restarting` none may be
+    recorded yet (a recorded id there contradicts the write order).
+  - The checkpoint is written ahead on that id, so "the checkpoint has no
+    `image_id`" still never resumes. The record's phase and `TargetImageID`
+    are not rewritten.
+  - The digest condition is now checked before any gate, at both phases:
+    an image that does not carry the pinned digest is reported
+    (`target_live_ungated`) instead of being gated and then rolled back on
+    the verify. The verify repeats the same identity check on the gate's id.
+  - Everything else is unchanged: `interrupted_seen == 1` for a gate that
+    never began, the epoch rule, the cap, a death inside `compose up`, an
+    armed record.
 
 ### Not doing
 

@@ -242,11 +242,13 @@ an upgrade whose agent died **after** starting the new image and **before** its
 health check finished is no longer only reported. The next start runs that
 check again, on what it reads from Docker now:
 
-- only for an upgrade the record shows as restarted, with the new image's id
-  recorded by the restart (which checked the image's digest first), container
-  and `culvert/proxy:pinned` both on that id now, no armed rollback, and no
-  death inside that upgrade's own `compose up` (that case is `restore_prior`
-  above);
+- only for an upgrade the record shows as restarting or restarted, with the
+  container, `culvert/proxy:pinned` and the upgrade's pinned reference all on
+  one image now, that image carrying the pinned digest (the check the restart
+  itself makes), and, if the restart got as far as recording the new image's
+  id, that same id; no armed rollback, and no death inside that upgrade's own
+  `compose up` (that case is `restore_prior` above). An image without the
+  pinned digest is not checked at all: the entry is reported;
 - only when no other agent start has seen the entry since that check began,
   and at most two checks begun per upgrade: a resumed check that is itself
   interrupted is not run again (one that never began before the crash gets
@@ -258,7 +260,7 @@ check again, on what it reads from Docker now:
 | Reconcile decision / reason | Meaning |
 |---|---|
 | `resume_gate/target_gate_interrupted` | the agent died during the health check; it is run again |
-| `resume_gate/target_gate_not_begun` | the agent died after the restart, before the check began; it is run |
+| `resume_gate/target_gate_not_begun` | the agent died after the restart (recorded or not), before the check began; it is run |
 | `resume_gate/resumed_not_retired` | a previous start passed the resumed check and audited it, then died before clearing the entry; only the entry is cleared |
 | `resumed_gate_failed_unhealthy`, `resumed_gate_failed_verify` | the check failed; the rollback is recorded and, in the same start, the previous image is restored as for an armed rollback |
 | `docker_changed_before_gate`, `docker_changed_before_verify` | Docker changed under the check; nothing more is done, the entry is reported |

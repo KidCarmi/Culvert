@@ -394,6 +394,8 @@ type reconcileCase struct {
 	// auditSuffix names this record's audit entry ("" = ":reconciled"); a
 	// resumed gate is audited as ":resumed" (reconcile_resume.go).
 	auditSuffix string
+	// resumeID: the image id a resume_gate verdict gates (resumeIdentity).
+	resumeID string
 }
 
 func (c *reconcileCase) auditKind() string {
@@ -501,7 +503,7 @@ func (s *Server) reconcileInputsFor(rec *journal.Record) reconcileInputsV2 {
 // An unreadable log answers false: the gate is then resumed again rather than
 // a retirement assumed.
 func (s *Server) resumeAudited(rec *journal.Record) bool {
-	if !s.opts.Cfg.ResumeInterruptedGate || s.opts.Audit == nil || rec.Phase != journal.PhaseRestarted {
+	if !s.opts.Cfg.ResumeInterruptedGate || s.opts.Audit == nil || (rec.Phase != journal.PhaseRestarted && rec.Phase != journal.PhaseRestarting) {
 		return false
 	}
 	found, err := audit.HasSucceeded(s.opts.Audit.Path(), rec.OpID, reportKind(rec.Kind)+":resumed")

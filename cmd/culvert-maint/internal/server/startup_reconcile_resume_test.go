@@ -31,6 +31,17 @@ func seedUngatedTT(t *testing.T, r *reconRig, seen int, ck *journal.Checkpoint) 
 	})
 }
 
+// seedRestarting turns the seeded record into one whose restart was never
+// recorded: phase restarting, no TargetImageID.
+func seedRestarting(t *testing.T, r *reconRig) {
+	t.Helper()
+	rec := r.recordOnDisk(t)
+	rec.Phase, rec.TargetImageID = journal.PhaseRestarting, ""
+	if err := r.jnl.Write(*rec); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func openTargetGate(attempts, epoch int) *journal.Checkpoint {
 	return &journal.Checkpoint{Step: journal.StepGateTarget, IntentAt: time.Now().UTC().Add(-time.Minute),
 		Attempts: attempts, Epoch: epoch, ImageID: "sha256:" + cfgNew}
@@ -86,14 +97,22 @@ func TestResume_PassedGateAdoptsAndRetires(t *testing.T) {
 	for _, tc := range []struct {
 		name, reason string
 		ck           *journal.Checkpoint
+		restarting   bool
 	}{
-		{"interrupted", "target_gate_interrupted", openTargetGate(1, 0)},
-		{"never began", "target_gate_not_begun", nil},
+		{"interrupted", "target_gate_interrupted", openTargetGate(1, 0), false},
+		{"never began", "target_gate_not_begun", nil, false},
+		// killed after `compose up` returned, before the restart was recorded:
+		// no recorded id, the identity is read fresh (resumeIdentity)
+		{"never began, restart unrecorded", "target_gate_not_begun", nil, true},
+		{"interrupted, restart unrecorded", "target_gate_interrupted", openTargetGate(1, 0), true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			r := newReconRig(t, true)
 			r.enableResume()
 			seedUngatedTT(t, r, 1, tc.ck)
+			if tc.restarting {
+				seedRestarting(t, r)
+			}
 			got := r.run(t)
 			if got.Decision != "resume_gate" || got.Reason != tc.reason || got.Outcome != OutcomeConverged || !got.DockerReconciled {
 				t.Fatalf("result = %+v, want resume_gate/%s converged", got, tc.reason)
@@ -131,8 +150,10 @@ func TestResume_RefusedWithoutFreshEvidence(t *testing.T) {
 		{"the checkpoint names another image", 1, &journal.Checkpoint{Step: journal.StepGateTarget, Attempts: 1, Epoch: 0, ImageID: "sha256:" + imgOther}, nil},
 		{"the checkpoint already has a result", 1, &journal.Checkpoint{Step: journal.StepGateTarget, Attempts: 1, Epoch: 0, Result: "failed:unhealthy", ImageID: "sha256:" + cfgNew}, nil},
 		{"no checkpoint, a second start", 2, nil, nil},
-		{"the restart's id was never recorded", 1, nil, func(rec *journal.Record) { rec.TargetImageID = "" }},
-		{"the record is at restarting", 1, nil, func(rec *journal.Record) { rec.Phase = journal.PhaseRestarting }},
+		{"at restarted, the restart's id was never recorded", 1, nil, func(rec *journal.Record) { rec.TargetImageID = "" }},
+		{"at restarted, the recorded id is another image", 1, nil, func(rec *journal.Record) { rec.TargetImageID = "sha256:" + imgOther }},
+		{"at restarting, an id is already recorded", 1, nil, func(rec *journal.Record) { rec.Phase = journal.PhaseRestarting }},
+		{"at restarting, a second start", 2, nil, func(rec *journal.Record) { rec.Phase, rec.TargetImageID = journal.PhaseRestarting, "" }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			r := newReconRig(t, true)
@@ -159,6 +180,34 @@ func TestResume_RefusedWithoutFreshEvidence(t *testing.T) {
 				t.Errorf(":resumed entries = %v, want none", n)
 			}
 		})
+	}
+}
+
+// TestResume_RefusedWhenTheImageLacksThePinnedDigest: container, tag and the
+// target reference agree on one id, but that image does not carry the pinned
+// digest. Its identity is not established, at restarted or restarting, so no
+// gate runs and nothing changes.
+func TestResume_RefusedWhenTheImageLacksThePinnedDigest(t *testing.T) {
+	for _, restarting := range []bool{false, true} {
+		r := newReconRig(t, true)
+		r.enableResume()
+		seedUngatedTT(t, r, 1, nil)
+		if restarting {
+			seedRestarting(t, r)
+		}
+		r.world.mu.Lock()
+		r.world.wrongDigest = cfgNew
+		r.world.mu.Unlock()
+		got := r.run(t)
+		if got.Decision != "recovery_required" || got.Reason != "target_live_ungated" {
+			t.Fatalf("restarting=%v: result = %+v, want recovery_required/target_live_ungated", restarting, got)
+		}
+		if c := r.world.calls(); len(c) != 0 {
+			t.Errorf("restarting=%v: mutating calls = %v, want none", restarting, c)
+		}
+		if rec := r.recordOnDisk(t); rec == nil || rec.Checkpoint != nil {
+			t.Errorf("restarting=%v: record = %+v, want it kept with no checkpoint (no gate begun)", restarting, rec)
+		}
 	}
 }
 
@@ -263,7 +312,7 @@ func TestResume_CheckpointWrittenAheadForTheNextStart(t *testing.T) {
 		PriorRefPresent: true, TargetDigest: digNew, TargetImageID: "sha256:" + cfgNew, PriorImageID: "sha256:" + cfgOld,
 		MaxAttempts: maxReconcileAttempts, DockerReadable: true, RunningImageID: "sha256:" + cfgNew, ContainerRunning: true,
 		TagImageID: "sha256:" + cfgNew, TargetLocalID: "sha256:" + cfgNew, PriorLocalID: "sha256:" + cfgOld,
-		ResumeEnabled: true, Seen: 2, Ck: ckFactsOf(atProbe)}
+		RunningDigests: []string{"repo@sha256:" + digNew}, ResumeEnabled: true, Seen: 2, Ck: ckFactsOf(atProbe)}
 	if v := reconcileDecisionV2(in); v != verdictResumeInterrupted {
 		t.Errorf("next start on that record decides %v, want %v", v, verdictResumeInterrupted)
 	}
@@ -273,15 +322,27 @@ func TestResume_CheckpointWrittenAheadForTheNextStart(t *testing.T) {
 	}
 }
 
-// TestResume_VerifyMismatchRollsBack: the resumed gate passes, but the running
-// image does not carry the record's target digest. That is a failed resume:
-// armed durably and finished onto the prior in the same start.
+// TestResume_VerifyMismatchRollsBack: the resumed gate passes, but by the
+// verify's own read the running image no longer carries the pinned digest.
+// That is a failed resume: armed durably and finished onto the prior in the
+// same start. (Reads after the checkpoint: the re-read before the gate, the
+// re-read before the verify, then the verify's read.)
 func TestResume_VerifyMismatchRollsBack(t *testing.T) {
 	r := newReconRig(t, true)
 	r.enableResume()
 	seedUngatedTT(t, r, 1, nil)
+	after := 0
 	r.world.mu.Lock()
-	r.world.wrongDigest = cfgNew
+	r.world.onPS = func(int) {
+		if rec, found, err := r.jnl.Read(testOpULID); err == nil && found && rec.Checkpoint != nil {
+			after++
+			if after == 3 {
+				r.world.mu.Lock()
+				r.world.wrongDigest = cfgNew
+				r.world.mu.Unlock()
+			}
+		}
+	}
 	r.world.mu.Unlock()
 	got := r.run(t)
 	if got.Decision != "finish_rollback_retag" || got.Outcome != OutcomeConverged {

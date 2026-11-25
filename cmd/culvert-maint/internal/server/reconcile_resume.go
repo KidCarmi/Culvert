@@ -16,7 +16,8 @@ import (
 //
 // An upgrade's agent died while gating, or before gating, the target it had
 // just started: container and tag are on the target, no rollback was armed,
-// the record is at `restarted`. Without this the record is reported
+// the record is at `restarted`, or still at `restarting` when the agent died
+// after `compose up` returned and before it recorded the restart. Without this the record is reported
 // (recovery_required/target_live_ungated) and the ungated target keeps
 // serving until an operator acts. With resume_interrupted_gate the converge
 // reconcile runs that gate now, on fresh facts, and either adopts the target
@@ -63,12 +64,11 @@ var (
 // condition is a reason the agent may vouch for an image it has not gated:
 //
 //   - the owner switched it on (resume_interrupted_gate, converge only);
-//   - an upgrade at `restarted`: the restart recorded the target's id, and
-//     did so only after checking the captured image carries the pinned digest
-//     (restartWithBarrier, F1). At `restarting` that write was lost: the
-//     identity is unknown and nothing is resumed;
-//   - container and tag are both, freshly read, on that id, which is also the
-//     id the validated TargetRef resolves to locally;
+//   - an upgrade at `restarted` or `restarting`, with the image identified on
+//     fresh facts (resumeIdentity): container, tag and the validated
+//     TargetRef on one id whose RepoDigests list the pinned digest, the check
+//     the restart itself makes before it records the id (F1). At `restarted`
+//     the recorded id must be that id; at `restarting` none is recorded yet;
 //   - this start did not find the agent dead inside a `compose up` of this
 //     operation: the restart itself is then in doubt (slice 4's ground);
 //   - no start but this one has seen the record since the gate began, and the
@@ -79,13 +79,14 @@ var (
 //
 // rollback_armed never gets here (decideByIdentityV2 decides it first).
 func resumeGateV2(in *reconcileInputsV2, ids v2ids) (reconcileVerdictV2, bool) {
-	switch {
-	case !in.ResumeEnabled, in.Kind != ops.KindUpgradeApply, in.Mode != "",
-		in.Phase != journal.PhaseRestarted, in.UpInterrupted, in.RollbackArmed:
+	if !in.ResumeEnabled || in.Kind != ops.KindUpgradeApply || in.Mode != "" || in.UpInterrupted || in.RollbackArmed {
 		return reconcileVerdictV2{}, false
-	case ids.tid == "" || ids.tid != ids.target || ids.run != ids.tid || ids.tag != ids.tid || !in.ContainerRunning:
+	}
+	id, ok := resumeIdentity(in, ids)
+	if !ok {
 		return reconcileVerdictV2{}, false
-	case in.ResumeAudited:
+	}
+	if in.ResumeAudited {
 		return verdictResumeRetire, true
 	}
 	c := in.Ck
@@ -96,19 +97,41 @@ func resumeGateV2(in *reconcileInputsV2, ids v2ids) (reconcileVerdictV2, bool) {
 		return verdictResumeNotBegun, true
 	}
 	switch {
-	case c.Step != journal.StepGateTarget, c.Result != "", normID(c.ImageID) != ids.tid,
+	case c.Step != journal.StepGateTarget, c.Result != "", normID(c.ImageID) != id,
 		c.Epoch != in.Seen-1, c.Attempts < 1, c.Attempts >= resumeMaxGateRuns:
 		return reconcileVerdictV2{}, false
 	}
 	return verdictResumeInterrupted, true
 }
 
+// resumeIdentity is the image a resumed gate may vouch for, from fresh facts:
+// the container runs it, the fixed tag is on it, the validated TargetRef
+// resolves to it locally, it is not the prior image, and its RepoDigests list
+// the record's pinned digest. At `restarted` the restart recorded it (and only
+// after that same digest check); at `restarting` the restart's write was lost,
+// so nothing may be recorded yet. Any other phase: none.
+func resumeIdentity(in *reconcileInputsV2, ids v2ids) (string, bool) {
+	t := ids.target
+	switch {
+	case t == "" || ids.run != t || ids.tag != t || t == ids.prior || !in.ContainerRunning:
+		return "", false
+	case !digestListed(in.RunningDigests, in.TargetDigest):
+		return "", false
+	case in.Phase == journal.PhaseRestarted && ids.tid == t:
+		return t, true
+	case in.Phase == journal.PhaseRestarting && ids.tid == "":
+		return t, true
+	}
+	return "", false
+}
+
 // resumeGate runs a resume_gate verdict. Nothing in Docker changes until the
 // gate has failed:
 //
 //  1. the checkpoint is written ahead, FAIL-CLOSED: gate:target on the
-//     target id, attempts raised, epoch = this start's interrupted_seen. No
-//     durable attempt, no gate;
+//     resumeIdentity id, attempts raised, epoch = this start's
+//     interrupted_seen. No durable attempt, no gate. The record's phase and
+//     TargetImageID are not rewritten;
 //  2. a fresh read that must still decide resume_gate, then a fresh
 //     production gate;
 //  3. a fresh read again, then container and tag by image id and the running
@@ -124,8 +147,10 @@ func (s *Server) resumeGate(ctx context.Context, c *reconcileCase, v reconcileVe
 		c.out.DockerReconciled = true
 		return s.retireIfServing(ctx, c)
 	}
+	id, _ := resumeIdentity(&c.in, idsOf(&c.in)) // decided resume_gate on these facts
+	c.resumeID = id
 	now := time.Now().UTC()
-	c.rec.BeginCheckpoint(journal.StepGateTarget, c.in.TargetImageID, now)
+	c.rec.BeginCheckpoint(journal.StepGateTarget, "sha256:"+id, now)
 	c.rec.LastReconcileAt = &now
 	c.rec.ReconcileDecision = v.Action.String() + "/" + v.Reason
 	if err := s.opts.Journal.Write(*c.rec); err != nil {
@@ -151,17 +176,14 @@ func (s *Server) resumeGate(ctx context.Context, c *reconcileCase, v reconcileVe
 	return s.retireIfServing(ctx, c)
 }
 
-// verifiedOnTarget re-reads Docker after a resumed gate passed: container and
-// fixed tag on the recorded target id, which the validated TargetRef still
-// resolves to, and the running image carries the record's target digest.
+// verifiedOnTarget re-reads Docker after a resumed gate passed: the same
+// resumeIdentity holds on the fresh facts, on the id the gate ran on.
 func (s *Server) verifiedOnTarget(ctx context.Context, c *reconcileCase) bool {
 	after := c.in
 	s.readReconcileFacts(ctx, c.rec, &after, false)
-	t := normID(after.TargetImageID)
 	c.out.RunningImage, c.out.PinnedTag = classOf(&after, after.RunningImageID), classOf(&after, after.TagImageID)
-	return after.DockerReadable && after.ContainerRunning && t != "" &&
-		normID(after.RunningImageID) == t && normID(after.TagImageID) == t && normID(after.TargetLocalID) == t &&
-		digestListed(after.RunningDigests, after.TargetDigest)
+	id, ok := resumeIdentity(&after, idsOf(&after))
+	return after.DockerReadable && ok && c.resumeID != "" && id == c.resumeID
 }
 
 // resumeFailed: the resumed gate (or its verify) failed. The result and
