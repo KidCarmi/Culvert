@@ -31,7 +31,7 @@ protected:
 
 amended:
   - id: AGT-900
-    reason: "Owner decision of 2026-11-24 (restore_prior), built as ADR-0062 slice 4 on #2051's plan executor and #2103's command attribution. With reconcile_on_startup = \"converge\", a start that finds no proxy container running for an upgrade at restarting or restarted, and that found the previous agent process died inside a `compose up` of that record's own operation, retags to the validated prior reference, runs `compose up` (once more if a fresh read shows nothing running), gates and verifies by image id before retiring the record. Until now that state was always recovery_required (stack_down): an outage until an operator acted (measured on real Docker at kill points 9-12). The invariant's 'or reports recovery_required and changes nothing' is reworded because a restore, like an armed rollback, that fails its gate has changed Docker and then reports. The earlier marker-based design (#2093) was parked after three independent reviews found wrong restores; the attribution it now rests on is per operation, taken once, never decisive on its own (ADR-0062 slice 4 obligations). Default stays off; owner_approved stays false."
+    reason: "Owner decision of 2026-11-24 (restore_prior), built as ADR-0062 slice 4 on #2051's plan executor and #2103's command attribution. With reconcile_on_startup = \"converge\", a start that finds no proxy container running for an upgrade at restarting or restarted, and that found the previous agent process died inside a `compose up` of that record's own operation, retags to the validated prior reference, runs `compose up` (once more if a fresh read shows nothing running), gates and verifies by image id before retiring the record. Until now that state was always recovery_required (stack_down): an outage until an operator acted (measured on real Docker at kill points 9-12). The invariant's 'or reports recovery_required and changes nothing' is reworded because a restore, like an armed rollback, that fails its gate has changed Docker and then reports. The earlier marker-based design (#2093) was parked after three independent reviews found wrong restores; the attribution it now rests on is per operation, taken once, never decisive on its own (ADR-0062 slice 4 obligations). An independent review found the attribution can outlive a `compose up` that returned while the state directory could not be written, so an operator's later `compose down` would have been undone (B1, reproduced). By the owner's decision of 2026-11-25 a restore also requires Docker's evidence of that death: a proxy service container (not a `compose run` one-off) in state created, listed through a new read-only `compose ps -a` sudoers rule. Without it, or without the rule, nothing is started and the record is reported. Default stays off; owner_approved stays false."
   - id: AGT-004
     reason: "Owner decision 1 on AGT-900 approved an opt-in startup reconcile (reconcile_on_startup = \"converge\", default \"off\"). \"Changes nothing in Docker\" and \"removes no journal record at startup\" now hold for the default \"off\" mode, which is unchanged and still pinned by the same tests; with \"converge\" the startup may retag to the recorded prior image, finish an armed rollback, and retire a record it verified converged, as AGT-900 states. Pulling at startup, and reporting an interrupted operation as succeeded, stay forbidden in both modes."
   - id: AGT-005
@@ -1058,13 +1058,15 @@ contracts:
     area: agent-lifecycle
     status: open
     owner_approved: false
-    invariant: "With reconcile_on_startup = \"converge\", after a crash during an image change, or after an image change that failed without proving its end state safe (its record kept, ADR-0062 slice 1), the next start either leaves the fixed tag and the proxy container on the same image, identified by image id as the pre-change image or as a target the journal proves passed its health gate and digest verify (and that answers ready now), or reports recovery_required. It changes Docker only to bring back the pre-change image (finishing an armed rollback, or restoring it when no proxy container runs and this agent start found the previous process died inside a `compose up` of that record's own operation), and a change that fails its gate or verification is kept and reported. It never starts an image that has not passed the health gate. With the default \"off\" it changes nothing (AGT-004)."
+    invariant: "With reconcile_on_startup = \"converge\", after a crash during an image change, or after an image change that failed without proving its end state safe (its record kept, ADR-0062 slice 1), the next start either leaves the fixed tag and the proxy container on the same image, identified by image id as the pre-change image or as a target the journal proves passed its health gate and digest verify (and that answers ready now), or reports recovery_required. It changes Docker only to bring back the pre-change image (finishing an armed rollback, or restoring it when no proxy container runs, this agent start found the previous process died inside a `compose up` of that record's own operation, and Docker still lists the never-started proxy service container such a death leaves), and a change that fails its gate or verification is kept and reported. It never starts an image that has not passed the health gate. With the default \"off\" it changes nothing (AGT-004)."
     authority: "Maintenance agent (cmd/culvert-maint). Owner decision 1 on the AGT-900 recovery proposal; lifecycle docs/adr/0061-maintenance-agent-crash-journal-lifecycle.md."
     code:
       - "cmd/culvert-maint/main.go"
       - "cmd/culvert-maint/internal/server/startup_reconcile.go"
       - "cmd/culvert-maint/internal/server/reconcile_decision_v2.go"
       - "cmd/culvert-maint/internal/runner/reconcile_read.go"
+      - "cmd/culvert-maint/internal/runner/runner.go"
+      - "packaging/sudoers/culvert-maint"
       - "cmd/culvert-maint/internal/journal/*.go"
     configs:
       - "cmd/culvert-maint/internal/config/config.go"
@@ -1077,7 +1079,7 @@ contracts:
         - "adopting, without any Docker change, a target recorded at phase verified that runs under the tag and answers ready"
         - "deferring, with no action and no attempt counted, while Docker cannot be read"
         - "retiring a record after verified convergence and an audit entry"
-        - "when no proxy container runs, the record is an upgrade at restarting or restarted (armed or not) and this agent start found that the previous process died inside a `compose up` of that record's own operation (taken once per process), retagging to the validated prior reference whose local image is the recorded prior, `compose up` (once more if a fresh read shows nothing running), each after a fresh Docker read that still decides it, then a fresh health gate and verification by image id"
+        - "when no proxy container runs, the record is an upgrade at restarting or restarted (armed or not), this agent start found that the previous process died inside a `compose up` of that record's own operation (taken once per process), and `compose ps -a` lists a proxy service container (not a `compose run` one-off) in state created, what that death leaves (read again before every Docker change up to the reconcile's own first `up`), retagging to the validated prior reference whose local image is the recorded prior, `compose up` (once more if a fresh read shows nothing running), each after a fresh Docker read that still decides it, then a fresh health gate and verification by image id"
       forbidden:
         - "adopting or restarting a target that never passed the health gate"
         - "pulling an image, `compose down`, or moving the tag to the target at startup"
@@ -1088,7 +1090,7 @@ contracts:
         - "finishing a rollback the journal does not prove armed, or an armed record at phase verified"
         - "retiring an armed record found on the prior image without a fresh ready probe"
         - "retiring an armed record after a realign (retag only) without a fresh ready probe of the prior"
-        - "starting any container when no proxy container runs unless this start found the agent died inside a `compose up` of that record's own operation; restoring over an upgrade at phase verified; restoring a prior that is not local and identical to the recorded one; restoring when the fixed tag is on an image other than the prior or the target"
+        - "starting any container when no proxy container runs unless this start found the agent died inside a `compose up` of that record's own operation and Docker lists a created proxy service container; restoring on the journal's attribution alone, on a `compose run` one-off, or when `compose ps -a` cannot be read or understood (for one, a sudoers file without its rule); restoring over an upgrade at phase verified; restoring a prior that is not local and identical to the recorded one; restoring when the fixed tag is on an image other than the prior or the target"
         - "acting on the command attribution more than once per process, or on the attribution alone without Docker's live state matching the record"
         - "flipping the interrupted operation to succeeded"
         - "reconciling while another agent process holds the instance lock"
@@ -1116,6 +1118,18 @@ contracts:
       - {file: "cmd/culvert-maint/restore_prior_converge_test.go", name: TestRestorePrior_CaseE_TheFirstStartWasInModeOff}
       - {file: "cmd/culvert-maint/restore_prior_converge_test.go", name: TestRestorePrior_CaseC_ARestoreWhoseUpReturnedIsNotACrash}
       - {file: "cmd/culvert-maint/restore_prior_converge_test.go", name: TestRestorePrior_ARestoreThatDiesInItsOwnUpIsRetriedOnce}
+      - {file: "cmd/culvert-maint/restore_prior_converge_test.go", name: TestRestorePrior_TheOperatorsComposeDownIsNotUndone}
+      - {file: "cmd/culvert-maint/restore_prior_converge_test.go", name: TestRestorePrior_WithoutTheSudoersRuleNothingIsRestored}
+      - {file: "cmd/culvert-maint/restore_prior_converge_test.go", name: TestRestorePrior_CaseB_TwoRecordsTheOlderDoesNothing}
+      - {file: "cmd/culvert-maint/restore_prior_converge_test.go", name: TestRestorePrior_CaseD_ClockBehindBeganChangesNothing}
+      - {file: "cmd/culvert-maint/internal/server/startup_reconcile_up_evidence_test.go", name: TestStartupReconcile_NoLeftoverNoRestore}
+      - {file: "cmd/culvert-maint/internal/server/startup_reconcile_up_evidence_test.go", name: TestStartupReconcile_UnreadableEvidenceNoRestore}
+      - {file: "cmd/culvert-maint/internal/server/startup_reconcile_up_evidence_test.go", name: TestStartupReconcile_EvidenceIsRecheckedBeforeTheFirstChange}
+      - {file: "cmd/culvert-maint/internal/server/startup_reconcile_up_evidence_test.go", name: TestStartupReconcile_EvidenceIsRecheckedBeforeTheFirstUp}
+      - {file: "cmd/culvert-maint/internal/server/startup_reconcile_up_evidence_test.go", name: TestStartupReconcile_StaleCloseThenOperatorDownIsNotRestored}
+      - {file: "cmd/culvert-maint/internal/server/startup_reconcile_up_evidence_test.go", name: TestStartupReconcile_AStaleOneOffIsNotEvidence}
+      - {file: "cmd/culvert-maint/internal/runner/proxy_leftover_test.go", name: TestProxyCreatedLeftover_OnlyACreatedProxyIsEvidence}
+      - {file: "cmd/culvert-maint/internal/runner/proxy_leftover_test.go", name: TestComposeStatusAll_IsReadOnly}
       - {file: "cmd/culvert-maint/internal/server/startup_reconcile_test.go", name: TestStartupReconcile_WriteAheadFailureMeansNoAction}
       - {file: "cmd/culvert-maint/internal/server/startup_reconcile_test.go", name: TestStartupReconcile_DockerChangedBeforeActionIsNotActedOn}
       - {file: "cmd/culvert-maint/startup_reconcile_finish_armed_test.go", name: TestConvergeRecovery_ArmedRollbackTagNeverMoved}
