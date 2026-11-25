@@ -174,6 +174,12 @@ const (
 	// could not be read, an action did not verify, or the deadline elapsed.
 	// Docker was not changed beyond what the op's result lists.
 	ReasonRecoveryRequired FailureReason = "recovery_required"
+	// ReasonCheckpointUnwritable marks an upgrade whose target gate could not
+	// be recorded as begun (ADR-0062 slice 3b): the gate is then treated as
+	// failed and the inline rollback runs. Distinct from health_failed so an
+	// operator can tell an unwritable state directory from an unhealthy
+	// target: the target may have been healthy.
+	ReasonCheckpointUnwritable FailureReason = "checkpoint_unwritable"
 )
 
 // NewID generates a fresh ULID for an op_id. Time-prefixed and
