@@ -170,6 +170,13 @@ type Record struct {
 	// byte-identical to what it was before the key existed.
 	RestoreStage RestoreStage `json:"restore_stage,omitempty"`
 
+	// Checkpoint is the most recent health gate's begin and end
+	// (checkpoint.go, ADR-0062 slice 3b). Absent on every record whose
+	// operation has not begun a gate, so such a record is byte-identical to
+	// before. An optional key, like RollbackArmed: an agent that predates it
+	// drops or carries it and never decides on it.
+	Checkpoint *Checkpoint `json:"checkpoint,omitempty"`
+
 	// Intent and Cut attribute an interruption to one docker command of this
 	// operation (intent.go). Absent on every record whose operation has not
 	// begun such a command.

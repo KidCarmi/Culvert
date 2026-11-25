@@ -96,6 +96,9 @@ type applyRig struct {
 	localTagRepoDigest bool
 	// onCommand, when set, observes every command at exec time.
 	onCommand func(argv []string)
+	// onProbe, when set, observes every health probe request, with the bare
+	// digest the world is running at that moment.
+	onProbe func(running string)
 
 	stop func()
 }
@@ -389,6 +392,9 @@ func startApplyRig(t *testing.T) *applyRig {
 func applyHealthClient(rig *applyRig) *http.Client {
 	return &http.Client{
 		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			if rig.onProbe != nil {
+				rig.onProbe(rig.currentRunning())
+			}
 			status := 200
 			if rig.healthFail.Load() || rig.isContainerDown() || rig.unhealthyDigests[rig.currentRunning()] {
 				status = 503

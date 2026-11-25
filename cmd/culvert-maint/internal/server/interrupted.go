@@ -131,6 +131,12 @@ type InterruptedOperation struct {
 	// that command.
 	DiedInCommand string `json:"died_in_command,omitempty"`
 
+	// GateCheckpoint is the record's most recent health gate (ADR-0062 slice
+	// 3b): which gate, on which image, how often begun, and how it ended ("" =
+	// it had not ended). Information only. Absent when the operation had not
+	// begun a gate.
+	GateCheckpoint *GateCheckpointReport `json:"gate_checkpoint,omitempty"`
+
 	// TerminalOutcome is set when the operation did NOT die: it ended
 	// ("failed:<failure_reason>") and its record was kept because it could not
 	// prove the state it left safe (ADR-0062 slice 1). It is reported, and
@@ -230,6 +236,7 @@ func DescribeInterrupted(rec *journal.Record, proxyRepo string) InterruptedOpera
 		out.TerminalOutcome, out.TerminalAt = rec.TerminalOutcome, rec.TerminalAt
 	}
 	out.DockerState = dockerStateOf(out.Kind, out.Mode, rec.Phase)
+	out.GateCheckpoint = reportGateCheckpoint(rec.Checkpoint)
 	if isRestoreRecord(out.Kind, out.Mode) {
 		out.setRestoreFacts(rec.RestoreStage)
 	}
