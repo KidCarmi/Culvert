@@ -227,12 +227,12 @@ func retryLoopClosesIt(t *testing.T) {
 	}
 	intentGone(t, r, "the retry loop")
 	// And the loop ends once there is nothing left to retry.
-	for (r.srv.intentRetryRunning.Load() || r.srv.staleIntents.Load()) && time.Now().Before(deadline) {
+	for (r.srv.intentRetryRunning.Load() || r.srv.staleIntents()) && time.Now().Before(deadline) {
 		time.Sleep(10 * time.Millisecond)
 	}
-	if r.srv.intentRetryRunning.Load() || r.srv.staleIntents.Load() {
+	if r.srv.intentRetryRunning.Load() || r.srv.staleIntents() {
 		t.Errorf("after the close was written: loop running=%v stale=%v, want both false",
-			r.srv.intentRetryRunning.Load(), r.srv.staleIntents.Load())
+			r.srv.intentRetryRunning.Load(), r.srv.staleIntents())
 	}
 }
 
@@ -255,7 +255,7 @@ func closeStopsTheRetryLoop(t *testing.T) {
 	if r.srv.intentRetryRunning.Load() {
 		t.Error("the retry loop is still running after Close")
 	}
-	r.srv.staleIntents.Store(true)
+	r.srv.failGen.Add(1)
 	r.srv.startIntentRetry()
 	if r.srv.intentRetryRunning.Load() {
 		t.Error("a retry loop was started after Close")
@@ -311,9 +311,48 @@ func TestCommandIntent_AFailureAsTheRetryLoopEndsIsStillRetried(t *testing.T) {
 	}
 	r.jnl.SetWriteErrorForTest(nil)
 	deadline := time.Now().Add(5 * time.Second)
-	for (r.intentOnDisk(t) != nil || r.srv.staleIntents.Load()) && time.Now().Before(deadline) {
+	for (r.intentOnDisk(t) != nil || r.srv.staleIntents()) && time.Now().Before(deadline) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	intentGone(t, r, "a failure as the retry loop was ending")
+	_ = r.srv.Close()
+}
+
+// TestCommandIntent_AFailureWhileASweepFinishesIsNotErased: a sweep has closed
+// everything and is about to say so; in that gap another operation's close
+// fails. The sweep's "all clear" must not erase that failure, or the retry
+// loop would stop, the pre-command sweep and Close would skip, and an idle
+// agent would never close the intent.
+func TestCommandIntent_AFailureWhileASweepFinishesIsNotErased(t *testing.T) {
+	r, ctx := intentRig(t)
+	r.srv.intentRetryStop = make(chan struct{})
+	r.srv.intentRetryEvery = 5 * time.Millisecond
+	var once sync.Once
+	r.srv.intentSweepClearHook = func() {
+		once.Do(func() {
+			// In the gap: an operation's command returns and its close fails.
+			// (The sweep holds sweepMu, not the journal's lock.)
+			r.jnl.SetWriteErrorForTest(nil)
+			if _, err := r.jnl.BeginCommand(testOpULID, journal.MutationComposeUp, time.Now().UTC()); err != nil {
+				t.Error(err)
+			}
+			r.jnl.SetWriteErrorForTest(errors.New("no space left on device"))
+			r.srv.endCommandIntent(testOpULID)
+			r.jnl.SetWriteErrorForTest(nil) // and then the disk recovers
+		})
+	}
+	// A first failed close, so that there is a sweep to finish.
+	if _, err := r.srv.markedMutation(ctx, journal.MutationComposeUp, func() (*runner.Result, error) {
+		r.jnl.SetWriteErrorForTest(errors.New("no space left on device"))
+		return &runner.Result{}, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	r.jnl.SetWriteErrorForTest(nil)
+	deadline := time.Now().Add(5 * time.Second)
+	for (r.intentOnDisk(t) != nil || r.srv.staleIntents()) && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	intentGone(t, r, "a failure while a sweep was finishing")
 	_ = r.srv.Close()
 }

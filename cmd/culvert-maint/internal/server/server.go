@@ -216,11 +216,12 @@ type Server struct {
 	// unfinished; startSettled is set once Docker showed that it is over
 	// (settle.go, mutation.go). settlePoll is how often Docker is asked.
 	mutations *journal.MutationLog
-	// staleIntents: a command intent's close could not be written and is being
-	// retried (mutation.go). intentRetryEvery is the retry period (0: default).
-	staleIntents       atomic.Bool
-	closeFailures      atomic.Uint64 // counts failed closes; see sweepStaleIntents
-	sweepMu            sync.Mutex    // one sweep at a time
+	// failGen / clearedGen: whether a command intent's close could not be
+	// written and is being retried (Server.staleIntents in mutation.go).
+	// intentRetryEvery is the retry period (0: default).
+	failGen            atomic.Uint64
+	clearedGen         atomic.Uint64
+	sweepMu            sync.Mutex // one sweep at a time
 	intentRetryRunning atomic.Bool
 	intentRetryEvery   time.Duration
 	intentRetryStop    chan struct{}
@@ -230,6 +231,9 @@ type Server struct {
 	// intentRetryExitHook, when set (tests only), runs as the retry loop ends,
 	// between its last check and marking itself stopped.
 	intentRetryExitHook func()
+	// intentSweepClearHook, when set (tests only), runs in a sweep that closed
+	// everything, just before it publishes that.
+	intentSweepClearHook func()
 
 	startHazard  bool
 	startOnlyUp  bool // a readable marker was found and names only `compose up`

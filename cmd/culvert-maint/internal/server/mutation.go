@@ -104,31 +104,36 @@ func (s *Server) endCommandIntent(opID string) {
 	}
 	if err := s.opts.Journal.EndCommand(opID); err != nil {
 		log.Printf("culvert-maint: WARN: could not close the command intent of op %s (retrying): %v", opID, err)
-		s.closeFailures.Add(1)
-		s.staleIntents.Store(true)
+		s.failGen.Add(1)
 		s.startIntentRetry()
 	}
 }
 
+// staleIntents reports whether a failed close may still be on disk.
+//
+// It is derived, not stored: failGen counts failed closes, clearedGen is the
+// failGen a sweep read BEFORE it closed everything. A close that fails at any
+// moment after that read makes failGen larger than anything a sweep can
+// publish, so no later write can erase it (no flag to overwrite, no window).
+// Found twice by review as a stored flag: once in the sweep, once at the
+// retry loop's exit.
+func (s *Server) staleIntents() bool { return s.failGen.Load() != s.clearedGen.Load() }
+
 // sweepStaleIntents closes what endCommandIntent could not. Safe beside a
 // running operation: the journal makes each close one atomic step.
 func (s *Server) sweepStaleIntents() {
-	if s.opts.Journal == nil || !s.staleIntents.Load() {
+	if s.opts.Journal == nil || !s.staleIntents() {
 		return
 	}
-	// One sweep at a time: a second caller waits and then sweeps for itself,
-	// so it never goes on while an intent it could have closed is still open.
+	// One sweep at a time, so clearedGen only ever moves forward.
 	s.sweepMu.Lock()
 	defer s.sweepMu.Unlock()
-	if !s.staleIntents.Load() {
-		return
-	}
-	// The flag is cleared only if no close has failed since the sweep began:
-	// one that fails while the sweep runs may have left an intent the sweep
-	// did not see.
-	failures := s.closeFailures.Load()
-	if left, err := s.opts.Journal.CloseStaleIntents(); err == nil && left == 0 && s.closeFailures.Load() == failures {
-		s.staleIntents.Store(false)
+	g := s.failGen.Load() // read BEFORE the sweep: see staleIntents
+	if left, err := s.opts.Journal.CloseStaleIntents(); err == nil && left == 0 {
+		if s.intentSweepClearHook != nil {
+			s.intentSweepClearHook() // tests only: the gap before the clear
+		}
+		s.clearedGen.Store(g)
 	}
 }
 
@@ -160,7 +165,7 @@ func (s *Server) startIntentRetry() {
 		t := time.NewTicker(every)
 		defer t.Stop()
 		s.sweepStaleIntents() // once at once: the failure may have been momentary
-		for s.staleIntents.Load() {
+		for s.staleIntents() {
 			select {
 			case <-s.intentRetryStop:
 				s.intentRetryRunning.Store(false)
@@ -177,7 +182,7 @@ func (s *Server) startIntentRetry() {
 		// found the loop still running and started none. Start one for it:
 		// otherwise an idle agent would never retry it. startIntentRetry
 		// refuses after Close, and Close waits for any loop it does start.
-		if s.staleIntents.Load() {
+		if s.staleIntents() {
 			s.startIntentRetry()
 		}
 	}()
