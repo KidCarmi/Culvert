@@ -8,6 +8,38 @@ workers/feeds/scanning/alerting.
 inferred without reading the code path. Failure modes were assessed against the project's stated
 posture — **default deny, fail closed when recovery is impossible, graceful degradation otherwise.**
 
+**2026-11-25 — `CHAOS-128` CLAIMED (placeholder, commit one). Domain: the
+SUPPORT-EVIDENCE UPLOAD DRAIN'S COMMIT ORDER — what happens to a consented
+bundle when the DURABLE WRITE that records its outcome fails. `finishUploadDrain`
+persists the post-attempt entry, treats a persist failure as LOG-ONLY and does
+NOT return (`support_upload_worker.go:83-85`), then unconditionally performs the
+two IRREVERSIBLE side effects that are only valid if that write landed: it
+deletes the sealed blob (`removeSealedUpload` → `os.Remove`,
+`support_upload_wire.go:241`) and writes the `support.bundle.upload` audit
+record claiming delivery, whose own comment asserts *"the receipt lives on the
+persisted queue entry"* (`support_upload_worker.go:93-95`) — the artifact that
+just failed to persist. On an ENOSPC/EROFS/EIO volume the durable entry still
+reads `queued, attempts=0, next_retry_at=0` with no `UploadID` and no
+`Receipt`, while the only copy of the bytes `BundleSHA256` was computed over is
+gone and the audit trail already says the evidence was delivered. The next
+attempt opens the deleted blob, gets a plain (non-`GatewayError`) ENOENT
+(`support_upload_wire.go:305-307`), is therefore classified TRANSIENT, burns the
+6-attempt budget and lands `deferred` with `last_error="open sealed bundle: no
+such file or directory"` — so the GUI/API and `support.bundle.upload_deferred`
+say the upload FAILED while `support.bundle.upload` says it SUCCEEDED, and the
+gateway's signed receipt, the only proof of delivery, is lost for good. The
+naive repair (return before the side effects) trades the integrity defect for an
+availability one, because the retained entry is immediately due again and the
+30 s worker (`supportUploadTick`) would re-send the whole bundle to the vendor
+every tick for as long as the volume stays unwritable: a local disk fault
+amplified into unbounded egress. Id claimed in this committed row before any
+code was written, per the convention below and checked against `origin/main`
+rather than the working tree per the 2026-09-25 amendment: `CHAOS-126` is the
+highest id anywhere on `origin/main` (at `f4f9379`), and open PR #2075
+(`feat(geoip): export the country database's freshness, and gate the class`)
+holds `CHAOS-127`, so this sweep takes 128 and will not move. Of the other open
+PRs none is a chaos sweep and none claims a chaos id.
+
 **2026-11-21 — `CHAOS-126` CLAIMED (placeholder, commit one). Domain: the
 OBSERVABILITY PLANE'S OWN LOSS ACCOUNTING — the OTLP SPAN BUFFER at a
 collector failure and at a restart. `SpanExporter.push` DRAINS the ring buffer
