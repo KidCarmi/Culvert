@@ -33,11 +33,20 @@ func checkUpstreamMTLSClientCert() []OperatorContractCheck {
 	const action = "CA Management → OCSP revocation shows the client certificate file, expiry and last load error. " +
 		"Replace the certificate and key files, then restart Culvert (client certificates are loaded at startup)."
 	if !mc.loaded {
+		failedAction := action
+		// The remedy differs while the deferred load is armed
+		// (mtls_client_cert_retry.go): fixing the files is enough. It is not
+		// armed for a one-sided configuration, which no file can repair.
+		if mtlsClientCertDeferredLoadPending() {
+			failedAction = "CA Management → OCSP revocation shows the client certificate file and the last load error. " +
+				"Put a readable certificate and its matching key at the configured paths. Culvert retries them automatically " +
+				"(every two minutes at most) and presents the certificate without a restart; a different path still needs the setting changed and a restart."
+		}
 		return []OperatorContractCheck{{
 			Code:           "upstream_mtls_client_cert",
 			Status:         diagWarn,
 			Message:        "upstream mTLS client certificate is configured but failed to load — upstream servers that require mutual TLS will reject this node",
-			OperatorAction: action,
+			OperatorAction: failedAction,
 		}}
 	}
 	if mc.notAfter.IsZero() {

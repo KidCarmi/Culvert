@@ -61,6 +61,13 @@ func loadBackgroundServices(cfg backgroundServicesStartupConfig, ctx context.Con
 	// Returns at once unless the startup load failed.
 	go startGeoIPLoadRetry(ctx)
 
+	// The upstream mTLS client certificate's deferred load: a configured
+	// client_cert_file/client_key_file pair that could not be loaded at
+	// startup is re-attempted on the same bounded backoff until it loads, or
+	// the node shuts down. It never re-reads a certificate that loaded.
+	// Returns at once unless the startup load failed.
+	go startMTLSClientCertLoadRetry(ctx)
+
 	// CHAOS-107: the ClamAV signature-generation observer. ClamAV definitions
 	// change out-of-process (freshclam), so the verdict cache can only be
 	// reconciled against them by ASKING on a cadence; nothing else in the

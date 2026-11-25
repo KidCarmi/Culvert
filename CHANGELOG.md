@@ -1295,6 +1295,27 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   agent ignores. Operator steps:
   `docs/operator/release-management-agent.md`.
 
+- **An upstream mTLS client certificate that could not be loaded at startup is
+  now loaded automatically once it becomes loadable, without a restart.** When
+  the configured `proxy.client_cert_file` / `proxy.client_key_file` pair was
+  missing, unreadable or mismatched at boot (a secret volume not mounted yet, a
+  certificate the issuer had not written, wrong ownership), upstream
+  connections carried no client certificate for the life of the process.
+  Upstreams that require mutual TLS rejected the node, and the
+  `upstream_mtls_client_cert` Diagnostics row said to replace the files *and
+  restart*. Culvert now re-attempts the same two configured paths on the
+  deferred audit-log cadence (10 s doubling to a 2-minute cap, with jitter, no
+  attempt limit) and records a `system`-attributed
+  `upstream_mtls.client_cert.auto_load` audit entry when the pair loads. New
+  upstream connections then present the certificate as after a restart. It is
+  not a rotation: a certificate that loaded at startup is never re-read, so an
+  expired or replaced file on such a node still needs a restart, and the
+  installation refuses when a client certificate is already in place. It never
+  tries another path, and does nothing when no certificate is configured or
+  only one of the two files is (a configuration error). The TLS floor is never
+  lowered: with OCSP checking on it stays TLS 1.3 until the next restart. No
+  configuration, settings or version change.
+
 - **A GeoIP database that could not be opened at startup is now loaded
   automatically once it becomes readable, without a restart.** When the
   configured `-geoip-db` / `proxy.geoip_db` file was missing, unreadable or
