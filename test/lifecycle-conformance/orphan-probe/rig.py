@@ -431,7 +431,18 @@ def judge(rec):
     if rec.get("drain") in HELD_DRAINS and "/stop" in (rec.get("last_request_daemon_saw") or ""):
         d = rec.get("drain_secs")
         least, about, what = HELD_DRAINS[rec["drain"]]
-        if d is None or d < least:
+        follow_at = rec.get("follow_started_after_s")
+        if rec["follow"] == "apply" and follow_at is not None:
+            # A follow-up apply recreates the proxy itself, so it ends the old
+            # container's drain: the drain then measures the follow-up, not the
+            # hold (6.2s and 5.9s in two runs, each a few tenths after
+            # follow_at). What this trial needs is that the hold kept the old
+            # container alive until the follow-up was admitted. A hold that did
+            # not work at all ends the drain right after the stop, long before
+            # follow_at, and is still invalid.
+            if d is None or d < follow_at:
+                return "INVALID", [f"the pending {what} did not hold the proxy's shutdown until the follow-up apply (old container gone after {d}s; follow-up at {follow_at}s)"]
+        elif d is None or d < least:
             return "INVALID", [f"the pending {what} did not hold the proxy's shutdown (old container gone after {d}s; expected about {about}s)"]
     if rec["follow"] in ("rollback", "apply") and not (op and op.get("admitted") and op.get("state") in ("succeeded", "failed")):
         # The trial is about what the next operation does. One that was refused,
