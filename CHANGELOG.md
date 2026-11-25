@@ -9,6 +9,30 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Fixed
 
+- **A support-evidence upload whose outcome could not be written to disk no
+  longer destroys the evidence or claims a delivery it cannot prove.** The
+  upload drain persisted the result of an attempt, logged a persist failure and
+  carried on to delete the sealed blob — the only copy of the bytes the
+  bundle's hash was computed over — and to write the `support.bundle.upload`
+  audit record. On a full, read-only or failing support volume that lost both
+  the evidence and the gateway's signed receipt (the appliance's only proof of
+  delivery) while the audit trail said the upload had succeeded; the next
+  attempt then opened the deleted blob, was misread as a transient network
+  failure, exhausted the retry budget, and left the queue entry `deferred` — so
+  the operator view and the audit trail asserted opposite outcomes for the same
+  bundle. The same lost write discarded the attempt counter and backoff, so the
+  bounded six-attempt ladder became a re-send every 30 s that could never reach
+  `deferred`. The persist is now authoritative: an outcome that did not reach
+  disk deletes nothing, audits nothing, and is held in memory — which also
+  stops the bundle being re-uploaded to the vendor on every tick while the
+  volume stays unwritable. It commits by itself as soon as a write succeeds,
+  with no operator action and no re-consent, and commits even while upload is
+  disabled (recording a transfer that already happened dials nothing). Two new
+  scrapeable series report the condition:
+  `culvert_support_upload_commit_held` (gauge) and
+  `culvert_support_upload_commit_held_total` (counter). If the process restarts
+  while an outcome is held the bundle is re-sent to obtain a receipt the
+  appliance can prove — see `docs/operator/secure-upload.md`.
 - **Restore now works on the Docker Compose deployment.** A restore commit
   swapped `/data` by renaming the directory itself, with its staging and
   backup directories beside it in `/`. In the shipped compose file `/data` is a
