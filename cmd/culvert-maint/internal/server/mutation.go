@@ -169,9 +169,16 @@ func (s *Server) startIntentRetry() {
 				s.sweepStaleIntents()
 			}
 		}
+		if s.intentRetryExitHook != nil {
+			s.intentRetryExitHook() // tests only: the gap between the check and the Store
+		}
 		s.intentRetryRunning.Store(false)
-		// A close that failed while this loop was ending is picked up by the
-		// pre-command sweep and by Close; a new loop is started by the next
-		// failed close.
+		// A close that failed between the loop's last check and the Store above
+		// found the loop still running and started none. Start one for it:
+		// otherwise an idle agent would never retry it. startIntentRetry
+		// refuses after Close, and Close waits for any loop it does start.
+		if s.staleIntents.Load() {
+			s.startIntentRetry()
+		}
 	}()
 }

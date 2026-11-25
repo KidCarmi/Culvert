@@ -227,6 +227,9 @@ type Server struct {
 	intentRetryMu      sync.Mutex    // guards intentRetryDone and the start/stop decision
 	intentRetryDone    chan struct{} // closed when the loop last started has ended
 	intentRetryOnce    sync.Once
+	// intentRetryExitHook, when set (tests only), runs as the retry loop ends,
+	// between its last check and marking itself stopped.
+	intentRetryExitHook func()
 
 	startHazard  bool
 	startOnlyUp  bool // a readable marker was found and names only `compose up`

@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -277,4 +278,42 @@ func TestCommandIntent_ComposeDownIsAttributedToo(t *testing.T) {
 	if in := r.intentOnDisk(t); in != nil {
 		t.Errorf("intent still on disk after `compose down` returned: %+v", in)
 	}
+}
+
+// TestCommandIntent_AFailureAsTheRetryLoopEndsIsStillRetried: the loop has
+// just closed everything and is ending; before it has marked itself stopped,
+// another close fails. That failure finds the loop "running" and starts none.
+// The ending loop must start one for it, or an idle agent would never retry
+// it and a later restart would read a death inside a command that returned.
+func TestCommandIntent_AFailureAsTheRetryLoopEndsIsStillRetried(t *testing.T) {
+	r, ctx := intentRig(t)
+	r.srv.intentRetryStop = make(chan struct{})
+	r.srv.intentRetryEvery = 5 * time.Millisecond
+	var once sync.Once
+	r.srv.intentRetryExitHook = func() {
+		once.Do(func() {
+			// In the gap: an operation's command returns and its close fails.
+			r.jnl.SetWriteErrorForTest(nil)
+			if _, err := r.jnl.BeginCommand(testOpULID, journal.MutationComposeUp, time.Now().UTC()); err != nil {
+				t.Error(err)
+			}
+			r.jnl.SetWriteErrorForTest(errors.New("no space left on device"))
+			r.srv.endCommandIntent(testOpULID)
+			r.jnl.SetWriteErrorForTest(nil) // and then the disk recovers
+		})
+	}
+	// Start a loop that will find nothing stale and end.
+	if _, err := r.srv.markedMutation(ctx, journal.MutationComposeUp, func() (*runner.Result, error) {
+		r.jnl.SetWriteErrorForTest(errors.New("no space left on device"))
+		return &runner.Result{}, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	r.jnl.SetWriteErrorForTest(nil)
+	deadline := time.Now().Add(5 * time.Second)
+	for (r.intentOnDisk(t) != nil || r.srv.staleIntents.Load()) && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	intentGone(t, r, "a failure as the retry loop was ending")
+	_ = r.srv.Close()
 }
