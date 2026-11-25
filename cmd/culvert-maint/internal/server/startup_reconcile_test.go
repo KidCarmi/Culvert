@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -32,11 +33,20 @@ type reconWorld struct {
 	running  string // image id hex; "" = no proxy container
 	pinned   string
 	mutating []string
+	tagRefs  []string // the exact reference of every `docker tag`
 	failed   map[*exec.Cmd]bool
 	psCount  int
 	onPS     func(n int)
-	down     bool   // Docker does not answer: every command fails
-	onUp     func() // called while `up` runs (outside the lock)
+	upStale  bool // `compose up` exits 0 without recreating the proxy
+	// priorRefGone: the prior's registry reference no longer resolves locally
+	// (an operator removed it); the image stays under the fixed tag.
+	priorRefGone bool
+	// failCmd ("tag" or "up") makes that command fail without effect;
+	// failedCalls counts how often it was issued.
+	failCmd     string
+	failedCalls int
+	down        bool   // Docker does not answer: every command fails
+	onUp        func() // called while `up` runs (outside the lock)
 }
 
 func (w *reconWorld) idFor(ref string) string {
@@ -45,7 +55,7 @@ func (w *reconWorld) idFor(ref string) string {
 		return w.pinned
 	case strings.HasPrefix(ref, "sha256:"):
 		return strings.TrimPrefix(ref, "sha256:")
-	case strings.HasSuffix(ref, "@sha256:"+digOld):
+	case strings.HasSuffix(ref, "@sha256:"+digOld) && !w.priorRefGone:
 		return cfgOld
 	case strings.HasSuffix(ref, "@sha256:"+digNew):
 		return cfgNew
@@ -93,6 +103,11 @@ func (w *reconWorld) start(cmd *exec.Cmd) error {
 		w.failed[cmd] = true
 		return nil
 	}
+	if w.failCmd != "" && has(w.failCmd) && !has("ps") && !has("inspect") {
+		w.failedCalls++
+		w.failed[cmd] = true
+		return nil
+	}
 	switch {
 	case has("ps"):
 		if w.running != "" {
@@ -109,10 +124,13 @@ func (w *reconWorld) start(cmd *exec.Cmd) error {
 		_, _ = cmd.Stdout.Write([]byte(`[{"Id":"sha256:` + id + `","RepoDigests":["` + repo + `@sha256:` + digestOf(id) + `"]}]`))
 	case has("tag"):
 		w.mutating = append(w.mutating, "tag:"+w.idFor(args[len(args)-2]))
+		w.tagRefs = append(w.tagRefs, args[len(args)-2])
 		w.pinned = w.idFor(args[len(args)-2])
 	case has("up"):
 		w.mutating = append(w.mutating, "up")
-		w.running = w.pinned
+		if !w.upStale {
+			w.running = w.pinned
+		}
 	}
 	return nil
 }
@@ -139,6 +157,24 @@ type reconRig struct {
 	al    *audit.Logger
 	world *reconWorld
 	rt    *ReconcileTracker
+	opts  Options      // to build the next agent process's server (restart)
+	ready *atomic.Bool // what /ready answers
+}
+
+// restart models the next agent start on the same state_dir, audit log and
+// Docker: the old server is closed (its instance lock released) and a new one,
+// with a fresh in-memory op manager and reconcile tracker, is built.
+func (r *reconRig) restart(t *testing.T) {
+	t.Helper()
+	_ = r.srv.Close()
+	r.mgr = ops.NewManager(nil)
+	r.opts.Ops = r.mgr
+	srv, err := New(r.opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = srv.Close() })
+	r.srv, r.rt = srv, NewReconcileTracker()
 }
 
 func newReconRig(t *testing.T, ready bool) *reconRig {
@@ -165,8 +201,10 @@ func newReconRig(t *testing.T, ready bool) *reconRig {
 	}
 	w := &reconWorld{running: cfgOld, pinned: cfgOld, failed: map[*exec.Cmd]bool{}}
 	rn.SetExecHooksForTest(w.start, w.wait)
+	rdy := &atomic.Bool{}
+	rdy.Store(ready)
 	hs := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, _ *http.Request) {
-		if !ready {
+		if !rdy.Load() {
 			rw.WriteHeader(http.StatusServiceUnavailable)
 			return
 		}
@@ -175,19 +213,20 @@ func newReconRig(t *testing.T, ready bool) *reconRig {
 	t.Cleanup(hs.Close)
 	hu, _ := url.Parse(hs.URL)
 	mgr := ops.NewManager(nil)
-	srv, err := New(Options{
+	opts := Options{
 		Cfg: &config.Config{ComposeProjectDir: tmp, ComposeFile: "docker-compose.yml", SocketPath: filepath.Join(tmp, "s.sock"),
 			StateDir: tmp, PrivilegeMode: config.PrivilegeSudoers, OperationTimeout: 30 * time.Second, StageTimeout: 5 * time.Second, ProxyRepo: repo},
 		Auth: pol, Audit: al, Ops: mgr, Status: &fakeStatus{}, StateDir: tmp, AuditPath: auditPath, Journal: jnl, Runner: rn,
 		HealthProbeFactory: func() health.Probe {
 			return health.Probe{BaseURL: hu, HealthPath: "/health", ReadyPath: "/ready", Budget: 300 * time.Millisecond, PollInterval: 50 * time.Millisecond}
 		},
-	})
+	}
+	srv, err := New(opts)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = srv.Close(); _ = al.Close() })
-	return &reconRig{srv: srv, jnl: jnl, mgr: mgr, al: al, world: w, rt: NewReconcileTracker()}
+	return &reconRig{srv: srv, jnl: jnl, mgr: mgr, al: al, world: w, rt: NewReconcileTracker(), opts: opts, ready: rdy}
 }
 
 // seed writes an interrupted upgrade record from cfgOld (digOld) to cfgNew (digNew).

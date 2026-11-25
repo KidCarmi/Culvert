@@ -60,6 +60,9 @@ func TestReconcileDecisionV2_FailureMatrix(t *testing.T) {
 		in.RunningImageID, in.TagImageID, in.Probe = idT, idT, probeReady
 	}
 	armed := func(in *reconcileInputsV2) { in.RollbackArmed = true }
+	probe := func(p probeState) func(*reconcileInputsV2) {
+		return func(in *reconcileInputsV2) { in.Probe = p }
+	}
 	standalone := func(in *reconcileInputsV2) {
 		in.Kind, in.Mode, in.Phase = ops.KindRollbackCreate, "image", journal.PhaseAdmitted
 		in.PriorRefPresent, in.PriorImageID, in.PriorLocalID = false, "", ""
@@ -84,17 +87,43 @@ func TestReconcileDecisionV2_FailureMatrix(t *testing.T) {
 		{"A10 verified T/T, TID=P (ambiguous)", all(verified, func(in *reconcileInputsV2) { in.TargetImageID = idP }), actV2RecoveryRequired, "verified_target_id_mismatch"},
 		{"A10 verified T/T, digest not listed", all(verified, func(in *reconcileInputsV2) { in.RunningDigests = nil }), actV2RecoveryRequired, "target_digest_unverified"},
 		{"A11 terminal success not retired (= A10)", verified, actV2Adopt, "verified_target_live"},
-		{"A11 terminal, rollback ok, P/P", all(ph(journal.PhaseRestarted), armed), actV2Noop, "already_on_prior"},
+		{"A11 terminal, rollback ok, P/P, ready", all(ph(journal.PhaseRestarted), armed, probe(probeReady)), actV2Noop, "armed_rollback_prior_ready"},
 		{"A11 terminal, tag left ahead P/T", runTag(idP, idT), actV2Realign, "tag_ahead_container_on_prior"},
 		{"R1 rb_pull T/T not armed", runTag(idT, idT), actV2RecoveryRequired, "target_live_ungated"},
-		{"R1 rb_pull T/T armed", all(runTag(idT, idT), armed), actV2RecoveryRequired, "rollback_armed_target_live"},
-		{"R1 rb P/T armed", all(runTag(idP, idT), armed), actV2Realign, "tag_ahead_container_on_prior"},
-		{"R1 rb P/P", armed, actV2Noop, "already_on_prior"},
+		{"R1 rb_pull T/T armed (Decision 1: finish)", all(runTag(idT, idT), armed), actV2RetagFinishRollback, "rollback_armed_tag_not_moved"},
+		{"R1 rb P/T armed (retag, then retire only on a fresh probe)", all(runTag(idP, idT), armed), actV2Realign, "armed_tag_ahead_container_on_prior"},
+		{"F12 P/T armed at restarting (AGT-002 tag-back failed)", all(ph(journal.PhaseRestarting), runTag(idP, idT), armed), actV2Realign, "armed_tag_ahead_container_on_prior"},
+		{"F12 P/T armed, the probe plays no part in the decision", all(runTag(idP, idT), armed, probe(probeNotReady)), actV2Realign, "armed_tag_ahead_container_on_prior"},
+		{"F12 P/T armed, prior not local", all(runTag(idP, idT), armed, func(in *reconcileInputsV2) { in.PriorLocalID = "" }), actV2RecoveryRequired, "prior_not_restorable"},
+		{"R1 rb P/P, ready", all(armed, probe(probeReady)), actV2Noop, "armed_rollback_prior_ready"},
 		{"R2 rb_restart after tag T/P armed", all(runTag(idT, idP), armed), actV2FinishRollback, "rollback_interrupted"},
 		{"R2 T/P without marker (older agent or operator)", runTag(idT, idP), actV2RecoveryRequired, "tag_on_prior_rollback_unproven"},
 		{"R2 T/P armed, prior not local", all(runTag(idT, idP), armed, func(in *reconcileInputsV2) { in.PriorLocalID = "" }), actV2RecoveryRequired, "prior_not_restorable"},
-		{"R3 rb_health P/P", armed, actV2Noop, "already_on_prior"},
+		{"R3 rb_health P/P, not ready", all(armed, probe(probeNotReady)), actV2RecoveryRequired, "armed_rollback_prior_not_ready"},
+		{"R3 rb_health P/P, probe not run", armed, actV2RecoveryRequired, "readiness_not_probed"},
 		{"R3 rb_verify T/P (ok_stale) armed", all(runTag(idT, idP), armed), actV2FinishRollback, "rollback_interrupted"},
+		// Owner Decision 1 (2026-11-23): finish an already-armed rollback whose
+		// tag never moved back ("T/T armed", real-Docker e2e finding 2), and
+		// every refusal around it.
+		{"F1 T/T armed at restarted: retag+up+gate+verify", all(runTag(idT, idT), armed), actV2RetagFinishRollback, "rollback_armed_tag_not_moved"},
+		{"F1 T/T armed at restarting (forward up failed after recreate)", all(ph(journal.PhaseRestarting), runTag(idT, idT), armed), actV2RetagFinishRollback, "rollback_armed_tag_not_moved"},
+		{"F1 T/T armed, the probe plays no part", all(runTag(idT, idT), armed, probe(probeNotReady)), actV2RetagFinishRollback, "rollback_armed_tag_not_moved"},
+		{"F2 T/T armed, prior not local", all(runTag(idT, idT), armed, func(in *reconcileInputsV2) { in.PriorLocalID = "" }), actV2RecoveryRequired, "prior_not_restorable"},
+		{"F2 T/T armed, PriorRef resolves to another id", all(runTag(idT, idT), armed, func(in *reconcileInputsV2) { in.PriorLocalID = idX }), actV2RecoveryRequired, "prior_not_restorable"},
+		{"F2 T/T armed, record has no PriorRef", all(runTag(idT, idT), armed, func(in *reconcileInputsV2) { in.PriorRefPresent, in.PriorLocalID = false, "" }), actV2RecoveryRequired, "prior_not_restorable"},
+		{"F2 T/T armed, record has no prior image id", all(runTag(idT, idT), armed, func(in *reconcileInputsV2) { in.PriorImageID = "" }), actV2RecoveryRequired, "prior_not_restorable"},
+		{"F3 T/T unarmed (older agent, or arm write failed)", all(runTag(idT, idT), ph(journal.PhaseRestarting)), actV2RecoveryRequired, "target_live_ungated"},
+		{"F4 T/T armed, refs failed validation", all(runTag(idT, idT), armed, func(in *reconcileInputsV2) { in.RefValid = false }), actV2RecoveryRequired, "invalid_record_ref"},
+		{"F5 T/T armed, attempts exhausted", all(runTag(idT, idT), armed, func(in *reconcileInputsV2) { in.Attempts = 2 }), actV2RecoveryRequired, "reconcile_exhausted"},
+		{"F6 T/T armed at verified (contradiction)", all(verified, armed), actV2RecoveryRequired, "rollback_armed_at_verified"},
+		{"F6 T/P armed at verified (contradiction)", all(verified, armed, runTag(idT, idP)), actV2RecoveryRequired, "rollback_armed_at_verified"},
+		{"F7 T/T armed, container stopped", all(runTag(idT, idT), armed, func(in *reconcileInputsV2) { in.ContainerRunning = false }), actV2RecoveryRequired, "container_not_running"},
+		{"F8 T/T armed, target not local", all(runTag(idT, idT), armed, func(in *reconcileInputsV2) { in.TargetLocalID = "" }), actV2RecoveryRequired, "target_not_identifiable"},
+		{"F8 T/T armed, target resolves to the prior", all(runTag(idT, idT), armed, func(in *reconcileInputsV2) { in.TargetLocalID = idP }), actV2RecoveryRequired, "target_equals_prior_ambiguous"},
+		{"F9 X/T armed (operator started something else)", all(runTag(idX, idT), armed), actV2RecoveryRequired, "docker_state_unrecognised"},
+		{"F9 T/X armed (operator moved the tag)", all(runTag(idT, idX), armed), actV2RecoveryRequired, "docker_state_unrecognised"},
+		{"F10 T/T armed, Docker unreadable", all(runTag(idT, idT), armed, func(in *reconcileInputsV2) { in.DockerReadable = false }), actV2Defer, "docker_unavailable"},
+		{"F11 standalone rollback T/T armed is never finished", all(standalone, runTag(idT, idT), armed), actV2RecoveryRequired, "rollback_target_partially_applied"},
 		{"S1 standalone rollback, tag never moved", standalone, actV2Noop, "rollback_never_moved_tag"},
 		{"S2 standalone rollback, tag on target", all(standalone, runTag(idP, idT)), actV2RecoveryRequired, "rollback_target_partially_applied"},
 		{"S3 standalone rollback, target live", all(standalone, runTag(idT, idT)), actV2RecoveryRequired, "rollback_target_partially_applied"},
@@ -347,6 +376,16 @@ func v2PropertyViolations(in *reconcileInputsV2, v reconcileVerdictV2, decide fu
 		if ids.tag != ids.prior || !in.RollbackArmed || ids.run != ids.target || ids.target == "" {
 			return "RV9 `up` only with the tag already on the prior image, after an armed rollback"
 		}
+		if in.Phase == journal.PhaseVerified {
+			return "RV9 an armed marker at phase verified contradicts the journal: never finished"
+		}
+	case actV2RetagFinishRollback:
+		if !in.RollbackArmed || in.Phase == journal.PhaseVerified {
+			return "RV12 a T/T finish only after an armed rollback the journal does not contradict"
+		}
+		if ids.target == "" || ids.target == ids.prior || ids.run != ids.target || ids.tag != ids.target {
+			return "RV12 a T/T finish only with container and tag provably on the distinct target"
+		}
 	case actV2Noop:
 		if ids.run == "" || ids.tag != ids.run {
 			return "RV10 noop only when tag and container agree"
@@ -355,8 +394,162 @@ func v2PropertyViolations(in *reconcileInputsV2, v reconcileVerdictV2, decide fu
 			return "RV10 never noop with the target live or under the tag"
 		}
 	}
+	if viol := v2ArmedOnPriorViolation(in, v, ids); viol != "" {
+		return viol
+	}
+	if viol := v2PlanViolations(in, v, decide, reconcilePlan); viol != "" {
+		return viol
+	}
 	if w := decide(flipV2Prefixes(*in)); w != v {
 		return "RV11 verdict must not depend on id/digest notation"
+	}
+	return ""
+}
+
+// v2ArmedOnPriorViolation: RV16. An armed record found with container and tag
+// on the prior image had a rollback `up` whose gate is not durable; it is
+// retired (noop) only on a fresh ReadyOK.
+func v2ArmedOnPriorViolation(in *reconcileInputsV2, v reconcileVerdictV2, ids v2ids) string {
+	upgradeDanger := in.Kind == ops.KindUpgradeApply && in.Mode == "" && !safeBoundary(in.Phase)
+	if v.Action == actV2Noop && upgradeDanger && in.RollbackArmed && in.Probe != probeReady {
+		return "RV16 an armed rollback found on the prior image is retired only on a fresh ReadyOK"
+	}
+	if v.Action == actV2Noop && upgradeDanger && in.RollbackArmed && (ids.run != ids.prior || ids.tag != ids.prior) {
+		return "RV16 an armed record is retired only with container and tag on the recorded prior"
+	}
+	return ""
+}
+
+// v2PlanViolations checks the steps an acting verdict executes (RV13-RV15) by
+// applying them symbolically to the Docker facts the verdict was decided on:
+// `docker tag <PriorRef>` makes the tag resolve to PriorRef's local id, and
+// `compose up` makes the container run what the tag resolves to.
+//
+//   - RV13 structure: every mutating step carries a recheck verdict that
+//     itself changes Docker; the first recheck is the verdict being executed;
+//     every `up` is immediately followed by the gate, and the gate follows
+//     nothing else; a plan has at most one `up` and at most one tag.
+//   - RV14 an `up` is only ever issued when its recheck decides
+//     finish_rollback and the tag is on the validated prior image id (the tag
+//     resolves to the record's prior id and so does the validated PriorRef).
+//   - RV15 closure: on the decided-on facts, each recheck is passed by the
+//     state this plan's own earlier steps leave (a plan never relies on a
+//     change it does not make), and the plan ends with container and tag on
+//     the prior image, the state verifiedOnPrior then requires. A T/T-armed
+//     finish tags exactly once, to PriorRef, before its `up`.
+func v2PlanViolations(in *reconcileInputsV2, v reconcileVerdictV2, decide func(reconcileInputsV2) reconcileVerdictV2,
+	plan func(reconcileVerdictV2) []reconcileStep) string {
+	steps := plan(v)
+	if (len(steps) > 0) != v.Action.mutatesDocker() {
+		return "RV13 exactly the verdicts that change Docker have steps"
+	}
+	if viol := v2PlanShape(steps, v); viol != "" {
+		return viol
+	}
+	cur := *in
+	prior := normID(in.PriorImageID)
+	for _, st := range steps {
+		if st.op.mutates() && decide(cur) != st.expect {
+			return "RV15 a recheck is not passed by the state the plan's own steps leave"
+		}
+		switch st.op {
+		case stepTagPrior:
+			cur.TagImageID = cur.PriorLocalID
+		case stepUp:
+			if st.expect != verdictFinishRollback || prior == "" || normID(cur.TagImageID) != prior || normID(cur.PriorLocalID) != prior {
+				return "RV14 an `up` only with the tag on the validated prior image id"
+			}
+			cur.RunningImageID, cur.ContainerRunning = cur.TagImageID, true
+		case stepProbe:
+			ready := cur
+			ready.Probe = probeReady
+			if decide(ready) != st.expect {
+				return "RV15 a ready prior does not pass the probe after the plan's own steps"
+			}
+		}
+	}
+	if len(steps) > 0 && (prior == "" || normID(cur.RunningImageID) != prior || normID(cur.TagImageID) != prior) {
+		return "RV15 an acting plan must leave container and tag on the prior image"
+	}
+	if v.Action == actV2RetagFinishRollback && (len(steps) == 0 || steps[0].op != stepTagPrior) {
+		return "RV15 a T/T-armed finish retags to PriorRef before anything else"
+	}
+	return v2ArmedRetireViolation(in, steps)
+}
+
+// v2ArmedRetireViolation: RV17. No acting plan retires an armed record without
+// a fresh ReadyOK of the prior: it ends with the gate after its `up`, or with
+// stepProbe expecting the armed-on-prior retirement.
+func v2ArmedRetireViolation(in *reconcileInputsV2, steps []reconcileStep) string {
+	if !in.RollbackArmed || len(steps) == 0 {
+		return ""
+	}
+	last := steps[len(steps)-1]
+	if last.op == stepGate || (last.op == stepProbe && last.expect == verdictArmedPriorReady) {
+		return ""
+	}
+	return "RV17 an armed record is retired only after a fresh readiness check of the prior"
+}
+
+// v2PlanShape is the structural half of RV13.
+func v2PlanShape(steps []reconcileStep, v reconcileVerdictV2) string {
+	ups, tags := 0, 0
+	for i, st := range steps {
+		switch st.op {
+		case stepTagPrior:
+			tags++
+		case stepUp:
+			ups++
+			if i+1 >= len(steps) || steps[i+1].op != stepGate {
+				return "RV13 every `up` is immediately followed by a fresh gate"
+			}
+		case stepGate:
+			if i == 0 || steps[i-1].op != stepUp {
+				return "RV13 a gate only right after an `up`"
+			}
+		case stepProbe:
+			if i != len(steps)-1 || ups > 0 {
+				return "RV13 a probe only as the last step of a plan that restarts nothing"
+			}
+		default:
+			return "RV13 a step outside the closed set"
+		}
+		if st.op.mutates() && !st.expect.Action.mutatesDocker() {
+			return "RV13 every mutation is guarded by a recheck of an acting verdict"
+		}
+	}
+	if ups > 1 || tags > 1 {
+		return "RV13 a plan restarts at most once and tags at most once"
+	}
+	if len(steps) > 0 && steps[0].expect != v {
+		return "RV13 the first recheck is the verdict being executed"
+	}
+	return ""
+}
+
+// v2ProbeViolation: the caller probes exactly when the probe can change the
+// verdict, and the probe can change it only towards adopt or the retirement of
+// an armed rollback found on the prior image: never towards a Docker change.
+func v2ProbeViolation(in *reconcileInputsV2) string {
+	c := *in
+	c.Probe = probeNotRun
+	without := reconcileDecisionV2(c)
+	c.Probe = probeReady
+	ready := reconcileDecisionV2(c)
+	if reconcileNeedsProbe(*in) != (ready != without) {
+		return "reconcileNeedsProbe inconsistent"
+	}
+	if ready != without {
+		ok := ready.Action == actV2Adopt || ready == (reconcileVerdictV2{actV2Noop, "armed_rollback_prior_ready"})
+		if !ok || without.Action != actV2RecoveryRequired {
+			return "the probe changed a verdict other than adopt / armed-on-prior retirement"
+		}
+	}
+	for _, p := range []probeState{probeNotRun, probeReady, probeNotReady} {
+		c.Probe = p
+		if v := reconcileDecisionV2(c); v.Action.mutatesDocker() != without.Action.mutatesDocker() || (v.Action.mutatesDocker() && v != without) {
+			return "the probe changed whether or how Docker is changed"
+		}
 	}
 	return ""
 }
@@ -376,8 +569,8 @@ func TestReconcileDecisionV2_ExhaustiveProperties(t *testing.T) {
 			}
 			fails++
 		}
-		if got := reconcileNeedsProbe(*in); got != (func() bool { c := *in; c.Probe = probeReady; return reconcileDecisionV2(c).Action == actV2Adopt }()) {
-			t.Errorf("reconcileNeedsProbe inconsistent for %+v", *in)
+		if viol := v2ProbeViolation(in); viol != "" {
+			t.Errorf("%s for %+v", viol, *in)
 			return false
 		}
 		return true
@@ -387,7 +580,11 @@ func TestReconcileDecisionV2_ExhaustiveProperties(t *testing.T) {
 	}
 	wantVerdicts := []string{
 		"noop/safe_boundary_unchanged", "noop/already_on_prior", "noop/rollback_never_moved_tag",
+		"noop/armed_rollback_prior_ready",
 		"realign/tag_ahead_container_on_prior", "finish_rollback/rollback_interrupted", "adopt/verified_target_live",
+		"realign/armed_tag_ahead_container_on_prior",
+		"finish_rollback_retag/rollback_armed_tag_not_moved",
+		"recovery_required/rollback_armed_at_verified", "recovery_required/armed_rollback_prior_not_ready",
 		"defer/docker_unavailable",
 		"recovery_required/data_window_manual", "recovery_required/restore_window_manual", "recovery_required/unknown_kind_or_mode",
 		"recovery_required/reconcile_exhausted", "recovery_required/container_not_running",
@@ -395,7 +592,7 @@ func TestReconcileDecisionV2_ExhaustiveProperties(t *testing.T) {
 		"recovery_required/tag_differs_from_running", "recovery_required/running_not_prior",
 		"recovery_required/invalid_record_ref", "recovery_required/stack_down",
 		"recovery_required/target_not_identifiable", "recovery_required/target_equals_prior_ambiguous",
-		"recovery_required/prior_not_restorable", "recovery_required/rollback_armed_target_live",
+		"recovery_required/prior_not_restorable",
 		"recovery_required/target_live_ungated", "recovery_required/verified_target_id_mismatch",
 		"recovery_required/target_digest_unverified", "recovery_required/verified_target_not_ready",
 		"recovery_required/readiness_not_probed", "recovery_required/tag_on_prior_rollback_unproven",
@@ -481,6 +678,9 @@ func TestReconcileDecisionV2_NegativeControls(t *testing.T) {
 			return reconcileDecisionV2(in)
 		},
 	}
+	for k, m := range v2ArmedFinishMutants() {
+		mutants[k] = m
+	}
 	for name, m := range mutants {
 		caught := ""
 		forEachV2Input(func(in *reconcileInputsV2) bool {
@@ -491,6 +691,121 @@ func TestReconcileDecisionV2_NegativeControls(t *testing.T) {
 			t.Errorf("mutant %q survived the property check", name)
 		} else {
 			t.Logf("mutant %q killed: %s", name, caught)
+		}
+	}
+}
+
+// v2Promote returns a mutant that answers the verdict of the input as changed
+// by mod whenever take accepts that verdict, and the real verdict otherwise.
+func v2Promote(mod func(*reconcileInputsV2), take func(reconcileVerdictV2) bool) func(reconcileInputsV2) reconcileVerdictV2 {
+	return func(in reconcileInputsV2) reconcileVerdictV2 {
+		c := in
+		mod(&c)
+		if v := reconcileDecisionV2(c); take(v) {
+			return v
+		}
+		return reconcileDecisionV2(in)
+	}
+}
+
+// v2ArmedFinishMutants are the decision mutants of owner Decision 1 (finish an
+// already-armed rollback): each one finishes, or retires, on evidence the
+// decision must refuse.
+func v2ArmedFinishMutants() map[string]func(reconcileInputsV2) reconcileVerdictV2 {
+	retag := func(v reconcileVerdictV2) bool { return v.Action == actV2RetagFinishRollback }
+	return map[string]func(reconcileInputsV2) reconcileVerdictV2{
+		"finish T/T when unarmed": v2Promote(func(c *reconcileInputsV2) { c.RollbackArmed = true }, retag),
+		"finish T/T at phase verified": v2Promote(func(c *reconcileInputsV2) {
+			if c.Phase == journal.PhaseVerified {
+				c.Phase = journal.PhaseRestarted
+			}
+		}, retag),
+		"finish T/T with an unverified prior image":              v2Promote(func(c *reconcileInputsV2) { c.PriorLocalID = c.PriorImageID }, retag),
+		"finish T/T from a record whose refs failed validation":  v2Promote(func(c *reconcileInputsV2) { c.RefValid = true }, retag),
+		"finish T/T past the attempt cap":                        v2Promote(func(c *reconcileInputsV2) { c.Attempts = 0 }, retag),
+		"finish an armed rollback with the tag on another image": v2Promote(func(c *reconcileInputsV2) { c.TagImageID = c.TargetLocalID }, retag),
+		"realign an armed record as if it were unarmed (no probe)": func(in reconcileInputsV2) reconcileVerdictV2 {
+			if v := reconcileDecisionV2(in); v == verdictRealignArmed {
+				return reconcileVerdictV2{actV2Realign, "tag_ahead_container_on_prior"}
+			}
+			return reconcileDecisionV2(in)
+		},
+		"retire an armed rollback on the prior without a ready probe": v2Promote(func(c *reconcileInputsV2) { c.Probe = probeReady },
+			func(v reconcileVerdictV2) bool { return v.Reason == "armed_rollback_prior_ready" }),
+	}
+}
+
+// TestReconcilePlan_NegativeControls: each mutant plan reintroduces one unsafe
+// step order the owner decision forbids for an acting verdict; the plan
+// properties (RV13-RV15) must catch every one somewhere in the bounded space.
+func TestReconcilePlan_NegativeControls(t *testing.T) {
+	retag := reconcileVerdictV2{actV2RetagFinishRollback, "rollback_armed_tag_not_moved"}
+	mutants := map[string]func(reconcileVerdictV2) []reconcileStep{
+		"T/T finish without the fresh gate": func(v reconcileVerdictV2) []reconcileStep {
+			if v == retag {
+				return []reconcileStep{{stepTagPrior, v}, {stepUp, verdictFinishRollback}}
+			}
+			return reconcilePlan(v)
+		},
+		"T/T finish: `up` before the retag": func(v reconcileVerdictV2) []reconcileStep {
+			if v == retag {
+				return []reconcileStep{{stepUp, v}, {op: stepGate}, {stepTagPrior, v}}
+			}
+			return reconcilePlan(v)
+		},
+		"T/T finish: `up` without the retag": func(v reconcileVerdictV2) []reconcileStep {
+			if v == retag {
+				return []reconcileStep{{stepUp, verdictFinishRollback}, {op: stepGate}}
+			}
+			return reconcilePlan(v)
+		},
+		"T/T finish: pre-up recheck expects the stale T/T verdict": func(v reconcileVerdictV2) []reconcileStep {
+			if v == retag {
+				return []reconcileStep{{stepTagPrior, v}, {stepUp, v}, {op: stepGate}}
+			}
+			return reconcilePlan(v)
+		},
+		"T/P finish: a second `up` after the gate": func(v reconcileVerdictV2) []reconcileStep {
+			if v == verdictFinishRollback {
+				return []reconcileStep{{stepUp, v}, {op: stepGate}, {stepUp, v}, {op: stepGate}}
+			}
+			return reconcilePlan(v)
+		},
+		"realign restarts": func(v reconcileVerdictV2) []reconcileStep {
+			if v.Action == actV2Realign {
+				return []reconcileStep{{stepTagPrior, v}, {stepUp, v}, {op: stepGate}}
+			}
+			return reconcilePlan(v)
+		},
+		"armed realign retires without the probe": func(v reconcileVerdictV2) []reconcileStep {
+			if v == verdictRealignArmed {
+				return []reconcileStep{{stepTagPrior, v}}
+			}
+			return reconcilePlan(v)
+		},
+		"armed realign probes before its retag": func(v reconcileVerdictV2) []reconcileStep {
+			if v == verdictRealignArmed {
+				return []reconcileStep{{stepProbe, verdictArmedPriorReady}, {stepTagPrior, v}}
+			}
+			return reconcilePlan(v)
+		},
+		"T/T finish stops after the retag": func(v reconcileVerdictV2) []reconcileStep {
+			if v == retag {
+				return []reconcileStep{{stepTagPrior, v}}
+			}
+			return reconcilePlan(v)
+		},
+	}
+	for name, m := range mutants {
+		caught := ""
+		forEachV2Input(func(in *reconcileInputsV2) bool {
+			caught = v2PlanViolations(in, reconcileDecisionV2(*in), reconcileDecisionV2, m)
+			return caught == ""
+		})
+		if caught == "" {
+			t.Errorf("mutant plan %q survived the plan properties", name)
+		} else {
+			t.Logf("mutant plan %q killed: %s", name, caught)
 		}
 	}
 }

@@ -155,6 +155,11 @@ func (s *Server) retireRecords(byOpID, actor, what string, retire func(*journal.
 			continue
 		}
 		retired = append(retired, rec.OpID)
+		// converge mode only (the tracker is nil otherwise): the startup
+		// reconcile's recovery_required for this record is now resolved.
+		if s.reconcileTracker != nil {
+			s.reconcileTracker.markSuperseded(rec.OpID, byOpID)
+		}
 	}
 	return retired
 }
