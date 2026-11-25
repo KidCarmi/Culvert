@@ -2133,6 +2133,7 @@ func (r *e2eRig) jcheck(label string) {
 	}
 	snap := r.e.snap()
 	present := map[string]map[string]interface{}{}
+	fences := map[string]bool{}
 	temps := 0
 	for _, en := range ents {
 		n := en.Name()
@@ -2140,6 +2141,18 @@ func (r *e2eRig) jcheck(label string) {
 		case n == ".lock":
 		case strings.HasPrefix(n, ".journal-") && strings.HasSuffix(n, ".tmp"):
 			temps++ // a write the kill interrupted; never read as a record
+		case n == e2eSchemaFence+".json" || n == e2eIntentFence+".json":
+			// A downgrade fence, not an operation (journal.List skips both by
+			// name). It must be a fence record; the intent fence is checked
+			// against the records' open intents below.
+			m := map[string]interface{}{}
+			if err := json.Unmarshal([]byte(readFile(filepath.Join(dir, n))), &m); err != nil || recStr(m, "phase") != "schema_fence" {
+				probs = append(probs, n+" is not a fence record")
+			}
+			if n == e2eSchemaFence+".json" {
+				probs = append(probs, "first-generation schema fence present (no newer agent ran here)")
+			}
+			fences[strings.TrimSuffix(n, ".json")] = true
 		case strings.HasSuffix(n, ".json"):
 			id := strings.TrimSuffix(n, ".json")
 			m := map[string]interface{}{}
@@ -2153,6 +2166,7 @@ func (r *e2eRig) jcheck(label string) {
 			probs = append(probs, "unexpected file "+n)
 		}
 	}
+	probs = append(probs, intentFenceProblems(label, present, fences[e2eIntentFence])...)
 	for id, h := range r.hist {
 		if _, ok := present[id]; !ok && !h.retired {
 			h.retired = true
@@ -2167,6 +2181,35 @@ func (r *e2eRig) jcheck(label string) {
 	}
 	r.res.check("J "+label, len(probs) == 0, "journal parses, monotonic, matches Docker, retired only with an audit entry", got)
 	r.res.gapCheck("OWNER J "+label+": audit 1:1", len(auditGaps) == 0, "kept: at most 1 `:reconciled` entry; retired: exactly 1", strings.Join(auditGaps, "; "))
+}
+
+// The journal's downgrade fences (journal/schema.go, journal/intent.go): files
+// in the journal directory that are not operations.
+const (
+	e2eSchemaFence = "00000000000000000000000000"
+	e2eIntentFence = "00000000000000000000000001"
+)
+
+// intentFenceProblems: the intent fence (ADR-0062 slice 3, #2103) is up for as
+// long as any record holds an open command intent, so an older agent never
+// starts on one. An open intent without the fence is always wrong. A fence
+// with no open intent is #2103's stated residual (a kill between "intent
+// removed" and "fence removed") and is allowed only right after the crash:
+// the next start releases it.
+func intentFenceProblems(label string, present map[string]map[string]interface{}, fenced bool) []string {
+	open := 0
+	for _, m := range present {
+		if _, ok := m["intent"]; ok {
+			open++
+		}
+	}
+	switch {
+	case open > 0 && !fenced:
+		return []string{fmt.Sprintf("%d open command intent(s) without the intent fence", open)}
+	case open == 0 && fenced && label != "after the crash":
+		return []string{"intent fence left up with no open intent"}
+	}
+	return nil
 }
 
 func (r *e2eRig) checkRecord(id string, m map[string]interface{}, snap dockerSnap) []string {
