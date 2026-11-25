@@ -81,8 +81,27 @@ func TestCompareBaseline_ReportsEveryKindOfChange(t *testing.T) {
 			b.Properties = append(b.Properties, BaselineProperty{ID: "ZZ", Verdict: VerdictPass})
 		}},
 		{"state space", "state space changed", func(b *Baseline) { b.Stats.States-- }},
-		{"properties file", "properties.json changed", func(b *Baseline) { b.PropsSHA256 = "0" + b.PropsSHA256[1:] }},
+		{"properties file", "properties.json changed", func(b *Baseline) {
+			// Change the first hex digit (a fixed "0" is no change when the sha starts with 0).
+			b.PropsSHA256 = map[bool]string{true: "1", false: "0"}[b.PropsSHA256[0] == '0'] + b.PropsSHA256[1:]
+		}},
 		{"reconcile table", "reconcile decision table changed", func(b *Baseline) { b.Reconcile.SHA256 = "x" }},
+		{"converge decision table", "converge (V2) decision table changed", func(b *Baseline) { b.ReconcileV2.SHA256 = "x" }},
+		{"converge verdict counts", "converge (V2) decision table changed", func(b *Baseline) {
+			b.ReconcileV2.VerdictCounts["finish_rollback_retag/rollback_armed_tag_not_moved"]++
+		}},
+		{"baseline from before the converge table", "converge (V2) decision table changed: baseline 0 inputs", func(b *Baseline) {
+			b.ReconcileV2 = ReconcileFingerprint{}
+		}},
+		{"crash vector armed marker", fmt.Sprintf("crash vector set changed: %d -> %d vectors, 1 removed, 1 added", nCrash, nCrash), func(b *Baseline) {
+			for i, l := range b.Crash {
+				if strings.Contains(l, "armed=true") {
+					b.Crash[i] = strings.Replace(l, "armed=true", "armed=false", 1)
+					return
+				}
+			}
+			t.Fatal("no crash vector with an armed record")
+		}},
 		{"reconcile action of a reason", "reconcile decision table changed", func(b *Baseline) {
 			k := "rollback_to_prior/indeterminate_restore_prior"
 			b.Reconcile.VerdictCounts["loud_stop/indeterminate_restore_prior"] = b.Reconcile.VerdictCounts[k]
@@ -215,6 +234,24 @@ func TestReconcileFingerprint_CoversActions(t *testing.T) {
 	}
 	if got := reconcileFingerprint(rv); got.SHA256 == base.SHA256 || sameCounts(got.VerdictCounts, base.VerdictCounts) {
 		t.Fatal("changing a reason's action left the reconcile fingerprint unchanged")
+	}
+}
+
+// The converge (V2) fingerprint changes when a single input's verdict changes, even to a
+// verdict that keeps the counts of every other verdict.
+func TestReconcileV2Fingerprint_CoversEveryInput(t *testing.T) {
+	rv := GenReconcileV2Vectors()
+	base := reconcileV2Fingerprint(rv)
+	b := []byte(rv.Expected)
+	for n := range b {
+		if rv.Verdict(n) == "finish_rollback_retag/rollback_armed_tag_not_moved" {
+			b[n] = rv.Expected[0] // any other verdict
+			break
+		}
+	}
+	rv.Expected = string(b)
+	if got := reconcileV2Fingerprint(rv); got.SHA256 == base.SHA256 || sameCounts(got.VerdictCounts, base.VerdictCounts) {
+		t.Fatal("changing one converge verdict left the V2 fingerprint unchanged")
 	}
 }
 
