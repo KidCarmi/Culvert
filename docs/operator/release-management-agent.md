@@ -201,10 +201,25 @@ and only then clears the entry (reconcile decision `restore_prior`). It does so
 only for an upgrade that had not passed its verification, only when that image
 is still local and identical to the one recorded, and only when the tag is on
 that image or on the upgrade's target. It never starts the upgrade's target.
+
+It also requires Docker to confirm the crash: `docker compose ps -a` must list a
+proxy container in state `created`, the never-started container Compose leaves
+when the process running its recreate dies. The journal alone is not enough: if
+the state directory could not be written (disk full, read-only) when a
+`compose up` finished, the entry still says the agent died inside it. Because a
+`compose down` removes that container, **a stack you took down on purpose is not
+started again**, whatever the entry says. The read uses its own sudoers rule
+(`docker compose -f <compose file> ps -a --format json`, read-only), installed
+with this version. If the rule is missing, or the listing cannot be read,
+nothing is restored and the entry is reported (reason `up_evidence_unreadable`).
+Without the container it is reported as `stack_down_no_up_evidence`.
+
 If any of that does not hold, or the restored proxy does not answer `/ready`,
 the entry stays with `recovery_required`. A restore that fails is tried at most
 once more, by the next start, and only if the agent died inside that restore's
-own `compose up`. With the default `"off"` nothing is started.
+own `compose up`. A start that cannot wait out its settle window, or that dies
+before the restore's own `compose up`, forfeits the restore: the entry is then
+only reported. With the default `"off"` nothing is started.
 
 For `indeterminate`:
 
@@ -412,7 +427,9 @@ Limits:
 
 - It does **not** mount `/var/run/docker.sock` into any container.
 - It does **not** open a network port on the agent.
-- It does **not** widen the sudoers allowlist or the agent's authz.
+- It does **not** widen the agent's authz, and adds to the sudoers allowlist
+  only fixed, path-bound commands (for `restore_prior`, one read-only
+  `compose ps -a` listing).
 
 ## Remote / multi-host Maintenance Agents
 

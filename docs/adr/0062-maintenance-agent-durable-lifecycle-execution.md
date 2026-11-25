@@ -333,6 +333,30 @@ gaps and make the #2051 executor the single path every recovery takes.
   operation, so a restore that dies in its own `up` is attributable once
   more; the attempt cap (2) ends it. A start that defers (Docker unreadable)
   has taken the attribution: the record is then reported, not restored.
+- **Docker's evidence (`restore_prior`, slice 4, after review B1).** The
+  attribution cannot tell a death inside `compose up` from a `compose up`
+  that returned while the state directory could not record it (disk full,
+  read-only, until the process ended): the open intent then outlives the
+  command, and an operator's later `compose down` would have been undone
+  (reproduced). A restore therefore also requires Docker to list, with a
+  read-only `compose ps -a` (its own sudoers rule), a proxy container in
+  state `created`: on real Docker every death inside `up` that left no proxy
+  running left one (kill points 9, 10 and the held 9), a `compose down`
+  removes it, and a `docker stop` never makes one. It is read only when the
+  attribution is set and no proxy container is listed, again before every
+  Docker change up to the reconcile's own first `up`, and not after it (that
+  `up` removes the container itself in Compose's tidy-only pass). Unreadable
+  or not understood (a sudoers file without the rule included) is never
+  evidence: `up_evidence_unreadable`; absent: `stack_down_no_up_evidence`.
+  Residuals that remain: an operator who changes nothing of the crashed stack,
+  or only stops containers, before the next start is still indistinguishable
+  from the crash, and is restored; an operator `compose down` and later `up`
+  between the reconcile's own `up` and its second `up` is the same TOCTOU
+  class as every other step. Liveness lost, all in the safe direction (the
+  record is reported): a start whose settle wait is cut short, a start that
+  dies after its write-ahead or its retag but before its own `up`, and one
+  that dies between its `up` and its second `up`, have each taken the
+  attribution.
 
 **Slice 5 — runtime observation (non-mutating).**
 - One loop, started like the op-log retention loop but tracked by

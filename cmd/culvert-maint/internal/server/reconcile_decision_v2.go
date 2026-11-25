@@ -258,6 +258,11 @@ func reconcileDecisionV2(in reconcileInputsV2) reconcileVerdictV2 {
 		return rr("reconcile_exhausted")
 	}
 	ids := idsOf(&in)
+	// A container that is listed but not running: paused or restarting.
+	// `compose ps` (without -a) does not list an exited or created one, so a
+	// proxy stopped with `docker stop` reads as no container at all and is
+	// decided as a stack that is down (stackDownV2), where an exited
+	// container is never evidence for a restore.
 	if ids.run != "" && !in.ContainerRunning {
 		return rr("container_not_running")
 	}
