@@ -12,7 +12,10 @@
 // The compose file bind-mounts a harness-owned directory at /ctl. While
 // /ctl/hang_ready exists, /ready writes /ctl/ready_hit and then stalls longer
 // than the agent's per-request timeout: that is how the harness lands a kill
-// inside the health gate deterministically. `app -probe` is the container
+// inside the health gate deterministically. While /ctl/fail_ready_<version>
+// exists, that version's /ready answers 503 (a target that passed its gate
+// and fails it when the gate is run again; the other images are unaffected).
+// `app -probe` is the container
 // healthcheck of the root-mode compose file (the image has no shell).
 //
 // The sudoers mode runs the SHIPPED docker-compose.yml, whose healthchecks and
@@ -54,7 +57,7 @@ func readyHandler(w http.ResponseWriter, _ *http.Request) {
 		_ = os.WriteFile("/ctl/ready_hit", []byte(version+"\n"), 0o644) // #nosec G306 -- test fixture
 		time.Sleep(10 * time.Second)
 	}
-	if ready != "ok" {
+	if _, err := os.Stat("/ctl/fail_ready_" + version); err == nil || ready != "ok" {
 		http.Error(w, "not ready ("+version+")", http.StatusServiceUnavailable)
 		return
 	}

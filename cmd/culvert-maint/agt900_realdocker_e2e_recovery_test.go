@@ -56,9 +56,12 @@ func e2eRecoveryCases(t *testing.T, e *e2eEnv) []e2eNamedCase {
 	verifyFailed := xp("realign", "post_verify_failed", []string{"tag:prior"}, "prior", "prior", false, "recovery_required", "recovery_required")
 	// `docker compose ps --format json` (the sudoers-bound read) lists running
 	// and paused containers but not exited ones, so a STOPPED proxy reads as no
-	// container at all (stack_down); the V2 row container_not_running is
-	// reached by a container compose still lists in another state: paused.
-	stopped := rrKeep("stack_down", "good", "prior")
+	// container at all; the V2 row container_not_running is reached by a
+	// container compose still lists in another state: paused. The kill is held
+	// at up_before:1, so `up` is attributed, and `compose ps -a` shows an
+	// exited (once started) container, not the never-started one a death
+	// inside `up` leaves: B1 (#2109) refuses to restore without that evidence.
+	stopped := rrKeep("stack_down_no_up_evidence", "good", "prior")
 	stopped.status = "exited"
 	paused := rrKeep("container_not_running", "good", "prior")
 	paused.status = "paused"

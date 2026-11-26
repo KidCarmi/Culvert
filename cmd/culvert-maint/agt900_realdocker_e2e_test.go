@@ -246,7 +246,7 @@ func (e *e2eEnv) ready() bool {
 // under the fixed tag, the target images are not local (the upgrade pulls).
 func (e *e2eEnv) reset() error {
 	_, _ = e.docker(e.composeArgs("down", "--remove-orphans")...)
-	for _, f := range []string{"hang_ready", "ready_hit"} {
+	for _, f := range []string{"hang_ready", "ready_hit", "fail_ready_prior", "fail_ready_good", "fail_ready_bad"} {
 		_ = os.Remove(e.ctlFile(f))
 	}
 	// A case may have edited the override (ok_stale pins an image in it).
@@ -468,6 +468,9 @@ type e2eRig struct {
 	// cfgExtra is appended to every agent config of this rig (a case-specific
 	// compose_override_file in root mode).
 	cfgExtra string
+	// resume: converge agents of this rig run with resume_interrupted_gate
+	// (ADR-0062 slice 7). A case may turn it off for one restart.
+	resume bool
 }
 
 func newE2ERig(t *testing.T, e *e2eEnv, name string) *e2eRig {
@@ -528,6 +531,9 @@ allow_peers = [%q]
 `, r.e.proj, p.sock, r.state, privMode, r.e.port, stageTimeout, regexp.QuoteMeta(r.e.repo), r.e.repo, strconv.Itoa(os.Geteuid()))
 	if mode == "converge" {
 		cfg += "reconcile_on_startup = \"converge\"\n"
+		if r.resume {
+			cfg += "resume_interrupted_gate = true\n"
+		}
 	}
 	if r.e.override != "" {
 		cfg += fmt.Sprintf("compose_override_file = %q\n", r.e.override)
@@ -1009,8 +1015,16 @@ func (p *agentProc) reconciledAudits(opID string) map[string]int {
 	_, _ = p.get("/v1/audit?limit=1000", &av)
 	n := map[string]int{}
 	for _, ev := range av.Events {
-		if ev.OpID == opID && strings.HasSuffix(ev.Kind, ":reconciled") && ev.Actor == "agent:reconcile" {
+		if ev.OpID != opID || ev.Actor != "agent:reconcile" {
+			continue
+		}
+		switch {
+		case strings.HasSuffix(ev.Kind, ":reconciled"):
 			n[ev.Outcome]++
+		case strings.HasSuffix(ev.Kind, ":resumed"):
+			// ADR-0062 slice 7: a resumed gate is audited under its own kind.
+			n[ev.Outcome]++
+			n["resumed:"+ev.Outcome]++
 		}
 	}
 	return n
@@ -1136,6 +1150,9 @@ type e2eExpect struct {
 	// (a converge that retags and then restarts the prior image). No current
 	// expectation sets it; see xTTArmed.
 	tagThenUp bool
+	// resumeFailed: this restart resumed the gate (ADR-0062 slice 7), the gate
+	// failed, and the rollback was finished in the same start.
+	resumeFailed bool
 }
 
 // xp builds an expectation with the defaults for the optional fields.
@@ -1190,6 +1207,8 @@ type e2eConverge struct {
 	// must hold right after the kill, before any mutation or restart: the
 	// evidence slice 7 will resume from.
 	ckpt *e2eCkpt
+	// resume: the rig's converge agents run with resume_interrupted_gate.
+	resume bool
 }
 
 // e2eCkpt is an expected gate checkpoint. image is the role ("good", "bad",
@@ -1197,6 +1216,7 @@ type e2eConverge struct {
 type e2eCkpt struct {
 	step, result, image string
 	absent              bool
+	attempts            int // 0 = 1
 }
 
 var (
@@ -1211,7 +1231,7 @@ func (c *e2eCkpt) String() string {
 	if c.absent {
 		return "absent"
 	}
-	return fmt.Sprintf("%s result=%q attempts=1 image=%s", c.step, c.result, c.image)
+	return fmt.Sprintf("%s result=%q attempts=%d image=%s", c.step, c.result, max(c.attempts, 1), c.image)
 }
 
 // roleOfID names the harness image an id (sha256:<hex> or bare) belongs to.
@@ -1230,6 +1250,10 @@ func (e *e2eEnv) roleOfID(id string) string {
 
 // assertCheckpoint compares the on-disk record's gate checkpoint with want.
 func (r *e2eRig) assertCheckpoint(res *e2eResult, opID string, want *e2eCkpt) {
+	r.assertCheckpointAt(res, opID, want, "CKPT gate checkpoint at the kill (ADR-0062 slice 3b)")
+}
+
+func (r *e2eRig) assertCheckpointAt(res *e2eResult, opID string, want *e2eCkpt, name string) {
 	if want == nil {
 		return
 	}
@@ -1241,7 +1265,7 @@ func (r *e2eRig) assertCheckpoint(res *e2eResult, opID string, want *e2eCkpt) {
 				recStr(c, "step"), recStr(c, "result"), c["attempts"], r.e.roleOfID(recStr(c, "image_id")))
 		}
 	}
-	res.check("CKPT gate checkpoint at the kill (ADR-0062 slice 3b)", got == want.String(), want.String(), got)
+	res.check(name, got == want.String(), want.String(), got)
 }
 
 func noop(dec, reason string) e2eExpect {
@@ -1428,6 +1452,9 @@ func (r *e2eRig) assertInvariants(res *e2eResult, opID string, x e2eExpect, deci
 	// Docker-converged: converged_not_retired changed Docker and verified it,
 	// but could not retire the record (its audit write failed).
 	dockerConverged := converged || outcome == "converged_not_retired"
+	// accepted: a target this start accepted as gated, by the journal's proof
+	// (adopt) or by running its interrupted gate again (resume_gate, slice 7).
+	accepted := converged && (decision == "adopt" || decision == "resume_gate")
 	pre := x.preRole() // the image that ran before the interrupted operation
 	// I1: the only Docker changes a reconcile may make: tag to the recorded
 	// prior reference; `up` only with the tag already on the prior image. Never
@@ -1450,8 +1477,10 @@ func (r *e2eRig) assertInvariants(res *e2eResult, opID string, x e2eExpect, deci
 		phase := recStr(o.recBefore, "phase")
 		img := e.class(o.after.Image)
 		ok := o.after.Tag == o.after.Image && o.after.Status == "running" && o.after.Ready &&
-			(img == pre || (decision == "adopt" && phase == "verified" && img == x.run))
-		res.check("I2 converged = same image, gated, ready", ok, "tag==run, running, ready, "+pre+"|verified target",
+			(img == pre || (decision == "adopt" && phase == "verified" && img == x.run) ||
+				(decision == "resume_gate" && (phase == "restarted" || phase == "restarting") && img == x.run &&
+					o.audits["resumed:succeeded"] == 1))
+		res.check("I2 converged = same image, gated, ready", ok, "tag==run, running, ready, "+pre+"|verified target|resumed target",
 			fmt.Sprintf("%s phase_before=%s", e.describe(o.after), phase))
 	} else {
 		// I3: anything else changes nothing in Docker. The one exception is a
@@ -1479,12 +1508,13 @@ func (r *e2eRig) assertInvariants(res *e2eResult, opID string, x e2eExpect, deci
 			}
 		}
 		ok := !started && o.after.ContainerID == o.before.ContainerID &&
-			((decision == "adopt" && converged) || outcome == "recovery_required")
-		res.check("I4 no ungated image started", ok, "no up, same container, adopt|recovery_required",
+			(accepted || outcome == "recovery_required")
+		res.check("I4 no ungated image started", ok, "no up, same container, adopt|resume_gate|recovery_required",
 			fmt.Sprintf("up=%v same_container=%v decision=%s outcome=%s", started, o.after.ContainerID == o.before.ContainerID, decision, outcome))
 		// OWNER (stricter than the contract, which only forbids STARTING one):
 		// no image that has not passed its health gate is left running.
-		gated := (decision == "adopt" && converged) || recStr(o.recBefore, "phase") == "verified"
+		// A resumed gate (ADR-0062 slice 7) gated it in this start.
+		gated := accepted || recStr(o.recBefore, "phase") == "verified"
 		res.gapCheck("OWNER no ungated image left running", gated, "no ungated target running after the reconcile",
 			fmt.Sprintf("%s runs (phase %s, outcome %s; already running before this restart: %v)",
 				img, recStr(o.recBefore, "phase"), outcome, o.before.ContainerID == o.after.ContainerID))
@@ -1494,6 +1524,7 @@ func (r *e2eRig) assertInvariants(res *e2eResult, opID string, x e2eExpect, deci
 	if e.class(o.after.Image) == "bad" {
 		res.check("I5 failed-gate image not accepted", outcome != "converged", "outcome != converged", outcome)
 	}
+	r.assertResume(res, x, decision, converged, o)
 	// I6: the interrupted op is never flipped.
 	res.eq("I6 interrupted op", "failed(agent_restart_interrupted)", o.opState)
 	// I7: retired iff converged, and only after an audit entry.
@@ -1542,6 +1573,7 @@ func (e *e2eEnv) runConvergeCase(t *testing.T, c e2eConverge) {
 		}
 		r = newE2ERig(t, e, c.name)
 		r.res = res
+		r.resume = c.resume
 		r.start("converge", "2m")
 		opID, how, err = r.crash(c.target, c.point)
 		if !errors.Is(err, errMissedWindow) {
@@ -1650,6 +1682,9 @@ type e2eKillSeq struct {
 	final                 e2eExpect
 	finals                int
 	finalAttempts         int // reconcile_attempts of a kept record after the finals
+	resume                bool
+	// finalCkpt, if set, is the record's gate checkpoint after the finals.
+	finalCkpt *e2eCkpt
 }
 
 func (s e2eKillSeq) expected() string {
@@ -1700,6 +1735,7 @@ func (e *e2eEnv) runKillSeq(t *testing.T, s e2eKillSeq, res *e2eResult) error {
 	}
 	r := newE2ERig(t, e, s.name)
 	r.res = res
+	r.resume = s.resume
 	r.start("converge", "2m")
 	opID, how, err := r.crash(s.target, s.crashAt)
 	if err != nil {
@@ -1782,6 +1818,9 @@ func (e *e2eEnv) runKillSeq(t *testing.T, s e2eKillSeq, res *e2eResult) error {
 	res.prefix = ""
 	if m := r.record(opID); m != nil {
 		res.eq("attempts at the end", strconv.Itoa(s.finalAttempts), strconv.Itoa(recInt(m, "reconcile_attempts")))
+	}
+	if s.finalCkpt != nil {
+		r.assertCheckpointAt(res, opID, s.finalCkpt, "CKPT gate checkpoint at the end")
 	}
 	return nil
 }
@@ -2068,6 +2107,14 @@ func TestAGT900RealDocker(t *testing.T) {
 		s := s
 		all = append(all, named{s.name, func() { e.caseKillSeq(t, s) }})
 	}
+	for _, c := range e2eResumeCases() {
+		c := c
+		all = append(all, named{c.name, func() { e.runConvergeCase(t, c) }})
+	}
+	for _, s := range e2eResumeKillSeqs() {
+		s := s
+		all = append(all, named{s.name, func() { e.caseKillSeq(t, s) }})
+	}
 	all = append(all,
 		named{"docker_unavailable_defers", func() { e.caseDockerDown(t, "docker_unavailable_defers", false) }},
 		named{"second_instance_skips", func() { e.caseDockerDown(t, "second_instance_skips", true) }},
@@ -2289,7 +2336,8 @@ func (r *e2eRig) checkAudit(present map[string]map[string]interface{}) (probs, g
 			probs = append(probs, fmt.Sprintf("audit line %d does not parse", i+1))
 			continue
 		}
-		if ev.Actor == "agent:reconcile" && strings.HasSuffix(ev.Kind, ":reconciled") && ev.Outcome == "succeeded" {
+		if ev.Actor == "agent:reconcile" && ev.Outcome == "succeeded" &&
+			(strings.HasSuffix(ev.Kind, ":reconciled") || strings.HasSuffix(ev.Kind, ":resumed")) {
 			reconciled[ev.OpID]++
 		}
 		if ev.Outcome == "failed" && ev.FailureReason == "agent_restart_interrupted" {
@@ -2362,5 +2410,94 @@ func e2eKillSeqs() []e2eKillSeq {
 		{name: "repeat_rr_stable", target: "good", crashAt: "up_after:1",
 			holds: []e2eHold{unchanged("ps_before:2", 0), unchanged("image_before:3", 0)},
 			final: rrKeep("target_live_ungated", "good", "good"), finals: 2, finalAttempts: 0},
+	}
+}
+
+// ── forward resumption (ADR-0062 slice 7) ────────────────────────────────────
+
+// assertResume: what a resumed gate must leave in the audit log. Resumed and
+// passed: exactly one succeeded `:resumed` entry and no `:reconciled` one.
+// Resumed and failed: one failed `:resumed` entry (the rollback that follows
+// is audited as reconciled). A rig without resume_interrupted_gate never
+// writes a `:resumed` entry.
+func (r *e2eRig) assertResume(res *e2eResult, x e2eExpect, decision string, converged bool, o *restartObs) {
+	ok, fail := o.audits["resumed:succeeded"], o.audits["resumed:failed"]
+	got := fmt.Sprintf("resumed succeeded=%d failed=%d, all succeeded=%d", ok, fail, o.audits["succeeded"])
+	switch {
+	case !r.resume:
+		res.check("S7 no :resumed entry with the switch off", ok == 0 && fail == 0, "none", got)
+	case decision == "resume_gate" && converged:
+		res.check("S7 resumed gate audited once as :resumed", ok == 1 && fail == 0 && o.audits["succeeded"] == 1,
+			"resumed succeeded=1 failed=0, all succeeded=1", got)
+	case x.resumeFailed:
+		res.check("S7 failed resumed gate audited", fail == 1 && ok == 0, "resumed failed=1 succeeded=0", got)
+	default:
+		res.check("S7 no gate resumed", ok == 0 && fail == 0, "none", got)
+	}
+}
+
+func xResumed(reason string) e2eExpect {
+	return xp("resume_gate", reason, []string{}, "good", "good", true, "done", "")
+}
+
+// failReadyGood: the target, which answered /ready when it was started, now
+// fails it; the prior image is unaffected.
+func failReadyGood(r *e2eRig, _ string) (string, error) {
+	return "the target's /ready now answers 503", os.WriteFile(r.e.ctlFile("fail_ready_good"), []byte("1\n"), 0o644) // #nosec G306 -- read by the fake proxy inside its container, which runs as another uid
+}
+
+// startOnceWithoutResume: a start with resume_interrupted_gate off sees the
+// record (it reports it) before the operator turns the switch on. That start
+// counts interrupted_seen, so the gate's evidence is no longer this start's.
+func startOnceWithoutResume(r *e2eRig, _ string) (string, error) {
+	r.resume = false
+	p := r.start("converge", "2m")
+	v, _, err := p.waitReconcile(e2eReconcTO)
+	r.killProc(p)
+	r.resume = true
+	if err != nil {
+		return "", err
+	}
+	got := "<none>"
+	if v.Reconcile != nil && len(v.Reconcile.Records) == 1 {
+		got = v.Reconcile.Records[0].Decision + "/" + v.Reconcile.Records[0].Reason
+	}
+	if got != "recovery_required/target_live_ungated" {
+		return "", fmt.Errorf("the start without resume decided %s", got)
+	}
+	return "one start with resume_interrupted_gate off reported it, then the switch was turned on", nil
+}
+
+// e2eResumeCases: the three record-and-report GAPs of slice 3b, with the
+// switch on, plus a gate that fails when resumed and a stale-evidence refusal.
+func e2eResumeCases() []e2eConverge {
+	xFailed := xTTArmed
+	xFailed.resumeFailed = true
+	return []e2eConverge{
+		{name: "rs_not_begun", target: "good", point: "up_after:1", resume: true,
+			expect: xResumed("target_gate_not_begun"), ckpt: ckNone},
+		{name: "rs_at_health_gate", target: "good", point: "ready@up_after:1", resume: true,
+			expect: xResumed("target_gate_interrupted"), ckpt: ckTargetOpen("good")},
+		{name: "rs_at_verify", target: "good", point: "ps_before:3", resume: true,
+			expect: xResumed("target_gate_interrupted"), ckpt: ckTargetOpen("good")},
+		{name: "rs_gate_fails_rolls_back", target: "good", point: "ready@up_after:1", resume: true, mutate: failReadyGood,
+			expect: xFailed, ckpt: ckTargetOpen("good")},
+		{name: "rs_refused_after_another_start", target: "good", point: "up_after:1", resume: true, mutate: startOnceWithoutResume,
+			expect: rrKeep("target_live_ungated", "good", "good"), ckpt: ckNone},
+	}
+}
+
+// e2eResumeKillSeqs: the resumed gate itself is SIGKILLed while it probes
+// /ready (held at the fresh read it makes after writing its checkpoint, ps:3).
+func e2eResumeKillSeqs() []e2eKillSeq {
+	held := e2eHold{point: "ready@ps_after:3", attempts: 0, docker: "unchanged"}
+	return []e2eKillSeq{
+		// an interrupted original plus one resumption: the cap is reached
+		{name: "rs_resumed_gate_killed_exhausts", target: "good", crashAt: "ready@up_after:1", resume: true,
+			holds: []e2eHold{held}, final: rrKeep("target_live_ungated", "good", "good"), finals: 2, finalAttempts: 0,
+			finalCkpt: &e2eCkpt{step: "gate:target", image: "good", attempts: 2}},
+		// a gate that never began gets a second run
+		{name: "rs_not_begun_killed_then_resumed", target: "good", crashAt: "up_after:1", resume: true,
+			holds: []e2eHold{held}, final: xResumed("target_gate_interrupted")},
 	}
 }
