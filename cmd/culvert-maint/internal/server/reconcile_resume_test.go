@@ -69,15 +69,26 @@ var resumeRegionBases = sync.OnceValue(func() []reconcileInputsV2 {
 // varies that only where no container runs (where it decided anything before
 // resume existed), but a container the cut `up` had already started runs.
 func forEachResumeVariant(base reconcileInputsV2, fn func(*reconcileInputsV2) bool) bool {
-	if !forEachResumeDims(base, fn) {
-		return false
-	}
+	return forEachResumeDims(base, fn) && forEachCutUpVariant(base, fn)
+}
+
+// forEachCutUpVariant: base's resume dimensions after a death inside the
+// operation's `compose up`, for every evidence value.
+func forEachCutUpVariant(base reconcileInputsV2, fn func(*reconcileInputsV2) bool) bool {
 	if base.UpInterrupted {
 		return true
 	}
-	cut := base
-	cut.UpInterrupted, cut.UpEvidence = true, upEvidencePresent
-	return forEachResumeDims(cut, fn)
+	// Every evidence value the agent can hold for a cut `up` with the
+	// container running: read with a never-started container left, read with
+	// none (Compose finished), unreadable, and not read.
+	for _, ev := range []upEvidence{upEvidencePresent, upEvidenceAbsent, upEvidenceUnreadable, upEvidenceNotRead} {
+		cut := base
+		cut.UpInterrupted, cut.UpEvidence = true, ev
+		if !forEachResumeDims(cut, fn) {
+			return false
+		}
+	}
+	return true
 }
 
 func forEachResumeDims(base reconcileInputsV2, fn func(*reconcileInputsV2) bool) bool {
@@ -135,8 +146,8 @@ func resumeViolation(in *reconcileInputsV2, decide func(reconcileInputsV2) recon
 	case in.Kind != ops.KindUpgradeApply || in.Mode != "" ||
 		(in.Phase != journal.PhaseRestarted && in.Phase != journal.PhaseRestarting):
 		return "RV19 resume_gate only for an upgrade at restarted or restarting"
-	case in.UpInterrupted:
-		return "RV19 never resume after a death inside the op's compose up"
+	case in.UpInterrupted && in.UpEvidence != upEvidenceAbsent:
+		return "RV19 after a death inside the op's compose up, resume only once Compose is shown finished (no never-started container)"
 	case in.RollbackArmed:
 		return "RV19 never resume an armed record"
 	case !in.DockerReadable || !in.ContainerRunning || ids.target == "" ||
@@ -194,6 +205,9 @@ func TestReconcileResume_ExhaustiveProperties(t *testing.T) {
 			seen[got.Action.String()+"/"+got.Reason]++
 			if got.Action == actV2ResumeGate {
 				seen["resume at "+string(in.Phase)]++
+				if in.UpInterrupted {
+					seen["resume after a cut up"]++
+				}
 			}
 			if viol := resumeViolation(in, reconcileDecisionV2); viol != "" {
 				if fails < 10 {
@@ -216,7 +230,7 @@ func TestReconcileResume_ExhaustiveProperties(t *testing.T) {
 	}
 	for _, w := range []string{"resume_gate/target_gate_interrupted", "resume_gate/target_gate_not_begun",
 		"resume_gate/resumed_not_retired", "recovery_required/target_live_ungated",
-		"resume at " + string(journal.PhaseRestarted), "resume at " + string(journal.PhaseRestarting)} {
+		"resume at " + string(journal.PhaseRestarted), "resume at " + string(journal.PhaseRestarting), "resume after a cut up"} {
 		if seen[w] == 0 {
 			t.Errorf("VACUOUS: verdict %q never produced", w)
 		}
@@ -240,7 +254,8 @@ func resumeMutants() []resumeMutant {
 	// loose: resumeGateV2 with id in place of resumeIdentity.
 	loose := func(id func(*reconcileInputsV2, v2ids) (string, bool)) func(*reconcileInputsV2, v2ids) (reconcileVerdictV2, bool) {
 		return func(in *reconcileInputsV2, ids v2ids) (reconcileVerdictV2, bool) {
-			if !in.ResumeEnabled || in.Kind != ops.KindUpgradeApply || in.Mode != "" || in.UpInterrupted || in.RollbackArmed {
+			if !in.ResumeEnabled || in.Kind != ops.KindUpgradeApply || in.Mode != "" || in.RollbackArmed ||
+				(in.UpInterrupted && in.UpEvidence != upEvidenceAbsent) {
 				return reconcileVerdictV2{}, false
 			}
 			t, ok := id(in, ids)
@@ -286,6 +301,13 @@ func resumeMutants() []resumeMutant {
 		{"ignores a death inside compose up", func(in *reconcileInputsV2, ids v2ids) (reconcileVerdictV2, bool) {
 			x := *in
 			x.UpInterrupted = false
+			return resumeGateV2(&x, ids)
+		}},
+		{"ignores the Compose evidence after a cut up", func(in *reconcileInputsV2, ids v2ids) (reconcileVerdictV2, bool) {
+			x := *in
+			if x.UpInterrupted {
+				x.UpEvidence = upEvidenceAbsent
+			}
 			return resumeGateV2(&x, ids)
 		}},
 		{"ignores the cap", func(in *reconcileInputsV2, ids v2ids) (reconcileVerdictV2, bool) {
@@ -339,12 +361,21 @@ func TestReconcileResume_NegativeControls(t *testing.T) {
 	for _, m := range mutants {
 		start := time.Now()
 		decide := decideWithResume(m.fn)
+		// Every base without a cut `up` first, then every cut variant: the
+		// same inputs as forEachResumeVariant, in an order that finds most
+		// mutants without walking the (four times larger) cut space.
 		caught := false
-		for _, base := range resumeRegionBases() {
-			if !forEachResumeVariant(base, func(in *reconcileInputsV2) bool {
-				caught = resumeViolation(in, decide) != ""
-				return !caught
-			}) {
+		probe := func(in *reconcileInputsV2) bool {
+			caught = resumeViolation(in, decide) != ""
+			return !caught
+		}
+		for _, walk := range []func(reconcileInputsV2, func(*reconcileInputsV2) bool) bool{forEachResumeDims, forEachCutUpVariant} {
+			for _, base := range resumeRegionBases() {
+				if !walk(base, probe) {
+					break
+				}
+			}
+			if caught {
 				break
 			}
 		}

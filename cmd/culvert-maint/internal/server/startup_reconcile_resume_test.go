@@ -385,3 +385,76 @@ func TestResume_UnwritableArmAfterAFailedGateIsReported(t *testing.T) {
 		t.Errorf("record = %+v, want it kept unarmed with the open checkpoint and one attempt spent", rec)
 	}
 }
+
+// TestResume_AfterADeathInsideItsOwnUp: the agent died inside the upgrade's
+// own `compose up`, which Docker had carried through: the target runs under
+// the tag, the record is at restarting (owner decision of 2026-11-26). The
+// gate is resumed only once `compose ps -a` shows Compose finished that
+// recreate (no never-started proxy container); a container left behind, or a
+// listing that cannot be read, leaves the record reported and Docker
+// unchanged.
+func TestResume_AfterADeathInsideItsOwnUp(t *testing.T) {
+	for _, tc := range []struct {
+		name               string
+		leftover, psAllErr bool
+		resumed            bool
+	}{
+		{"compose finished", false, false, true},
+		{"a never-started container is left", true, false, false},
+		{"the listing cannot be read", false, true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := newReconRig(t, true)
+			r.enableResume()
+			seedUngatedTT(t, r, 1, nil)
+			seedRestarting(t, r)
+			r.srv.SetCommandAttribution(map[string]string{testOpULID: journal.MutationComposeUp})
+			r.world.mu.Lock()
+			r.world.leftover, r.world.psAllFail = tc.leftover, tc.psAllErr
+			r.world.mu.Unlock()
+			got := r.run(t)
+			if c := r.world.calls(); len(c) != 0 {
+				t.Errorf("mutating calls = %v, want none", c)
+			}
+			if r.world.psAllCount == 0 {
+				t.Error("`compose ps -a` was never read")
+			}
+			if !tc.resumed {
+				if got.Decision != "recovery_required" || got.Reason != "target_live_ungated" {
+					t.Fatalf("result = %+v, want recovery_required/target_live_ungated", got)
+				}
+				if rec := r.recordOnDisk(t); rec == nil || rec.Checkpoint != nil {
+					t.Errorf("record = %+v, want it kept with no gate begun", rec)
+				}
+				return
+			}
+			if got.Decision != "resume_gate" || got.Reason != "target_gate_not_begun" || got.Outcome != OutcomeConverged {
+				t.Fatalf("result = %+v, want resume_gate/target_gate_not_begun converged", got)
+			}
+			if r.recordOnDisk(t) != nil {
+				t.Error("record not retired")
+			}
+			if n := auditEntries(t, r, ":resumed"); n[audit.OutcomeSucceeded] != 1 {
+				t.Errorf(":resumed entries = %v, want exactly one succeeded", n)
+			}
+		})
+	}
+}
+
+// TestResume_OffDoesNotReadTheComposeListingWithTheStackUp: with the switch
+// off, a death inside `compose up` with the proxy running reads nothing more
+// than before (an install whose sudoers file predates the read is unaffected).
+func TestResume_OffDoesNotReadTheComposeListingWithTheStackUp(t *testing.T) {
+	r := newReconRig(t, true)
+	seedUngatedTT(t, r, 1, nil)
+	seedRestarting(t, r)
+	r.opts.Cfg.ReconcileOnStartup = "converge"
+	r.srv.SetCommandAttribution(map[string]string{testOpULID: journal.MutationComposeUp})
+	got := r.run(t)
+	if got.Reason != "target_live_ungated" {
+		t.Fatalf("result = %+v, want target_live_ungated", got)
+	}
+	if r.world.psAllCount != 0 {
+		t.Errorf("`compose ps -a` read %d times with resume off, want 0", r.world.psAllCount)
+	}
+}
