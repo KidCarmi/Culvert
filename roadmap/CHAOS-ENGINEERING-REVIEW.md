@@ -8,6 +8,44 @@ workers/feeds/scanning/alerting.
 inferred without reading the code path. Failure modes were assessed against the project's stated
 posture — **default deny, fail closed when recovery is impossible, graceful degradation otherwise.**
 
+**2026-11-26 — `CHAOS-129` CLAIMED (placeholder, commit one). Domain: the
+CONTENT-SHAPE STAGE'S PRECONDITION — the two response blocks that decide from
+the first bytes of a body alone, and the scanner they were accidentally gated
+on. Archive magic bytes (F4) and Content-Type/magic polyglots (F5) consult no
+daemon, no rule set and no feed: F5 compares the type it detects against the
+header the ORIGIN itself sent, and `inspectMagicStage` is documented as running
+"before CDR and before any scanner" (`proxy_tunnel.go:1645`). That documented
+independence is true of their ORDER and false of their PRECONDITION. Both legs
+reached them only from INSIDE the scanner's buffering branch — plain HTTP
+behind `globalRemoteScanner.Enabled() || globalSecScanner.BodyScanEnabled()`
+(`proxy_http.go:321`, returning at `:331`), SSL-inspect behind
+`bodyNeedsBuffering(ct)` (`proxy_tunnel.go:1629`), which is false for EVERY
+content type unless a remote scanner, ClamAV, a loaded YARA rule set or
+DPI-on-text is active (`security_scan.go:273-287`) — so in the default posture
+NEITHER leg evaluated either block. Measured on the production function: the
+same ZIP body served as `Content-Type: text/plain` is **403 POLYGLOT_BLOCKED**
+with a clean ClamAV client configured and **200, forwarded**, without one. It
+also flipped at RUNTIME: `BodyScanEnabled` is
+`clam != nil || (yara != nil && yara.Loaded())`
+(`internal/secscan/secscan.go:516-523`) and deleting the last YARA rule through
+the admin API (`globalYARA.DeleteRule`, `ui_security.go:1335`) takes `Loaded()`
+false, so on a YARA-only node removing one malware rule turned both
+content-shape blocks off with no log line, no counter and no alert. A ClamAV
+daemon OUTAGE correctly does not do this — `clam` stays non-nil — so the stage
+survived the failure of the thing it never depended on and died of the
+configuration of it. A third arm was silent the same way: a response whose
+DECLARED length is past the scan window also returned early
+(`proxy_http.go:331`), so an origin could place a body outside both blocks by
+declaring it large, with scanning fully configured.** Id claimed in this
+committed row before any code was written, per the convention below and checked
+against `origin/main` rather than the working tree per the 2026-09-25
+amendment: `CHAOS-126` is the highest id anywhere on `origin/main` (at
+`a0aecf8`), and of the open PRs #2075 holds `CHAOS-127` and #2119 holds
+`CHAOS-128`, so this sweep took 129 and will not move. The round is recorded in
+[the dated review](../docs/engineering/CHAOS-ENGINEERING-REVIEW-2026-11-26.md).
+It does NOT narrow a prior row: `F4`/`F5` are recorded in the feature inventory
+as content blocks, and no chaos row had asked what their precondition was.
+
 **2026-11-21 — `CHAOS-126` CLAIMED (placeholder, commit one). Domain: the
 OBSERVABILITY PLANE'S OWN LOSS ACCOUNTING — the OTLP SPAN BUFFER at a
 collector failure and at a restart. `SpanExporter.push` DRAINS the ring buffer
