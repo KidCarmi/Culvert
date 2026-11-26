@@ -432,6 +432,92 @@ caught this was not the round's own.
 
 ---
 
+## 12. Adjacent planes: reported, not fixed
+
+Two planes were swept in parallel with the main domain and are recorded here
+rather than carried into the fix, because neither is this round's domain and
+each needs a design decision this round has no standing to make. Everything
+below was read at `a0aecf8` and verified in the source directly; where a worker
+investigation reached a stronger conclusion than the source supports, the
+correction is stated.
+
+**12.1 The startup window is signal-deaf, and the shutdown contract is void
+inside it.** `signal.Notify` appears exactly twice in the proxy binary
+(`main.go:1313`, `:1320`, both inside `installSignalHandlers`), and
+`installSignalHandlers` is called once, at `main.go:325` — the last statement
+before `runProxyUntilShutdown`. So for the whole of `main.go:203-324` SIGINT,
+SIGTERM and SIGHUP all carry the Go default: immediate process death, no
+`appLifecycleCancel`, no shutdown registry, no flush hooks. The admin UI is
+already serving in that window (`startAdminUI` at `:322` →
+`startUI`, `ui.go:187`, which spawns `serveAdminUIWithRetry` on a goroutine),
+as are the SOCKS5 listener (`:307`) and the background workers (`:306`). The
+proxy listener itself is NOT — `buildAndStartProxyServer` only constructs the
+server and `ListenAndServe` runs at `main.go:1362`, after the handlers, which
+is correct and load-bearing.
+
+What this costs is the flush, not the exit: a `docker stop` during a slow boot
+(CA load, GeoIP, badger opens, a ClamAV dial) kills the process without the late
+hooks that drain the audit CP-push queue, the audit/reqlog deferred-open
+backlogs and the log store's batching writer. The compose `stop_grace_period`
+contract and `TestChaos56_EnvelopeFitsTheContainerStopGrace` both assume the
+handlers are installed and therefore say nothing about this window; no test
+reaches it, because every shutdown test calls `installSignalHandlers` or drives
+an already-installed channel directly. SIGHUP is the sharper edge: before `:1320`
+it terminates rather than reloads, so an operator's habitual `kill -HUP` during a
+boot is a restart, and under `restart: unless-stopped` a silent one.
+
+*Correction to the worker investigation that produced this.* It reported the
+badger poison-marker window as the headline — that a startup-window kill inside
+`badger.Open` leaves a marker, and the next boot quarantines a healthy store.
+The mechanism is real (`internal/storeguard/storeguard.go:317`,
+`internal/catdb/resilient.go:46`), but it is not a defect: the trigger's own
+cause string is *"a previous start entered the store open and never returned, or
+returned it incomplete (corrupt table, **kill**, or out-of-memory)"*. A kill is
+named. The owner deliberately treats "died inside `Open`" as untrustworthy
+whatever killed it, because the process cannot tell a kill from a damaged table,
+and the quarantine renames rather than deletes. Recorded here so a later round
+does not re-report a reviewed decision as a finding.
+
+**12.2 The client-IP resolver has no hop or byte bound.**
+`Resolver.ClientIP` joins every `X-Forwarded-For` field line and splits on every
+comma with no cap (`internal/realclientip/realclientip.go:115-123`), then walks
+the hops with a `net.ParseIP` and an `ipInNets` per hop. It is reached pre-auth
+on the admin plane (`ui_auth.go`, `ui_middleware.go`, `ui_basic_auth.go`,
+`auth_state_client.go`). The bound is net/http's `MaxHeaderBytes`, which the
+admin server leaves at the 1 MiB default — so this is a per-request
+amplification (≈110 000 hops from a 1 MiB header), not unbounded growth, and it
+is reachable only when the peer IS a configured trusted proxy. That is the
+ordinary reverse-proxy deployment, where every external request arrives from the
+trusted peer and carries client-controlled headers. The codebase already
+identified this cost and fixed only the LOG paths, by deferring the call behind
+a rate gate (`request_tracing_bounds.go:212`, `proxy_host_bounds.go:294`,
+`session_revocation_bounds.go:124`); no bound was added inside the resolver, so
+the unconditional callers still pay it.
+
+The same sweep confirmed the resolver FAILS SAFE on the questions that matter
+more: an empty trusted set returns the direct peer and never reads XFF
+(`:98-100`), a non-trusted peer likewise (`:101-104`), malformed trust
+configuration is non-mutating and keeps the prior set, the hot-reload swaps a
+freshly built slice under the lock while readers hold a snapshot (`:41,52-54,95-97`),
+and hops are canonicalised before becoming a rate-limit key (`:133`) so two
+spellings of one address cannot fork the bucket. The proxy data plane does not
+consult the resolver at all (`proxy.go:1555` derives the IP from `RemoteAddr`),
+so admission, the rate limiter and the per-IP connection limiter are not
+XFF-spoofable.
+
+**12.3 One observation left for a future round, deliberately not rated.**
+`apiHealthz` (`ha.go:1548`) is registered unauthenticated on the admin mux as an
+LB probe (`diagnostics.go:2941`) and, for a standalone node, returns
+`{"status":"ok","role":"standalone","leader":true,"write_authority":true}`
+without consulting `shutdownStarted` — which the proxy port's own readiness
+surface does consult (`healthcheck.go:469`). Its documented consumer is a
+Data-Plane-facing load balancer choosing between Control Planes, not a
+proxy-traffic one, so whether reporting `ok` through a drain is wrong depends on
+a CP drain contract this round did not trace. Named so a round that owns that
+contract can settle it.
+
+---
+
 A passing local check is not a passing hosted review or merge gate. Nothing in
 this round authorises a policy, dependency, posture or deployment change beyond
 the two call sites and the stage described above.
