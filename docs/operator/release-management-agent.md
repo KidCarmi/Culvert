@@ -246,9 +246,14 @@ check again, on what it reads from Docker now:
   container, `culvert/proxy:pinned` and the upgrade's pinned reference all on
   one image now, that image carrying the pinned digest (the check the restart
   itself makes), and, if the restart got as far as recording the new image's
-  id, that same id; no armed rollback, and no death inside that upgrade's own
-  `compose up` (that case is `restore_prior` above). An image without the
-  pinned digest is not checked at all: the entry is reported;
+  id, that same id; and no armed rollback. An image without the pinned digest
+  is not checked at all: the entry is reported;
+- if the agent died inside that upgrade's own `compose up` (`died_in_command`),
+  only when the proxy is running and `docker compose ps -a` shows Compose
+  finished: no never-started proxy container left (with the proxy down, that
+  case is `restore_prior` above). If the listing cannot be read, for example
+  because the sudoers rule for `compose ps -a` is missing, nothing is checked
+  and the entry is reported;
 - only when no other agent start has seen the entry since that check began,
   and at most two checks begun per upgrade: a resumed check that is itself
   interrupted is not run again (one that never began before the crash gets

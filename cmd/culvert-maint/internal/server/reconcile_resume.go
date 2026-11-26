@@ -69,8 +69,12 @@ var (
 //     TargetRef on one id whose RepoDigests list the pinned digest, the check
 //     the restart itself makes before it records the id (F1). At `restarted`
 //     the recorded id must be that id; at `restarting` none is recorded yet;
-//   - this start did not find the agent dead inside a `compose up` of this
-//     operation: the restart itself is then in doubt (slice 4's ground);
+//   - if this start found the agent dead inside a `compose up` of this
+//     operation (owner decision of 2026-11-26): only once Compose is shown to
+//     have finished that recreate: the container runs (above) and `compose ps
+//     -a` lists no never-started proxy container (UpEvidence absent). Left
+//     behind, unreadable or not read: the restart is in doubt and nothing is
+//     resumed. The settle window is over before any of this is read;
 //   - no start but this one has seen the record since the gate began, and the
 //     cap is not reached. With a checkpoint: an open gate:target on the same
 //     id, epoch == interrupted_seen - 1 (the start counted before deciding),
@@ -79,7 +83,8 @@ var (
 //
 // rollback_armed never gets here (decideByIdentityV2 decides it first).
 func resumeGateV2(in *reconcileInputsV2, ids v2ids) (reconcileVerdictV2, bool) {
-	if !in.ResumeEnabled || in.Kind != ops.KindUpgradeApply || in.Mode != "" || in.UpInterrupted || in.RollbackArmed {
+	if !in.ResumeEnabled || in.Kind != ops.KindUpgradeApply || in.Mode != "" || in.RollbackArmed ||
+		(in.UpInterrupted && in.UpEvidence != upEvidenceAbsent) {
 		return reconcileVerdictV2{}, false
 	}
 	id, ok := resumeIdentity(in, ids)

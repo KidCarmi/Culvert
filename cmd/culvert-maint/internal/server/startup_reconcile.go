@@ -556,10 +556,16 @@ func (s *Server) readReconcileFacts(ctx context.Context, rec *journal.Record, in
 // readUpEvidence reads the Docker-side evidence of a death inside `compose up`
 // (reconcileInputsV2.UpEvidence), only where it can decide anything: an
 // upgrade this start attributed to such a death, with no proxy container
-// listed. Everywhere else it is not read, so an install whose sudoers file
-// predates the read issues it only when it would otherwise restore.
+// listed (restore_prior), or, with resume_interrupted_gate, with the proxy
+// container running (resume_gate needs Compose to have finished: no
+// never-started container left). Everywhere else it is not read, so an
+// install whose sudoers file predates the read issues it only when it would
+// otherwise restore or resume.
 func (s *Server) readUpEvidence(ctx context.Context, in *reconcileInputsV2, proxyListed bool) upEvidence {
-	if !in.UpInterrupted || proxyListed || in.Kind != ops.KindUpgradeApply || in.Mode != "" {
+	if !in.UpInterrupted || in.Kind != ops.KindUpgradeApply || in.Mode != "" {
+		return upEvidenceNotRead
+	}
+	if proxyListed && (!in.ResumeEnabled || !in.ContainerRunning) {
 		return upEvidenceNotRead
 	}
 	left, err := s.opts.Runner.ProxyCreatedLeftover(ctx)

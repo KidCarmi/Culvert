@@ -440,7 +440,8 @@ gaps and make the #2051 executor the single path every recovery takes.
   - when the checkpoint has no `image_id`: identity is unknown;
   - when this start's command attribution says the agent died inside that
     operation's `compose up`: the restart itself is in doubt, and a proxy
-    that is down is slice 4's `restore_prior`;
+    that is down is slice 4's `restore_prior`. Amended by the owner decision
+    of 2026-11-26 below: not when Compose is shown to have finished;
   - when `attempts` has reached the cap. `attempts` counts the original
     gate as one, so "gate begun, `failed` lost" (slice 3's residual) is
     resumed at most `cap - 1` times. That residual is the
@@ -524,6 +525,29 @@ gaps and make the #2051 executor the single path every recovery takes.
   - Everything else is unchanged: `interrupted_seen == 1` for a gate that
     never began, the epoch rule, the cap, a death inside `compose up`, an
     armed record.
+- **Second finding, and owner decision (2026-11-26).** That correction was
+  still not the owner's case. On real Docker, `up_done_unrecorded` is the
+  agent killed while its own `compose up` had not returned *to it*, although
+  Docker had finished the recreate: the start attributes a death inside
+  `compose up`, and the never-resume rule above refused it. Asked whether to
+  keep that rule (the case stays an operator's) or resume with proof that
+  Compose finished, the owner chose the second:
+  - after a death inside the operation's `compose up`, the gate is resumed
+    only when the proxy container **runs** the identified target (as for
+    any resume) **and** `compose ps -a` lists **no** never-started proxy
+    container (slice 4's evidence, `UpEvidence` absent). A container left in
+    `created`, a listing that cannot be read or is not allowed (a sudoers
+    file older than slice 4), or a listing not read, resumes nothing;
+  - the settle window is over before anything is read (as for every
+    reconcile), so a `compose up` the dead agent left running has had the
+    window to finish or to leave its evidence;
+  - the listing is read only where it can decide this: with
+    `resume_interrupted_gate` on and the proxy running. With the switch off
+    nothing more is read than before;
+  - why: the target is already serving, unchecked. Checking it, and rolling
+    back if it fails, is strictly better than leaving it; the evidence is
+    what keeps a recreate still in progress from being mistaken for one
+    that finished.
 
 ### Not doing
 
