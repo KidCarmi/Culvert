@@ -147,8 +147,14 @@ detect_distro() {
   case "$DISTRO_ID" in
     ubuntu|debian|linuxmint|pop)
       DISTRO_FAMILY="debian"
-      # Mint and Pop use Ubuntu repos
-      if [[ "$DISTRO_ID" == "linuxmint" || "$DISTRO_ID" == "pop" ]]; then
+      # Mint and Pop use Ubuntu repos — except Linux Mint Debian Edition
+      # (ID=linuxmint, ID_LIKE=debian, no UBUNTU_CODENAME), which is built on
+      # Debian and names its base in DEBIAN_CODENAME. Its VERSION_CODENAME is
+      # the Mint name (e.g. "faye"), which exists in neither Docker repo.
+      if [[ "$DISTRO_ID" == "linuxmint" && -z "${UBUNTU_CODENAME:-}" && -n "${DEBIAN_CODENAME:-}" ]]; then
+        DISTRO_ID="debian"
+        DISTRO_CODENAME="${DEBIAN_CODENAME}"
+      elif [[ "$DISTRO_ID" == "linuxmint" || "$DISTRO_ID" == "pop" ]]; then
         DISTRO_ID="ubuntu"
         # Map to Ubuntu codename
         DISTRO_CODENAME="${UBUNTU_CODENAME:-$DISTRO_CODENAME}"
