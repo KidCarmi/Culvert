@@ -312,6 +312,9 @@ func buildOperatorContract() OperatorContract {
 	// OTLP export enabled but its latest push was not delivered. Contributes
 	// nothing when export is off or the latest attempt succeeded.
 	checks = append(checks, checkOTLPExport()...)
+	// Saved auto-exclusion tunables / support retention refused at startup:
+	// defaults run instead. Contributes nothing until a load refuses one.
+	checks = append(checks, checkAdminSettingsRefusedAtLoad()...)
 	// Upstream pool managed document / config.yaml seed refused, or legacy
 	// migration abandoned: configured parents unpublished. Contributes nothing
 	// when none of the three is latched.
