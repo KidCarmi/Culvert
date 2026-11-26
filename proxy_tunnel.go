@@ -1625,9 +1625,19 @@ func inspectMagicStage(req *http.Request, br blockResponder, origBody io.ReadClo
 //     cacheable success); keeping it distinct is the fail-closed contract.
 func scanInspectBody(r, req *http.Request, resp *http.Response, br blockResponder, match *PolicyMatch, id ProxyIdentity, hostOnly string, dec *DecryptionBlock) scanBodyOutcome {
 	ct := resp.Header.Get("Content-Type")
-	// Tier 3.3/3.4: admin-managed host allowlists short-circuit buffering.
-	if globalScanExclusions.IsHostExcluded(hostOnly) || !bodyNeedsBuffering(ct) {
+	// Tier 3.3/3.4: admin-managed host allowlists short-circuit buffering —
+	// and, deliberately, the content-shape stage with it.
+	if globalScanExclusions.IsHostExcluded(hostOnly) {
 		return scanClean
+	}
+	// CHAOS-129: this arm used to `return scanClean` outright, which is how the
+	// two content-shape blocks below (inspectMagicStage) came to be gated on a
+	// scanner they do not use — bodyNeedsBuffering is false for every content
+	// type unless a remote scanner, ClamAV, a loaded YARA rule set or DPI-on-
+	// text is active. They are evaluated over a bounded prefix instead; see
+	// content_shape.go.
+	if !bodyNeedsBuffering(ct) {
+		return inspectContentShape(req, br, resp, match, hostOnly, id, dec)
 	}
 
 	origBody := resp.Body

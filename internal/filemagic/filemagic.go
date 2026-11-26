@@ -64,6 +64,47 @@ var knownMagicSigs = []Sig{
 	{0, []byte("#!"), "Script", ".sh", false}, // shell script
 }
 
+// ── Detection windows (CHAOS-129) ────────────────────────────────────────────
+//
+// Both windows are DERIVED from knownMagicSigs, never written down: adding a
+// signature moves them, and TestDetectionWindows_DeriveFromTable fails if a new
+// entry would fall outside the window a caller sized its buffer from.
+//
+// PrefixWindow is the number of leading bytes that suffice to evaluate every
+// signature whose magic sits at offset 0 — which is every entry in the table
+// except ISO9660, whose "CD001" lives at sector 16 (0x8001). MaxWindow is the
+// bytes the WHOLE table needs.
+//
+// The split exists because the two numbers are four orders of magnitude apart
+// (6 bytes against 32 774) and a caller that only wants the content-shape
+// verdict on a body nothing else will buffer should not retain 32 KiB per
+// in-flight response to reach one signature. Detect already skips any signature
+// longer than the data it is handed, so feeding it PrefixWindow bytes is sound
+// rather than merely cheap: it cannot misreport, only decline to match ISO9660.
+// Computed ONCE at package init, not per call: PrefixWindow is read on the
+// proxy response path for every body the content-shape stage sizes a buffer
+// for, and re-walking the table there would pay the derivation per response.
+var prefixWindow, maxWindow = func() (prefix, widest int) {
+	for i := range knownMagicSigs {
+		end := knownMagicSigs[i].Offset + len(knownMagicSigs[i].Magic)
+		if end > widest {
+			widest = end
+		}
+		if knownMagicSigs[i].Offset == 0 && end > prefix {
+			prefix = end
+		}
+	}
+	return prefix, widest
+}()
+
+// PrefixWindow returns the leading-byte count that evaluates every offset-0
+// signature. See the detection-window comment above.
+func PrefixWindow() int { return prefixWindow }
+
+// MaxWindow returns the byte count the whole signature table needs. See the
+// detection-window comment above.
+func MaxWindow() int { return maxWindow }
+
 // Detect examines the first bytes of data and returns the detected file
 // signature, or nil if no known signature matches.
 func Detect(data []byte) *Sig {

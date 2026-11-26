@@ -321,15 +321,25 @@ func scanHTTPResponseBody(w http.ResponseWriter, r *http.Request, resp *http.Res
 	scanActive := globalRemoteScanner.Enabled() || globalSecScanner.BodyScanEnabled()
 	// Tier 3.3: admin-managed host allowlist short-circuits the whole pipeline
 	// so known-good hosts (e.g. internal content mirrors) aren't buffered.
-	if scanActive && globalScanExclusions.IsHostExcluded(r.Host) {
-		scanActive = false
+	// CHAOS-129: it now has to be consulted even when no scanner is active,
+	// because the content-shape stage below is reached in that case too — and
+	// this exemption covers that stage as well, exactly as it does on the
+	// inspect leg (scanInspectBody). An excluded host is the ONE case that
+	// leaves this function without a shape verdict.
+	if globalScanExclusions.IsHostExcluded(r.Host) {
+		return false, nil
 	}
 	if scanActive && resp.ContentLength > globalSecScanner.MaxBytes() {
 		cip, _, _ := net.SplitHostPort(r.RemoteAddr)
 		logScanLimitExceeded(r.Host, cip, globalSecScanner.MaxBytes())
 	}
+	// CHAOS-129: both arms used to `return false, nil` — no scanner configured,
+	// and a declared length past the scan window — which is how the two
+	// content-shape blocks (archive magic, polyglot) came to be gated on a
+	// scanner they do not use. They are evaluated over a bounded prefix
+	// instead; see content_shape.go.
 	if !scanActive || (resp.ContentLength >= 0 && resp.ContentLength > globalSecScanner.MaxBytes()) {
-		return false, nil
+		return scanHTTPContentShape(w, r, resp, id)
 	}
 
 	// Buffer the scan window; if the body runs past it, the deferred overflow
@@ -367,26 +377,11 @@ func scanHTTPResponseBody(w http.ResponseWriter, r *http.Request, resp *http.Res
 		return true, nil
 	}
 
-	// F4: Archive magic byte detection — block archives even if the
-	// URL/Content-Disposition doesn't reveal the true format.
-	if archType := IsBlockedArchive(scanData); archType != "" {
-		cip, _, _ := net.SplitHostPort(r.RemoteAddr)
-		atomic.AddInt64(&statFileBlocked, 1)
-		atomic.AddInt64(&statBlocked, 1)
-		recordRequestAuthURI(cip, r.Method, r.Host, "FILE_BLOCKED", "magic:"+archType, "", id.Identity, "inspect", "", AuthLogFields{AuthSource: id.AuthSource})
-		logger.Printf("FILE_BLOCKED (magic) %s -> %q (type=%s)", cip, sanitizeLog(r.Host), archType)
-		serveBlockPage(w, r.Host+r.URL.Path, "File Block", "magic:"+archType)
-		return true, nil
-	}
-	// F5: Polyglot detection — block files whose Content-Type doesn't match
-	// their actual magic bytes (disguised executables).
-	if reason := CheckMagicVsContentType(scanData, resp.Header.Get("Content-Type")); reason != "" {
-		cip, _, _ := net.SplitHostPort(r.RemoteAddr)
-		atomic.AddInt64(&statFileBlocked, 1)
-		atomic.AddInt64(&statBlocked, 1)
-		recordRequestAuthURI(cip, r.Method, r.Host, "POLYGLOT_BLOCKED", reason, "", id.Identity, "inspect", "", AuthLogFields{AuthSource: id.AuthSource})
-		logger.Printf("POLYGLOT_BLOCKED %s -> %q (%s)", cip, sanitizeLog(r.Host), sanitizeLog(reason))
-		serveBlockPage(w, r.Host+r.URL.Path, "Polyglot Detection", reason)
+	// F4/F5: the two content-shape blocks — archive magic bytes and
+	// Content-Type/magic polyglots. Shared with the bounded shape-only path
+	// (content_shape.go) so the two cannot drift in what they count, log or
+	// serve; the bookkeeping is unchanged from when it was inline here.
+	if httpMagicStage(w, r, scanData, resp.Header.Get("Content-Type"), id) {
 		return true, nil
 	}
 
