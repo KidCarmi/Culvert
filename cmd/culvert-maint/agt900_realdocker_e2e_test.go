@@ -2443,7 +2443,7 @@ func xResumed(reason string) e2eExpect {
 // failReadyGood: the target, which answered /ready when it was started, now
 // fails it; the prior image is unaffected.
 func failReadyGood(r *e2eRig, _ string) (string, error) {
-	return "the target's /ready now answers 503", os.WriteFile(r.e.ctlFile("fail_ready_good"), []byte("1\n"), 0o644)
+	return "the target's /ready now answers 503", os.WriteFile(r.e.ctlFile("fail_ready_good"), []byte("1\n"), 0o644) // #nosec G306 -- read by the fake proxy inside its container, which runs as another uid
 }
 
 // startOnceWithoutResume: a start with resume_interrupted_gate off sees the
