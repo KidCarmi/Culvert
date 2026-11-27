@@ -393,6 +393,26 @@ gaps and make the #2051 executor the single path every recovery takes.
   `up_done_unrecorded`: an image that has not passed the gate is reported
   as `ungated`, and a late gate that passes makes it `gated`.
 
+- Implementation (2026-11-27, agent half; contract AGT-007):
+  - Off by default (`runtime_health_interval`, `1m`–`24h`): it is new
+    Docker and proxy traffic on every install, and an agent upgrade should
+    not start it unasked. Qualified on real Docker in its own PR before any
+    default changes.
+  - Identity is container id, its image id, running state and the fixed
+    tag's image id; the lock and the settle window are checked again after
+    the probe, so an operation that began during it discards the sample.
+  - `ungated` and `stale` are derived when status is read (the running
+    image from the status capture; three intervals without a reading); the
+    files hold only `gated`, `unhealthy` and `unknown`.
+  - An image is last-known-good only with a reference that passes the same
+    repo-bound exact-digest check and allowlist as an upgrade target. A
+    gated image without one is reported `gated`
+    (`gate_passed_no_validated_ref`) and recorded nowhere else.
+  - Status never carries the container id, as for `running_image`.
+  - Not yet: the main app's `/api/maintenance-agent` and its latched
+    alerts read `runtime_health` in a follow-up PR; the data-compatibility
+    evidence in `last_good.json` arrives with slice 6, which defines it.
+
 **Slice 6 — policy-driven runtime recovery (default off).**
 - A runtime finding becomes a **synthetic record** in the same journal
   (kind `runtime.recover`, schema 2), written fail-closed before anything

@@ -35,6 +35,7 @@ import (
 	"culvert-maint/internal/journal"
 	"culvert-maint/internal/ops"
 	"culvert-maint/internal/runner"
+	"culvert-maint/internal/runtimehealth"
 )
 
 // Version is the agent version string. Overridable at link time:
@@ -97,6 +98,42 @@ type Status struct {
 	// needs an operator; Reconcile is what the reconcile did, per record.
 	RecoveryRequired *bool            `json:"recovery_required,omitempty"`
 	Reconcile        *ReconcileStatus `json:"reconcile,omitempty"`
+
+	// RuntimeHealth is what the runtime health observer last saw (ADR-0062
+	// slice 5). Set only when runtime_health_interval is on.
+	RuntimeHealth *RuntimeHealthStatus `json:"runtime_health,omitempty"`
+}
+
+// RuntimeHealthStatus reports the runtime health evidence. State is one of
+// gated, ungated, unhealthy, unknown or stale (runtimehealth.Classify): the
+// latest sample as it relates to the image running now. Like RunningImage it
+// carries image ids and digests only, never a container id.
+type RuntimeHealthStatus struct {
+	State  string `json:"state"`
+	Reason string `json:"reason,omitempty"`
+	// ObservedAt and ImageID describe the latest kept sample; absent when
+	// there is none.
+	ObservedAt *time.Time `json:"observed_at,omitempty"`
+	ImageID    string     `json:"image_id,omitempty"`
+	Detail     string     `json:"detail,omitempty"`
+	// IntervalSeconds is the configured sampling interval.
+	IntervalSeconds int64 `json:"interval_seconds"`
+	// Error says why the evidence could not be read: State is then unknown.
+	Error string `json:"error,omitempty"`
+	// LastGood is the last image the production gate passed with its
+	// container and image unchanged across the probe. Absent when there is
+	// none. No unhealthy, unknown or stale observation removes it.
+	LastGood      *RuntimeLastGood `json:"last_good,omitempty"`
+	LastGoodError string           `json:"last_good_error,omitempty"`
+}
+
+// RuntimeLastGood is the last-known-good image.
+type RuntimeLastGood struct {
+	ImageID  string    `json:"image_id"`
+	Ref      string    `json:"ref"`
+	Digest   string    `json:"digest"`
+	PassedAt time.Time `json:"passed_at"`
+	Gate     string    `json:"gate"`
 }
 
 // PinnedTagStatus is the live state of the fixed proxy tag
@@ -187,6 +224,11 @@ type Options struct {
 	// HealthProbeFactory builds a fresh health.Probe per restore
 	// operation. May be nil in tests that don't exercise restore.
 	HealthProbeFactory func() health.Probe
+
+	// RuntimeHealth is the runtime health evidence store (ADR-0062 slice 5).
+	// The observer runs only when it is set, HealthProbeFactory and Runner
+	// are set, and Cfg.RuntimeHealthInterval is positive.
+	RuntimeHealth *runtimehealth.Store
 }
 
 // DefaultOpDrainTimeout is the shutdown drain window for in-flight orchestrator
@@ -274,6 +316,9 @@ type Server struct {
 	reconcileTracker *ReconcileTracker
 	reconcileLock    *journal.ReconcileLock
 	startupWork      func()
+
+	// observer is the runtime health observer's state (runtime_observer.go).
+	observer runtimeObserver
 }
 
 // New constructs a Server. Returns an error if any required option is
@@ -439,6 +484,11 @@ func (s *Server) Serve(ctx context.Context) error {
 		// goOp makes it part of the shutdown drain like any op.
 		s.goOp(work)
 	}
+	// The runtime health observer stops before the drain on either exit path
+	// below, so the drain never waits on it.
+	obsCtx, stopObserver := context.WithCancel(ctx)
+	defer stopObserver()
+	s.startRuntimeObserver(obsCtx)
 
 	// Shutdown on ctx done. The shutdown grace timer must be detached
 	// from ctx (which is already cancelled when this fires), so we
@@ -457,6 +507,7 @@ func (s *Server) Serve(ctx context.Context) error {
 	}()
 
 	drain := func() {
+		stopObserver()
 		if !s.drainOps() {
 			log.Printf("culvert-maint: shutdown drain deadline (%s) elapsed with ops still running; leaving for restart recovery", s.opDrainTimeout)
 		}

@@ -130,6 +130,18 @@ type Config struct {
 	// would change what their appliance does after a crash. Same GUI-parity
 	// deferral as ReconcileOnStartup.
 	ResumeInterruptedGate bool
+
+	// RuntimeHealthInterval is how often the runtime health observer samples
+	// the running proxy (ADR-0062 slice 5): it reads the container and the
+	// fixed tag, runs the production health probe, reads them again, and
+	// records what it saw under <state_dir>/health. It never begins an
+	// operation and never changes Docker. Zero (the default) turns it off:
+	// it is new, unqualified traffic to Docker and to the proxy, and turning
+	// it on for every install with an agent upgrade would change what an
+	// appliance does without anyone asking. Same GUI-parity deferral as
+	// ReconcileOnStartup; its result is surfaced read-only in GET /v1/status
+	// `runtime_health` (absent when off).
+	RuntimeHealthInterval time.Duration
 }
 
 // ReconcileMode is the closed set of reconcile_on_startup values.
@@ -185,6 +197,7 @@ type rawConfig struct {
 	AllowPeers          []string `toml:"allow_peers"`
 	ReconcileOnStartup  string   `toml:"reconcile_on_startup"`
 	ResumeInterrupted   bool     `toml:"resume_interrupted_gate"`
+	RuntimeHealth       string   `toml:"runtime_health_interval"`
 }
 
 const (
@@ -506,7 +519,38 @@ func validate(raw *rawConfig) (*Config, error) {
 	}
 	cfg.ResumeInterruptedGate = raw.ResumeInterrupted
 
+	if cfg.RuntimeHealthInterval, err = parseRuntimeHealthInterval(raw.RuntimeHealth); err != nil {
+		return nil, err
+	}
+
 	return cfg, nil
+}
+
+// Bounds of runtime_health_interval when it is on. The lower bound keeps a
+// sample (two Docker reads, a probe of up to its 30s budget, two more reads)
+// well inside one interval; the upper one keeps "stale" meaningful.
+const (
+	minRuntimeHealthInterval = time.Minute
+	maxRuntimeHealthInterval = 24 * time.Hour
+)
+
+// parseRuntimeHealthInterval reads runtime_health_interval. Absent, empty or
+// zero is off.
+func parseRuntimeHealthInterval(raw string) (time.Duration, error) {
+	if raw == "" {
+		return 0, nil
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil {
+		return 0, fmt.Errorf("config: runtime_health_interval is malformed: %w", err)
+	}
+	switch {
+	case d == 0:
+		return 0, nil
+	case d < minRuntimeHealthInterval || d > maxRuntimeHealthInterval:
+		return 0, fmt.Errorf("config: runtime_health_interval must be 0 (off) or between %s and %s, got %s", minRuntimeHealthInterval, maxRuntimeHealthInterval, d)
+	}
+	return d, nil
 }
 
 // validateReconcileMode maps reconcile_on_startup onto the closed set. Absent

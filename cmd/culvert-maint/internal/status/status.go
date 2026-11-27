@@ -29,6 +29,7 @@ import (
 	"culvert-maint/internal/journal"
 	"culvert-maint/internal/ops"
 	"culvert-maint/internal/runner"
+	"culvert-maint/internal/runtimehealth"
 	"culvert-maint/internal/server"
 )
 
@@ -51,6 +52,61 @@ type Provider struct {
 	// diedIn: op id → docker command the previous agent process died inside,
 	// as this agent start found it (WithDiedInCommand). Read-only after wiring.
 	diedIn map[string]string
+	// health is the runtime health evidence (ADR-0062 slice 5), and
+	// healthEvery its sampling interval. nil (runtime_health_interval off)
+	// adds nothing to the status.
+	health      *runtimehealth.Store
+	healthEvery time.Duration
+	// now overrides time.Now (tests).
+	now func() time.Time
+}
+
+// WithRuntimeHealth makes the provider report the runtime health evidence
+// (Status.RuntimeHealth). Only wired when runtime_health_interval is on.
+// Returns p.
+func (p *Provider) WithRuntimeHealth(st *runtimehealth.Store, every time.Duration) *Provider {
+	p.health, p.healthEvery = st, every
+	return p
+}
+
+// runtimeHealthStaleAfter: a sample older than this many intervals describes
+// the past, not the present.
+const runtimeHealthStaleAfter = 3
+
+// addRuntimeHealth fills Status.RuntimeHealth from the evidence files. It
+// reads files only, no Docker: the running image is the one composeSnapshot
+// already captured (absent when the stack is down or the capture failed).
+func (p *Provider) addRuntimeHealth(st *server.Status) {
+	if p.health == nil {
+		return
+	}
+	now := time.Now().UTC()
+	if p.now != nil {
+		now = p.now()
+	}
+	rh := &server.RuntimeHealthStatus{IntervalSeconds: int64(p.healthEvery / time.Second)}
+	running := ""
+	if st.RunningImage != nil {
+		running = st.RunningImage.ImageID
+	}
+	smp, err := p.health.ReadLatest()
+	if err != nil {
+		rh.State, rh.Reason, rh.Error = runtimehealth.StateUnknown, "evidence_unreadable", "the runtime health evidence could not be read"
+	} else {
+		rh.State, rh.Reason = runtimehealth.Classify(smp, running, now, runtimeHealthStaleAfter*p.healthEvery)
+		if smp != nil {
+			at := smp.ObservedAt
+			rh.ObservedAt, rh.ImageID, rh.Detail = &at, smp.ImageID, smp.Detail
+		}
+	}
+	lg, lerr := p.health.ReadLastGood()
+	switch {
+	case lerr != nil:
+		rh.LastGoodError = "the last-known-good record could not be read"
+	case lg != nil:
+		rh.LastGood = &server.RuntimeLastGood{ImageID: lg.ImageID, Ref: lg.Ref, Digest: lg.Digest, PassedAt: lg.PassedAt, Gate: lg.Gate}
+	}
+	st.RuntimeHealth = rh
 }
 
 // WithJournal makes the provider report the operations a previous agent
@@ -119,6 +175,7 @@ func (p *Provider) Snapshot(ctx context.Context) (server.Status, error) {
 	p.addInterrupted(&st)
 	p.addPinnedTag(ctx, &st)
 	p.addReconcile(&st)
+	p.addRuntimeHealth(&st)
 	return st, nil
 }
 

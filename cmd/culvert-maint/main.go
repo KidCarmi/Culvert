@@ -33,6 +33,7 @@ import (
 	"culvert-maint/internal/journal"
 	"culvert-maint/internal/ops"
 	"culvert-maint/internal/runner"
+	"culvert-maint/internal/runtimehealth"
 	"culvert-maint/internal/server"
 	"culvert-maint/internal/status"
 )
@@ -163,7 +164,7 @@ func run(configPath string) error {
 	}
 	stp.WithJournal(jnl).WithDiedInCommand(diedIn)
 
-	srv, err := newServer(cfg, pol, al, mgr, stp, r, auditPath, jnl, instLock)
+	srv, err := newServer(cfg, pol, al, mgr, stp, r, auditPath, jnl, instLock, openRuntimeHealth(cfg, stp))
 	if err != nil {
 		return fmt.Errorf("server: %w", err)
 	}
@@ -485,18 +486,19 @@ func reportInterrupted(jnl *journal.Journal, al *audit.Logger, rec *journal.Reco
 // newServer wires the agent HTTP server from its already-constructed
 // dependencies. Extracted from run() to keep that function within the funlen
 // budget; no behavior change.
-func newServer(cfg *config.Config, pol *auth.Policy, al *audit.Logger, mgr *ops.Manager, stp server.StatusProvider, r *runner.Runner, auditPath string, jnl *journal.Journal, lock *journal.ReconcileLock) (*server.Server, error) {
+func newServer(cfg *config.Config, pol *auth.Policy, al *audit.Logger, mgr *ops.Manager, stp server.StatusProvider, r *runner.Runner, auditPath string, jnl *journal.Journal, lock *journal.ReconcileLock, rh *runtimehealth.Store) (*server.Server, error) {
 	return server.New(server.Options{
-		InstanceLock: lock,
-		Cfg:          cfg,
-		Auth:         pol,
-		Audit:        al,
-		Ops:          mgr,
-		Status:       stp,
-		StateDir:     cfg.StateDir,
-		AuditPath:    auditPath,
-		Journal:      jnl,
-		Runner:       r,
+		RuntimeHealth: rh,
+		InstanceLock:  lock,
+		Cfg:           cfg,
+		Auth:          pol,
+		Audit:         al,
+		Ops:           mgr,
+		Status:        stp,
+		StateDir:      cfg.StateDir,
+		AuditPath:     auditPath,
+		Journal:       jnl,
+		Runner:        r,
 		HealthProbeFactory: func() health.Probe {
 			return health.Probe{
 				BaseURL:    cfg.HealthBaseURL,
@@ -506,6 +508,25 @@ func newServer(cfg *config.Config, pol *auth.Policy, al *audit.Logger, mgr *ops.
 			}
 		},
 	})
+}
+
+// openRuntimeHealth opens the runtime health evidence store when
+// runtime_health_interval is on (ADR-0062 slice 5) and has the status report
+// it. Like the idempotency store, a store that cannot be opened does not stop
+// the agent: the observer then does not run, and status says nothing about
+// runtime health, exactly as when it is off.
+func openRuntimeHealth(cfg *config.Config, stp *status.Provider) *runtimehealth.Store {
+	if cfg.RuntimeHealthInterval <= 0 {
+		return nil
+	}
+	st, err := runtimehealth.Open(cfg.StateDir)
+	if err != nil {
+		log.Printf("culvert-maint: WARN: the runtime health store could not be opened, so the observer does not run: %q", err.Error())
+		return nil
+	}
+	stp.WithRuntimeHealth(st, cfg.RuntimeHealthInterval)
+	log.Printf("culvert-maint: runtime health observer on, every %s", cfg.RuntimeHealthInterval)
+	return st
 }
 
 // opLogRetentionInterval is how often the per-op transcript sweep runs after the
