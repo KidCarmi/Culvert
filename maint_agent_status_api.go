@@ -34,8 +34,10 @@ const maintAgentStatusReadBound = 1 << 20 // 1 MiB
 
 // agentStatusDoc is the subset of the agent's GET /v1/status response
 // (server.Status) worth surfacing to an admin — version, privilege posture,
-// and compose-stack health. Deliberately excludes LockHeldBy/ComposeServices
-// detail: those are dispatch-operation internals, not steady-state health.
+// and compose-stack health — plus the crash-recovery state an operator must
+// act on (interrupted operations, startup-reconcile verdict, pinned-tag drift).
+// Deliberately excludes LockHeldBy/ComposeServices detail: those are
+// dispatch-operation internals, not steady-state health.
 type agentStatusDoc struct {
 	AgentVersion       string `json:"agent_version"`
 	PrivilegeMode      string `json:"privilege_mode"`
@@ -44,7 +46,44 @@ type agentStatusDoc struct {
 	ComposeError       string `json:"compose_error,omitempty"`
 	LastOperationKind  string `json:"last_operation_kind,omitempty"`
 	LastOperationState string `json:"last_operation_state,omitempty"`
+
+	// Recovery state (cmd/culvert-maint/internal/server Status). Before this
+	// relay the GUI dropped it, so an upgrade/rollback/restore the agent died
+	// in — which the agent journals and reports until it is resolved — was
+	// visible only by SSHing to the host and curling the agent socket. The
+	// GUI's "Last operation" row is in-memory on the agent and vanishes on the
+	// very restart that produced the interrupted record.
+	InterruptedOperations      []agentInterruptedOp `json:"interrupted_operations,omitempty"`
+	InterruptedOperationsError string               `json:"interrupted_operations_error,omitempty"`
+	RecoveryRequired           *bool                `json:"recovery_required,omitempty"`
+	PinnedTag                  *struct {
+		MatchesRunning *bool `json:"matches_running,omitempty"`
+	} `json:"pinned_tag,omitempty"`
 }
+
+// agentInterruptedOp is the viewer-safe subset of the agent's
+// InterruptedOperation: what stopped, what Docker looks like now and the
+// agent's own operator_action sentence. Actor (an identity) and the raw
+// image ids are not relayed; prior_ref is the reference a rollback takes.
+type agentInterruptedOp struct {
+	OpID             string `json:"op_id"`
+	Kind             string `json:"kind"`
+	JournalPhase     string `json:"journal_phase,omitempty"`
+	DockerState      string `json:"docker_state,omitempty"`
+	RunningImage     string `json:"running_image,omitempty"`
+	DiedInCommand    string `json:"died_in_command,omitempty"`
+	TerminalOutcome  string `json:"terminal_outcome,omitempty"`
+	ReconcileOutcome string `json:"reconcile_outcome,omitempty"`
+	DockerReconciled bool   `json:"docker_reconciled"`
+	PriorRef         string `json:"prior_ref,omitempty"`
+	RestartSafe      string `json:"restart_safe,omitempty"`
+	OperatorAction   string `json:"operator_action,omitempty"`
+	StartedAt        string `json:"started_at,omitempty"`
+}
+
+// maintAgentInterruptedRelayMax bounds the relayed list; the agent keeps one
+// record per unresolved operation, so more than this is itself the finding.
+const maintAgentInterruptedRelayMax = 20
 
 // fetchMaintAgentStatus performs a GET /v1/status against the maintenance
 // agent and parses the response into agentStatusDoc.
@@ -159,5 +198,29 @@ func buildMaintAgentStatusPayload(ctx context.Context) map[string]any {
 	if doc.LastOperationState != "" {
 		out["last_operation_state"] = doc.LastOperationState
 	}
+	addMaintAgentRecoveryFields(out, &doc)
 	return out
+}
+
+// addMaintAgentRecoveryFields relays the agent's crash-recovery state. Keys are
+// absent when the agent reports nothing (or is an older version), so the
+// healthy payload is unchanged.
+func addMaintAgentRecoveryFields(out map[string]any, doc *agentStatusDoc) {
+	if n := len(doc.InterruptedOperations); n > 0 {
+		ops := doc.InterruptedOperations
+		if n > maintAgentInterruptedRelayMax {
+			ops = ops[:maintAgentInterruptedRelayMax]
+			out["interrupted_operations_truncated"] = n
+		}
+		out["interrupted_operations"] = ops
+	}
+	if doc.InterruptedOperationsError != "" {
+		out["interrupted_operations_error"] = doc.InterruptedOperationsError
+	}
+	if doc.RecoveryRequired != nil {
+		out["recovery_required"] = *doc.RecoveryRequired
+	}
+	if pt := doc.PinnedTag; pt != nil && pt.MatchesRunning != nil {
+		out["pinned_tag_matches_running"] = *pt.MatchesRunning
+	}
 }

@@ -2663,7 +2663,7 @@
       },
       "MaintAgentStatus": {
         "additionalProperties": true,
-        "description": "Health of the CP-local maintenance agent, read from its GET /v1/status. `available:false` means the agent could not be reached or is not configured, with `reason` carrying the cause; otherwise carries agent_version, privilege_mode(+privilege_warning), and compose_stack_up(+compose_error).",
+        "description": "Health of the CP-local maintenance agent, read from its GET /v1/status. `available:false` means the agent could not be reached or is not configured, with `reason` carrying the cause; otherwise carries agent_version, privilege_mode(+privilege_warning), and compose_stack_up(+compose_error). When the agent's crash-recovery journal holds unresolved records it also carries interrupted_operations (op_id, kind, journal_phase, docker_state, running_image, died_in_command, terminal_outcome, reconcile_outcome, docker_reconciled, prior_ref, restart_safe, operator_action, started_at; at most 20, with interrupted_operations_truncated set to the agent's count when more), interrupted_operations_error when the journal could not be read, recovery_required, and pinned_tag_matches_running. Each is absent when the agent reports nothing for it.",
         "type": "object"
       },
       "MetricsConfig": {

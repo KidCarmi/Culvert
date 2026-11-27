@@ -16602,8 +16602,48 @@ function renderMaintAgentStatus(data) {
   if (data.privilege_warning) {
     warning = '<p class="hint" style="color:var(--red);font-weight:600">' + escHtml(String(data.privilege_warning)) + '</p>';
   }
-  el.innerHTML = warning + '<table class="tbl" style="width:100%">' +
+  if (data.pinned_tag_matches_running === false) {
+    rows.push(['Pinned image', '<span style="color:var(--amber,orange);font-weight:600">differs from the running image - the next stack restart would change the image it runs</span>']);
+  }
+  el.innerHTML = warning + renderMaintAgentRecovery(data) + '<table class="tbl" style="width:100%">' +
     rows.map(r => '<tr><td>' + r[0] + '</td><td>' + r[1] + '</td></tr>').join('') + '</table>';
+}
+
+// The agent's crash-recovery journal (interrupted upgrades, rollbacks and
+// restores, or failures whose end state it could not prove safe). The agent
+// reports these until they are resolved and changes nothing in Docker by
+// itself (reconcile_on_startup "off"); each entry carries its own
+// operator_action. Without this, they were visible only over SSH.
+function renderMaintAgentRecovery(data) {
+  let html = '';
+  if (data.interrupted_operations_error) {
+    html += '<p class="hint" style="color:var(--amber,orange);font-weight:600">Could not read the agent\'s recovery journal: ' +
+      escHtml(String(data.interrupted_operations_error)) + '. Interrupted operations are unknown, not absent.</p>';
+  }
+  const ops = Array.isArray(data.interrupted_operations) ? data.interrupted_operations : [];
+  if (!ops.length) return html;
+  const title = data.recovery_required ? 'Recovery required' : 'Unfinished maintenance operations';
+  html += '<div style="border:1px solid var(--red);border-radius:6px;padding:.5rem .75rem;margin-bottom:.5rem">' +
+    '<p style="color:var(--red);font-weight:600;margin:0 0 .25rem">' + escHtml(title) + ' (' + ops.length +
+    (data.interrupted_operations_truncated ? ' of ' + escHtml(String(data.interrupted_operations_truncated)) : '') + ')</p>';
+  for (const o of ops) {
+    const facts = [];
+    if (o.journal_phase) facts.push('stopped at ' + escHtml(String(o.journal_phase)));
+    if (o.terminal_outcome) facts.push(escHtml(String(o.terminal_outcome)));
+    if (o.docker_state) facts.push('Docker: ' + escHtml(String(o.docker_state)));
+    if (o.running_image) facts.push('running image: ' + escHtml(String(o.running_image)));
+    if (o.died_in_command) facts.push('died inside ' + escHtml(String(o.died_in_command)));
+    if (o.reconcile_outcome) facts.push('reconcile: ' + escHtml(String(o.reconcile_outcome)));
+    html += '<div style="margin:.35rem 0">' +
+      '<strong>' + escHtml(String(o.kind || 'operation')) + '</strong> <span style="font-family:monospace;font-size:.75rem">' + escHtml(String(o.op_id || '')) + '</span>' +
+      (o.started_at ? ' <span class="hint">started ' + escHtml(String(o.started_at)) + '</span>' : '') +
+      (facts.length ? '<div class="hint">' + facts.join(' · ') + '</div>' : '') +
+      (o.prior_ref ? '<div class="hint">Previous image: <span style="font-family:monospace;font-size:.75rem">' + escHtml(String(o.prior_ref)) + '</span></div>' : '') +
+      (o.restart_safe ? '<div class="hint">' + escHtml(String(o.restart_safe)) + '</div>' : '') +
+      (o.operator_action ? '<div>' + escHtml(String(o.operator_action)) + '</div>' : '') +
+      '</div>';
+  }
+  return html + '</div>';
 }
 
 // M7 Slice 1: read-only preview only — GET /api/support/telemetry/preview

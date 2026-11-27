@@ -127,3 +127,73 @@ func TestAPIMaintAgentStatus_AgentDownIsHTTP200Unavailable(t *testing.T) {
 		t.Fatal("reason missing — the operator needs the cause on the panel")
 	}
 }
+
+// TestAPIMaintAgentStatus_RelaysRecoveryState pins that the agent's crash-recovery
+// journal reaches the admin API: an interrupted upgrade, the reconcile verdict
+// and pinned-tag drift were previously discarded, leaving SSH + curl on the
+// agent socket as the only way to see them. The actor identity is not relayed.
+func TestAPIMaintAgentStatus_RelaysRecoveryState(t *testing.T) {
+	resetMaintAgentStatusCache(t)
+	agent := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{
+			"agent_version": "v1.4.2",
+			"privilege_mode": "sudo_scoped",
+			"compose_stack_up": false,
+			"interrupted_operations": [{
+				"op_id": "op-123", "kind": "upgrade.apply", "actor": "alice",
+				"journal_phase": "tag_moved", "docker_state": "indeterminate",
+				"running_image": "prior", "died_in_command": "compose up",
+				"docker_reconciled": false, "prior_ref": "ghcr.io/x/proxy@sha256:ab",
+				"operator_action": "Roll back to prior_ref.",
+				"started_at": "2026-11-25T10:00:00Z"
+			}],
+			"recovery_required": true,
+			"pinned_tag": {"image_id": "sha256:cd", "matches_running": false}
+		}`))
+	}))
+	defer agent.Close()
+	t.Setenv(envMaintAgentURL, agent.URL)
+
+	_, body := callAPIMaintAgentStatus(t)
+	if body["recovery_required"] != true {
+		t.Fatalf("recovery_required = %v, want true (body %v)", body["recovery_required"], body)
+	}
+	if body["pinned_tag_matches_running"] != false {
+		t.Fatalf("pinned_tag_matches_running = %v, want false (body %v)", body["pinned_tag_matches_running"], body)
+	}
+	ops, _ := body["interrupted_operations"].([]any)
+	if len(ops) != 1 {
+		t.Fatalf("interrupted_operations = %v, want 1 entry", body["interrupted_operations"])
+	}
+	op, _ := ops[0].(map[string]any)
+	for k, want := range map[string]string{
+		"op_id": "op-123", "kind": "upgrade.apply", "docker_state": "indeterminate",
+		"died_in_command": "compose up", "operator_action": "Roll back to prior_ref.",
+		"prior_ref": "ghcr.io/x/proxy@sha256:ab", "started_at": "2026-11-25T10:00:00Z",
+	} {
+		if op[k] != want {
+			t.Errorf("%s = %v, want %q", k, op[k], want)
+		}
+	}
+	if _, leaked := op["actor"]; leaked {
+		t.Error("actor relayed to a viewer-role surface; it must stay on the agent")
+	}
+}
+
+// TestAPIMaintAgentStatus_HealthyPayloadHasNoRecoveryKeys pins that an agent
+// with nothing to recover (or an older agent) leaves the payload unchanged.
+func TestAPIMaintAgentStatus_HealthyPayloadHasNoRecoveryKeys(t *testing.T) {
+	resetMaintAgentStatusCache(t)
+	agent := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"agent_version":"v1","privilege_mode":"sudo_scoped","compose_stack_up":true}`))
+	}))
+	defer agent.Close()
+	t.Setenv(envMaintAgentURL, agent.URL)
+
+	_, body := callAPIMaintAgentStatus(t)
+	for _, k := range []string{"interrupted_operations", "interrupted_operations_error", "recovery_required", "pinned_tag_matches_running", "interrupted_operations_truncated"} {
+		if _, ok := body[k]; ok {
+			t.Errorf("%s present on a healthy agent (body %v)", k, body)
+		}
+	}
+}
