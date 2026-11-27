@@ -9,6 +9,13 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Fixed
 
+- **Diagnostics reports saved settings that startup refused.** When the saved
+  decryption auto-exclusion tunables or support-bundle retention caps are
+  outside the allowed range, startup still refuses them and runs the defaults,
+  but the Diagnostics report now carries an `admin_settings_refused` warning
+  naming the setting and the panel to fix it on, instead of a log line only.
+  Saving the setting clears the warning.
+
 - **Restore now works on the Docker Compose deployment.** A restore commit
   swapped `/data` by renaming the directory itself, with its staging and
   backup directories beside it in `/`. In the shipped compose file `/data` is a

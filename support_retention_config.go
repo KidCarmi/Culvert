@@ -194,12 +194,14 @@ func snapshotSupportRetention(s *AdminSettings, override *supportRetentionConfig
 // (fail-closed to defaults) rather than applied, so a corrupt keep=0 can never
 // wipe every bundle.
 func applyAdminSupportRetention(s *AdminSettings) {
+	supportRetentionRefusedAtLoad.Store(false)
 	if !s.SupportRetentionSaved {
 		return
 	}
 	cfg := supportRetentionConfig{Keep: s.SupportRetentionKeep, MaxAgeDays: s.SupportRetentionMaxAgeDays}
 	if err := validateSupportRetention(cfg); err != nil {
 		logger.Printf("AdminSettings: ignoring invalid persisted support retention (%v) — keeping defaults", err)
+		supportRetentionRefusedAtLoad.Store(true) // diagnostics row admin_settings_refused
 		return
 	}
 	setSupportRetention(cfg)
@@ -279,7 +281,10 @@ func apiSupportRetention(w http.ResponseWriter, r *http.Request) {
 		// new caps on disk (the serialize-apply-with-saves race).
 		if err := saveAdminSettingsWithOverrides(adminSaveOverrides{
 			supportRetention: &resolved,
-			applyOnSuccess:   func() { setSupportRetention(resolved) },
+			applyOnSuccess: func() {
+				setSupportRetention(resolved)
+				supportRetentionRefusedAtLoad.Store(false)
+			},
 		}); err != nil {
 			logger.Printf("support retention: persist failed, runtime unchanged: %v", err)
 			http.Error(w, "failed to persist retention config", http.StatusInternalServerError)

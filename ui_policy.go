@@ -1098,7 +1098,10 @@ func apiDecryptionExclusionTunables(w http.ResponseWriter, r *http.Request) {
 				}
 				return nil
 			},
-			applyOnSuccess: func() { autoExclude().Reconfigure(resolved.engineConfig()) },
+			applyOnSuccess: func() {
+				autoExclude().Reconfigure(resolved.engineConfig())
+				autoExcludeTunablesRefusedAtLoad.Store(false)
+			},
 		})
 		var conflict errContentSecRevisionConflict
 		if errors.As(err, &conflict) {

@@ -769,6 +769,7 @@ func applyAdminYARA(s *AdminSettings) {
 // file) is refused and the engine keeps its defaults (fail-closed), rather than
 // letting an out-of-bounds value through the engine's weaker last-resort clamp.
 func applyAdminAutoExcludeTunables(s *AdminSettings) {
+	autoExcludeTunablesRefusedAtLoad.Store(false)
 	if !s.AutoExcludeTunablesSaved {
 		return
 	}
@@ -781,6 +782,7 @@ func applyAdminAutoExcludeTunables(s *AdminSettings) {
 	})
 	if err := validateAutoExcludeTunables(resolved); err != nil {
 		logger.Printf("AdminSettings: ignoring invalid persisted auto-exclusion tunables (%v) — keeping engine defaults", err)
+		autoExcludeTunablesRefusedAtLoad.Store(true) // diagnostics row admin_settings_refused
 		return
 	}
 	autoExclude().Reconfigure(resolved.engineConfig())
