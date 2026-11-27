@@ -9,6 +9,13 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Fixed
 
+- **CSV exports no longer hand a spreadsheet a formula.** In the traffic-log
+  (`GET /api/export?format=csv`) and audit-log (`GET /api/audit?format=csv`)
+  downloads, a cell that starts with `=`, `+`, `-`, `@`, TAB or CR now gets a
+  leading apostrophe, so Excel, LibreOffice and Google Sheets show it as text.
+  An unauthenticated proxy client could put such a value in the traffic log by
+  naming it as the destination host of a refused request. Other cells and the
+  JSON exports are unchanged.
 - **Restore now works on the Docker Compose deployment.** A restore commit
   swapped `/data` by renaming the directory itself, with its staging and
   backup directories beside it in `/`. In the shipped compose file `/data` is a
