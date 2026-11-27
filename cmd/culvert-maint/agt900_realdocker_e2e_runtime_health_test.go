@@ -148,7 +148,7 @@ func (e *e2eEnv) caseObserveGatedThenBad(t *testing.T, name string) {
 	}
 	v, _ = p.waitHealth(e2eNextSample, healthIs("unhealthy", "not_ready", prior))
 	res.eq("after /ready fails", "unhealthy/not_ready", stateOf(v))
-	res.check("last_good unchanged after a failed gate", r.lastGoodFile() == good, "unchanged", "changed")
+	res.check("last_good unchanged after a failed gate", r.lastGoodFile() == good, "unchanged", sameOrChanged(r.lastGoodFile(), good))
 	_ = os.Remove(e.ctlFile("fail_ready_prior"))
 
 	s := e.snap()
@@ -156,10 +156,13 @@ func (e *e2eEnv) caseObserveGatedThenBad(t *testing.T, name string) {
 		res.err = err.Error()
 		return
 	}
-	v, _ = p.waitHealth(e2eNextSample, healthIs("unhealthy", "", ""))
-	res.check("after docker stop", stateOf(v) == "unhealthy/no_proxy_container" || stateOf(v) == "unhealthy/container_not_running",
+	stopped := func(v e2eHealthView) bool {
+		return stateOf(v) == "unhealthy/no_proxy_container" || stateOf(v) == "unhealthy/container_not_running"
+	}
+	v, _ = p.waitHealth(e2eNextSample, stopped)
+	res.check("after docker stop", stopped(v),
 		"unhealthy/no_proxy_container or container_not_running", stateOf(v))
-	res.check("last_good unchanged after the proxy stopped", r.lastGoodFile() == good, "unchanged", "changed")
+	res.check("last_good unchanged after the proxy stopped", r.lastGoodFile() == good, "unchanged", sameOrChanged(r.lastGoodFile(), good))
 	res.observed = v.String()
 	r.noMutation(res, p, base)
 }
@@ -294,6 +297,13 @@ func (v e2eHealthView) imageID() string {
 }
 
 func shortID(id string) string { return short(e2eNormID(id)) }
+
+func sameOrChanged(now, was string) string {
+	if now == was {
+		return "unchanged"
+	}
+	return "changed"
+}
 
 func stateOf(v e2eHealthView) string {
 	if v.RuntimeHealth == nil {
