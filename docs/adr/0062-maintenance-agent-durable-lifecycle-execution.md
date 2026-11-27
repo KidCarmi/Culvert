@@ -409,9 +409,12 @@ gaps and make the #2051 executor the single path every recovery takes.
     gated image without one is reported `gated`
     (`gate_passed_no_validated_ref`) and recorded nowhere else.
   - Status never carries the container id, as for `running_image`.
-  - Not yet: the main app's `/api/maintenance-agent` and its latched
-    alerts read `runtime_health` in a follow-up PR; the data-compatibility
-    evidence in `last_good.json` arrives with slice 6, which defines it.
+  - The main app's `/api/maintenance-agent` passes `runtime_health` through
+    (closed state set; anything else is shown as unknown; strings bounded)
+    and the legacy Support panel shows it (2026-11-27).
+  - Not yet: latched alerts on it, which need a main-app poll of the agent
+    that does not exist today; the data-compatibility evidence in
+    `last_good.json` arrives with slice 6, which defines it.
 
 **Slice 6 — policy-driven runtime recovery (default off).**
 - A runtime finding becomes a **synthetic record** in the same journal

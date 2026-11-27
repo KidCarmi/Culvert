@@ -353,6 +353,11 @@ operation, no journal record, no audit entry):
 It is evidence only: nothing in this release restores it. Container ids are
 not reported.
 
+The admin console shows the same state and the last-known-good image in the
+Support view's maintenance-agent panel, read through `GET
+/api/maintenance-agent` (`runtime_health`, absent when the agent's observer is
+off). No alert fires on it yet.
+
 ### After the agent stops during a restore
 
 A restore (`POST /v1/restores/commit`) and a data rollback (`POST /v1/rollbacks`

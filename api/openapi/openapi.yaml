@@ -1443,8 +1443,38 @@ components:
         /v1/status. `available:false` means the agent could not be reached
         or is not configured, with `reason` carrying the cause; otherwise
         carries agent_version, privilege_mode(+privilege_warning), and
-        compose_stack_up(+compose_error).
+        compose_stack_up(+compose_error), and `runtime_health` when the agent's
+        runtime health observer is on.
       additionalProperties: true
+      properties:
+        runtime_health: { $ref: '#/components/schemas/MaintAgentRuntimeHealth' }
+    MaintAgentRuntimeHealth:
+      type: object
+      description: >-
+        What the maintenance agent's non-mutating runtime health observer
+        last saw (ADR-0062 slice 5, contract AGT-007), relative to the image
+        running now. A state this build does not know is reported as
+        unknown. Image ids and digests only; never a container id.
+      required: [state, interval_seconds]
+      additionalProperties: false
+      properties:
+        state: { type: string, enum: [gated, ungated, unhealthy, unknown, stale] }
+        reason: { type: string }
+        observed_at: { type: string, format: date-time }
+        image_id: { type: string }
+        interval_seconds: { type: integer, format: int64 }
+        error: { type: string }
+        last_good:
+          type: object
+          description: The last image the production health gate passed with its container and image unchanged across the probe; no failed or unknown observation removes it.
+          required: [image_id, ref, digest, passed_at]
+          additionalProperties: false
+          properties:
+            image_id: { type: string }
+            ref: { type: string }
+            digest: { type: string }
+            passed_at: { type: string, format: date-time }
+        last_good_error: { type: string }
     UpstreamConfig:
       type: object
       description: >-

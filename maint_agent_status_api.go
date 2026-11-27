@@ -44,6 +44,72 @@ type agentStatusDoc struct {
 	ComposeError       string `json:"compose_error,omitempty"`
 	LastOperationKind  string `json:"last_operation_kind,omitempty"`
 	LastOperationState string `json:"last_operation_state,omitempty"`
+	// RuntimeHealth is the agent's runtime health observer evidence (ADR-0062
+	// slice 5). Absent when the agent's runtime_health_interval is off or the
+	// agent predates it.
+	RuntimeHealth *agentRuntimeHealth `json:"runtime_health,omitempty"`
+}
+
+// agentRuntimeHealth is the part of the agent's runtime_health surfaced to an
+// admin: what the observer last saw and the last-known-good image. The agent
+// reports image ids and digests only, never a container id.
+type agentRuntimeHealth struct {
+	State           string             `json:"state"`
+	Reason          string             `json:"reason,omitempty"`
+	ObservedAt      *time.Time         `json:"observed_at,omitempty"`
+	ImageID         string             `json:"image_id,omitempty"`
+	IntervalSeconds int64              `json:"interval_seconds"`
+	Error           string             `json:"error,omitempty"`
+	LastGood        *agentLastGoodInfo `json:"last_good,omitempty"`
+	LastGoodError   string             `json:"last_good_error,omitempty"`
+}
+
+type agentLastGoodInfo struct {
+	ImageID  string    `json:"image_id"`
+	Ref      string    `json:"ref"`
+	Digest   string    `json:"digest"`
+	PassedAt time.Time `json:"passed_at"`
+}
+
+// agentRuntimeStates is the closed set the agent reports. Anything else (a
+// newer agent's state, or garbage) is surfaced as unknown rather than passed
+// through as if this build understood it.
+var agentRuntimeStates = map[string]bool{"gated": true, "ungated": true, "unhealthy": true, "unknown": true, "stale": true}
+
+// maintAgentFieldBound bounds each agent-supplied string surfaced to an admin.
+const maintAgentFieldBound = 256
+
+func boundAgentField(s string) string {
+	if len(s) > maintAgentFieldBound {
+		return s[:maintAgentFieldBound]
+	}
+	return s
+}
+
+// runtimeHealthPayload shapes runtime_health for the admin API.
+func runtimeHealthPayload(rh *agentRuntimeHealth) map[string]any {
+	state := rh.State
+	if !agentRuntimeStates[state] {
+		state = "unknown"
+	}
+	out := map[string]any{"state": state, "interval_seconds": rh.IntervalSeconds}
+	for k, v := range map[string]string{"reason": rh.Reason, "image_id": rh.ImageID, "error": rh.Error, "last_good_error": rh.LastGoodError} {
+		if v != "" {
+			out[k] = boundAgentField(v)
+		}
+	}
+	if rh.ObservedAt != nil {
+		out["observed_at"] = rh.ObservedAt.UTC()
+	}
+	if lg := rh.LastGood; lg != nil {
+		out["last_good"] = map[string]any{
+			"image_id":  boundAgentField(lg.ImageID),
+			"ref":       boundAgentField(lg.Ref),
+			"digest":    boundAgentField(lg.Digest),
+			"passed_at": lg.PassedAt.UTC(),
+		}
+	}
+	return out
 }
 
 // fetchMaintAgentStatus performs a GET /v1/status against the maintenance
@@ -158,6 +224,9 @@ func buildMaintAgentStatusPayload(ctx context.Context) map[string]any {
 	}
 	if doc.LastOperationState != "" {
 		out["last_operation_state"] = doc.LastOperationState
+	}
+	if doc.RuntimeHealth != nil {
+		out["runtime_health"] = runtimeHealthPayload(doc.RuntimeHealth)
 	}
 	return out
 }
