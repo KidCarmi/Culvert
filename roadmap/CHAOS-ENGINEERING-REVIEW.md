@@ -8,6 +8,48 @@ workers/feeds/scanning/alerting.
 inferred without reading the code path. Failure modes were assessed against the project's stated
 posture — **default deny, fail closed when recovery is impossible, graceful degradation otherwise.**
 
+**2026-11-27 — `CHAOS-130` CLAIMED (placeholder, commit one). Domain: the OTLP
+EXPORT PLANE'S LIFECYCLE OWNERSHIP — not what the exporters do with a batch
+(CHAOS-126 settled that) but WHO OWNS THE PUSH LOOP, and what the pair becomes
+when two owners decide at once. `Configure` publishes the new endpoint and the
+new `cancel` under TWO SEPARATE holds of the mutex, identically in both
+exporters (`internal/otlp/spans.go:174-205`, `internal/otlp/otlp.go:110-127`):
+it cancels the old loop, stores the endpoint, RELEASES the lock, and only then
+takes it again to store the `cancel` of the loop it is about to start. Two
+concurrent callers therefore overwrite each other's `cancel`, and the loser's
+push loop becomes UNREACHABLE — no `Stop()` can ever cancel it, because the
+only handle to it was overwritten. Measured on this tree through the production
+constructors: 8 concurrent `Configure` calls leave **2 live `pushLoop`
+goroutines** on each exporter, and **1 of them survives `Stop()`** — the
+operator's disable — for the rest of the process's life. This is the
+CHAOS-126 residual risk `R9` recorded as pre-existing and unchanged; it is also
+the exact condition the span exporter's own `pushSlot` comment documents as
+having INVERTED the ring, so the leak reintroduces by accident the defect that
+round's independent review fixed by design. The same gap makes `Stop()` and
+`Configure` non-exclusive in the other direction: a disable that interleaves
+leaves `Enabled()` reporting FALSE with a live loop behind it. And the pair's
+two halves can come apart, which is where it stops being a leak and becomes a
+SILENT failure: every caller configures metrics and traces in sequence, never
+atomically, while the CP snapshot apply decides for BOTH from the METRICS
+exporter's state alone (`controlplane_snapshot.go:1844-1850`,
+`globalOTLP.Enabled()` gating the `Stop()` and `Configure` of each) — residual
+risk `R7`. A traces exporter stopped alone is therefore never restarted by any
+subsequent snapshot whose endpoint already matches metrics, `GET /api/otlp`
+reports one `enabled` flag taken from metrics, and `checkOTLPExport`
+(`diagnostics_otlp_export.go:29-34`) is structurally incapable of seeing it:
+it reports an export that is FAILING and says nothing at all about one that is
+OFF. Spans — client IPs, target hosts, enforcement decisions — simply stop
+being exported, with no counter, no row and no log line.** Id claimed in this
+committed row before any code was written, per the convention below, and
+checked against `origin/main` rather than the working tree per the 2026-09-25
+amendment: `CHAOS-126` is the highest id anywhere on `origin/main` (at
+`2fad1fb`), and `CHAOS-127`, `CHAOS-128` and `CHAOS-129` are held by open PRs
+#2075, #2119 and #2125 respectively — which is exactly the case the amendment
+exists for, so this sweep did NOT take the next id after main's highest. Of the
+other 58 open PRs none is a chaos sweep and none claims a chaos id. This sweep
+took 130 and will not move. Recent rounds do not claim a `§` section number
+(`CHAOS-123` through `CHAOS-126` all omit it); this one follows them.
+
 **2026-11-21 — `CHAOS-126` CLAIMED (placeholder, commit one). Domain: the
 OBSERVABILITY PLANE'S OWN LOSS ACCOUNTING — the OTLP SPAN BUFFER at a
 collector failure and at a restart. `SpanExporter.push` DRAINS the ring buffer
