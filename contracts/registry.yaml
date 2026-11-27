@@ -684,6 +684,42 @@ contracts:
     validation: integration
     compatibility: "Additive result keys final_running_state and final_running_image_id. final_running_digest keeps its key and type; its value changes from an inferred digest to the captured registry digest, or empty when unverified. Consumers must read final_running_state before treating an empty digest as meaningful."
 
+  - id: AGT-007
+    area: agent-lifecycle
+    status: enforced
+    owner_approved: false
+    invariant: "The runtime health observer (runtime_health_interval, default off) never begins an operation, never changes Docker, and never writes a journal record or an audit entry; it writes only state_dir/health. It keeps a sample only when the proxy container, its image and the fixed tag were the same before and after the probe and neither the maintenance lock nor the settle window was in the way on either side. last_good.json is written only when the production health gate passed on such a sample and the image has a repo-bound, allow-listed digest reference; no unhealthy, unknown, stale or discarded observation overwrites or clears it."
+    authority: "Maintenance agent (cmd/culvert-maint, separate module). Design: docs/adr/0062-maintenance-agent-durable-lifecycle-execution.md slice 5; owner decision 5 (2026-11-24): last-known-good evidence preserved across unhealthy observations."
+    code:
+      - "cmd/culvert-maint/internal/server/runtime_observer.go"
+      - "cmd/culvert-maint/internal/runtimehealth/*.go"
+    configs: []
+    transitions:
+      permitted:
+        - "recording an unhealthy or unknown observation over a gated one in latest.json"
+        - "replacing last_good with a later image that passes the gate the same way"
+        - "skipping a sample while the maintenance lock is held or the settle window is open"
+      forbidden:
+        - "the observer beginning an operation, running a state-changing Docker command, or writing a journal record or audit entry"
+        - "keeping a sample whose container, image, running state or fixed tag changed across the probe"
+        - "writing or clearing last_good from an unhealthy, unknown, stale or discarded observation"
+        - "recording as last_good an image without a repo-bound, allow-listed digest reference"
+        - "reporting a container id in GET /v1/status runtime_health"
+    tests:
+      - {file: "cmd/culvert-maint/internal/server/runtime_observer_test.go", name: TestObserver_GatedRecordsLastGood}
+      - {file: "cmd/culvert-maint/internal/server/runtime_observer_test.go", name: TestObserver_BadObservationsKeepLastGood}
+      - {file: "cmd/culvert-maint/internal/server/runtime_observer_test.go", name: TestObserver_IdentityChangeAcrossTheProbeDiscards}
+      - {file: "cmd/culvert-maint/internal/server/runtime_observer_test.go", name: TestObserver_SkipsWhileTheLockIsHeldOrTheWindowIsOpen}
+      - {file: "cmd/culvert-maint/internal/server/runtime_observer_test.go", name: TestObserver_WritesOnlyTheHealthDirectory}
+      - {file: "cmd/culvert-maint/internal/server/runtime_observer_test.go", name: TestObserver_GatedWithoutValidatedRefIsNotLastGood}
+      - {file: "cmd/culvert-maint/internal/server/runtime_observer_test.go", name: TestObserver_LastGoodIsRepoBoundWhateverTheAllowlist}
+      - {file: "cmd/culvert-maint/internal/server/runtime_observer_test.go", name: TestObserver_LastGoodHonoursANarrowAllowlist}
+      - {file: "cmd/culvert-maint/internal/runtimehealth/runtimehealth_test.go", name: TestStore_LatestNeverTouchesLastGood}
+      - {file: "cmd/culvert-maint/internal/status/status_runtime_health_test.go", name: TestRuntimeHealth_NoContainerID}
+      - {file: "cmd/culvert-maint/internal/status/status_runtime_health_test.go", name: TestRuntimeHealth_AbsentWhenOff}
+    validation: unit
+    compatibility: "New, off by default: with runtime_health_interval unset nothing runs, nothing is written and the GET /v1/status payload is unchanged. When on, it adds state_dir/health/{latest,last_good}.json (schema 1; a reader refuses any other schema, an unknown field or a file over 16 KiB) and the additive status key runtime_health. An older agent ignores the directory; a downgrade leaves it in place unread."
+
   - id: CFG-001
     area: config-compatibility
     status: enforced

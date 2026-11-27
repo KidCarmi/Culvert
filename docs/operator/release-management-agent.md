@@ -317,6 +317,42 @@ For `indeterminate`:
   upgrade again, remove `<state_dir>/mutation` before starting the newer
   agent, so that it waits once as on a first start.
 
+### Runtime health (`runtime_health_interval`)
+
+Off by default. With `runtime_health_interval = "5m"` (any value from `1m` to
+`24h`), the agent checks the running proxy on that interval, without changing
+anything:
+
+1. It skips the round while an operation holds the maintenance lock, or while
+   the `interrupted_settle` window is open.
+2. It reads the proxy container and `culvert/proxy:pinned`, runs the same
+   `/ready` check an upgrade runs, and reads both again.
+3. If the container, its image, its running state or the tag changed in
+   between, the reading is dropped: it would describe a container that is no
+   longer there.
+
+It writes two files under `<state_dir>/health/` and nothing else (no
+operation, no journal record, no audit entry):
+
+| File | Written when | Never |
+|---|---|---|
+| `latest.json` | every reading kept: `gated`, `unhealthy` (no proxy container, not running, `/ready` failed) or `unknown` (Docker or the check could not be read) | |
+| `last_good.json` | the check passed with nothing changing around it, on an image with a `<proxy_repo>@sha256:…` reference that `image_allowlist` admits | removed or overwritten by a failed, unknown or dropped reading |
+
+`GET /v1/status` gains `runtime_health` (absent when off):
+
+| `state` | Meaning |
+|---|---|
+| `gated` | the image running now passed the check at the last reading |
+| `ungated` | the image running now has not passed the check yet: no reading so far, or the last one was of another image (an upgrade or a hand retag since) |
+| `unhealthy` | the last reading found no proxy, a stopped one, or a failed `/ready` |
+| `unknown` | Docker or the check could not be read, or the evidence files could not |
+| `stale` | no reading for three intervals |
+
+`last_good` names the image id, its reference and digest, and when it passed.
+It is evidence only: nothing in this release restores it. Container ids are
+not reported.
+
 ### After the agent stops during a restore
 
 A restore (`POST /v1/restores/commit`) and a data rollback (`POST /v1/rollbacks`

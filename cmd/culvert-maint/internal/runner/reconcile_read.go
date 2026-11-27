@@ -28,6 +28,8 @@ type ProxyContainer struct {
 	Present bool
 	// Running is true when the container's State is "running".
 	Running bool
+	// ContainerID is the container's id as `compose ps` lists it.
+	ContainerID string
 	// ImageID is the container's image id (`sha256:<64hex>`).
 	ImageID string
 	// RepoDigests are the image's `repo@sha256:…` references; best-effort, may
@@ -73,7 +75,7 @@ func (r *Runner) ReadProxyContainer(ctx context.Context) (*ProxyContainer, error
 	if err != nil {
 		return nil, fmt.Errorf("container inspect: %w", err)
 	}
-	pc := &ProxyContainer{Present: true, Running: strings.EqualFold(proxies[0].State, "running"), ImageID: id}
+	pc := &ProxyContainer{Present: true, Running: strings.EqualFold(proxies[0].State, "running"), ContainerID: proxies[0].ID, ImageID: id}
 	if img, ierr := r.ComposeImageInspect(ctx, id); ierr == nil && img != nil {
 		pc.RepoDigests = repoDigestsFromImageInspect(img.Stdout)
 	}
