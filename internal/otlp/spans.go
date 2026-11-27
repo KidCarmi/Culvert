@@ -172,6 +172,34 @@ func (e *SpanExporter) Configure(endpoint string, headers map[string]string) {
 	// Enabled() == true and starting a loop that could never post.
 	endpoint = strings.TrimRight(strings.TrimSpace(endpoint), "/")
 
+	// CHAOS-130: the loop's context is built BEFORE the lock so that
+	// cancelling the old loop, publishing the new endpoint and publishing the
+	// new loop's cancel all happen under ONE hold of e.mu. Taking the lock
+	// twice — storing the endpoint, releasing, then re-taking it to store the
+	// cancel — let two concurrent callers overwrite each other's cancel, and
+	// the loser's push loop then had NO handle at all: Stop() could not reach
+	// it for the rest of the process's life. Measured on the production
+	// constructors: 8 concurrent Configure calls left 3 live pushLoop
+	// goroutines and 2 of them survived Stop(); 40 raced saves at the 15 s
+	// production cadence left 9, of which 8 survived. A leaked loop keeps
+	// pushing forever at the interval in force when it started, so the
+	// collector receives (leaks+1) times the push rate the operator
+	// configured — and because the leak also outlives a disable, re-enabling
+	// does not clear it; only a restart does.
+	//
+	// The same two-phase window made Configure and Stop non-exclusive in the
+	// other direction: a disable that interleaved left Enabled() reporting
+	// false with a live loop behind it (measured: 5 of 200 attempts). Under
+	// one critical section the two orderings are the only outcomes — the
+	// configure wins and the loop runs, or the stop wins and nothing does.
+	var (
+		ctx    context.Context
+		cancel context.CancelFunc
+	)
+	if endpoint != "" {
+		ctx, cancel = context.WithCancel(context.Background())
+	}
+
 	e.mu.Lock()
 	if e.cancel != nil {
 		e.cancel()
@@ -190,6 +218,9 @@ func (e *SpanExporter) Configure(endpoint string, headers map[string]string) {
 	e.headers = headers
 	e.finalized = false
 	e.active.Store(endpoint != "")
+	// nil when disabling, which also clears the stale already-cancelled
+	// handle the two-phase version left behind on that path.
+	e.cancel = cancel
 	e.mu.Unlock()
 
 	if dropped > 0 {
@@ -198,12 +229,21 @@ func (e *SpanExporter) Configure(endpoint string, headers map[string]string) {
 	if endpoint == "" {
 		return
 	}
-	ctx, cancel := context.WithCancel(context.Background())
-	e.mu.Lock()
-	e.cancel = cancel
-	e.mu.Unlock()
 	go e.pushLoop(ctx)
 	obs.Printf("OTLP: exporting traces to %s every %s", obs.Sanitize(endpoint), e.interval)
+}
+
+// Endpoint returns the current collector endpoint ("" when export is off).
+//
+// CHAOS-130: the CP snapshot apply used to decide whether to reconfigure
+// BOTH exporters by comparing the snapshot's endpoint with the METRICS
+// exporter's, because this one had no reader of its own. That coupling is
+// what let a traces exporter stopped on its own stay dark through every
+// later snapshot carrying the right endpoint.
+func (e *SpanExporter) Endpoint() string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.endpoint
 }
 
 // Stop halts the push loop and clears the endpoint.

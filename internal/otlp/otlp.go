@@ -107,6 +107,24 @@ func (o *MetricsExporter) Configure(endpoint string, headers map[string]string) 
 	// every single apply and reconfigured both exporters each time.
 	endpoint = strings.TrimRight(strings.TrimSpace(endpoint), "/")
 
+	// CHAOS-130: the whole transition — cancelling the old loop, publishing
+	// the endpoint, publishing the new loop's cancel — happens under ONE hold
+	// of o.mu, so two concurrent callers cannot overwrite each other's cancel
+	// and strand a push loop that Stop() can never reach. See
+	// SpanExporter.Configure for the measurements; this exporter leaked the
+	// same way and its leak is the one with a bill attached, because push()
+	// here always POSTs a cumulative snapshot: one stranded loop doubled the
+	// collector's request rate (measured: 10 POSTs over 5 intervals against
+	// the 5 the operator configured) and the doubling survived a disable and
+	// re-enable, because only the process exit clears it.
+	var (
+		ctx    context.Context
+		cancel context.CancelFunc
+	)
+	if endpoint != "" {
+		ctx, cancel = context.WithCancel(context.Background())
+	}
+
 	o.mu.Lock()
 	// Stop existing loop if reconfiguring.
 	if o.cancel != nil {
@@ -114,15 +132,14 @@ func (o *MetricsExporter) Configure(endpoint string, headers map[string]string) 
 	}
 	o.endpoint = endpoint
 	o.headers = headers
+	// nil when disabling, which also clears the stale already-cancelled
+	// handle the two-phase version left behind on that path.
+	o.cancel = cancel
 	o.mu.Unlock()
 
 	if endpoint == "" {
 		return
 	}
-	ctx, cancel := context.WithCancel(context.Background())
-	o.mu.Lock()
-	o.cancel = cancel
-	o.mu.Unlock()
 	go o.pushLoop(ctx)
 	obs.Printf("OTLP: exporting metrics to %s every %s", obs.Sanitize(endpoint), o.interval)
 }

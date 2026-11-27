@@ -542,8 +542,8 @@ func applyAdminSyslog(s *AdminSettings) {
 func applyAdminServices(s *AdminSettings) {
 	applyAdminSyslog(s)
 	if s.OTLPEndpoint != "" {
-		globalOTLP.Configure(s.OTLPEndpoint, s.OTLPHeaders)
-		globalOTLPTraces.Configure(s.OTLPEndpoint, s.OTLPHeaders)
+		// One transition for the pair (CHAOS-130).
+		configureOTLPPair(s.OTLPEndpoint, s.OTLPHeaders)
 	}
 	if s.MetricsToken != "" {
 		metricsToken = s.MetricsToken

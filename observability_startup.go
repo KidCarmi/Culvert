@@ -61,8 +61,8 @@ func loadObservability(cfg observabilityStartupConfig) {
 	}
 
 	if cfg.OTLPEndpoint != "" {
-		globalOTLP.Configure(cfg.OTLPEndpoint, nil)
-		globalOTLPTraces.Configure(cfg.OTLPEndpoint, nil)
+		// One transition for the pair (CHAOS-130).
+		configureOTLPPair(cfg.OTLPEndpoint, nil)
 	}
 
 	if cfg.AuditLogPath != "" {

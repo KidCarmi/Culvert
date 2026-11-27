@@ -2669,8 +2669,8 @@ func apiOTLPConfig(w http.ResponseWriter, r *http.Request) {
 		}
 		body.Endpoint = strings.TrimSpace(body.Endpoint)
 		if body.Endpoint == "" {
-			globalOTLP.Stop()
-			globalOTLPTraces.Stop()
+			// One transition for the pair (CHAOS-130).
+			stopOTLPPair()
 			auditEvent(r, "settings.otlp", "disabled", "")
 			adminSettingsSave()
 			jsonOK(w, map[string]any{"ok": true, "enabled": false})
@@ -2687,8 +2687,9 @@ func apiOTLPConfig(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		headers := resolveOTLPHeaders(body.AuthHeaderName, body.AuthHeaderValue)
-		globalOTLP.Configure(body.Endpoint, headers)
-		globalOTLPTraces.Configure(body.Endpoint, headers)
+		// One transition for the pair (CHAOS-130): two concurrent saves, or a
+		// save racing a CP snapshot apply, used to leave the plane half on.
+		configureOTLPPair(body.Endpoint, headers)
 		auditEvent(r, "settings.otlp", sanitizeLog(body.Endpoint), "OTLP export enabled (metrics + traces)")
 		adminSettingsSave()
 		jsonOK(w, map[string]any{"ok": true, "enabled": true, "endpoint": body.Endpoint})

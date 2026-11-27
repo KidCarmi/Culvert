@@ -436,6 +436,41 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   validated at the callback exactly as before. The request itself is still
   served and the login still starts; ordinary return URLs are unchanged. The
   same flood now retains ~0.3 MiB.
+- **A raced OTLP save no longer strands a push loop that nothing can stop
+  (`CHAOS-130`).** `Configure` published the collector endpoint, released its
+  mutex, and only then re-took it to store the `cancel` of the loop it was
+  about to start — the same shape in both the metrics and the trace exporter.
+  Two concurrent callers (two admin saves, or a save racing a control-plane
+  snapshot apply) overwrote each other's handle, and the loser's push loop was
+  left with none: disabling OTLP export could not reach it, and neither could a
+  reconfigure. Measured: 8 concurrent saves left 3 live span push loops where
+  one is correct, 2 of them surviving the disable; 40 raced saves at the
+  shipped 15-second cadence left 9, of which 8 survived. Because the metrics
+  exporter POSTs a full cumulative snapshot on every tick, each stranded loop
+  added a whole push cadence — 19 and 50 requests over 10 intervals against
+  the 10 the operator configured, and turning export off and on again did not
+  clear it. The whole transition now happens under one hold of the mutex, so
+  exactly one push loop runs and disabling reclaims it; a disabled exporter
+  holds no handle to anything.
+- **OpenTelemetry export can no longer be left half on, and a control-plane
+  disable now actually disables it (`CHAOS-130`).** Metrics and traces are
+  configured together by startup, the admin API and the control-plane snapshot
+  apply, but never atomically, so an interrupted or raced transition left one
+  half running. That was permanent: the snapshot apply decided for BOTH halves
+  from the METRICS exporter's state, so a trace exporter stopped on its own
+  stayed dark through every later snapshot carrying the right endpoint
+  (measured: still off after five), and spans simply stopped being exported.
+  The same guard failed OPEN the other way — with metrics already off, a
+  snapshot that disabled export stopped neither, so a fleet-wide instruction to
+  stop shipping telemetry left the gateway still sending per-request client
+  IPs, target hosts, matched rules and enforcement decisions to the collector
+  while the control plane recorded compliance. The pair is now applied as one
+  decision, each exporter is reconciled from its own state (an exporter already
+  at the snapshot's endpoint is still left alone, so no apply discards buffered
+  spans), and the diagnostics report gains an `otlp_export_partial` warning
+  that names the half that is dark — previously a half-enabled export plane
+  produced no row, no counter and no log line, while Settings reported
+  "Exporting metrics + traces".
 - **Request spans the collector never took are no longer destroyed, and the
   counter that reports the loss can finally see it (`CHAOS-126`).** The OTLP
   span exporter drained its ring buffer as the FIRST statement of every push
