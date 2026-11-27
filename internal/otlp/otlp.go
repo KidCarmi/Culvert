@@ -32,6 +32,21 @@ import (
 // breaking the taint chain on the endpoint URL (go/request-forgery).
 var validEndpoint = regexp.MustCompile(`^https?://[^/]`)
 
+// NormalizeEndpoint is the ONE definition of how a configured collector URL is
+// reduced to the form both exporters store and compare.
+//
+// CHAOS-130: Configure normalises internally and Endpoint() therefore returns
+// the normalised value, so any caller that compares a RAW configured endpoint
+// against Endpoint() is comparing two different alphabets. The CP snapshot
+// apply did exactly that, and a stored endpoint carrying a trailing slash or
+// surrounding whitespace compared unequal on EVERY apply — cancelling and
+// restarting both push loops, and running the cancelled loop's bounded final
+// flush, each time a snapshot landed. CHAOS-126 fixed the normalisation; this
+// exports it so the comparison cannot drift from it.
+func NormalizeEndpoint(endpoint string) string {
+	return strings.TrimRight(strings.TrimSpace(endpoint), "/")
+}
+
 // SnapshotFunc returns the current metric set, stamped with the given
 // UnixNano timestamp string. package main's implementation reads the
 // culvert_* stat singletons.
@@ -105,7 +120,7 @@ func (o *MetricsExporter) Configure(endpoint string, headers map[string]string) 
 	// the METRICS exporter's stored endpoint (controlplane_snapshot.go), so a
 	// snapshot endpoint carrying whitespace would have compared unequal on
 	// every single apply and reconfigured both exporters each time.
-	endpoint = strings.TrimRight(strings.TrimSpace(endpoint), "/")
+	endpoint = NormalizeEndpoint(endpoint)
 
 	// CHAOS-130: the whole transition — cancelling the old loop, publishing
 	// the endpoint, publishing the new loop's cancel — happens under ONE hold

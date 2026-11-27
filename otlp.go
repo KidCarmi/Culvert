@@ -94,6 +94,13 @@ func stopOTLPPair() {
 // snapshot's endpoint is left alone, because Configure would cancel a healthy
 // push loop and — for traces — throw away the buffered spans on every apply.
 func reconcileOTLPPairToEndpoint(endpoint string) {
+	// Compare in the alphabet the exporters STORE. Endpoint() returns the
+	// normalised value, so comparing a raw snapshot string against it made a
+	// stored endpoint with a trailing slash or stray whitespace unequal on
+	// every apply — restarting both push loops each time a snapshot landed
+	// (CHAOS-130).
+	endpoint = otlp.NormalizeEndpoint(endpoint)
+
 	otlpPairMu.Lock()
 	defer otlpPairMu.Unlock()
 	if endpoint == "" {

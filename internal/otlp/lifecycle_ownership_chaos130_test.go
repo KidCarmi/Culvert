@@ -317,3 +317,37 @@ func TestChaos130_ConfigureUnderConcurrentLoadStillDelivers(t *testing.T) {
 		t.Error("the collector received nothing across the storm; the exporter must still export while being reconfigured")
 	}
 }
+
+// NormalizeEndpoint is the one definition of the form both exporters store and
+// compare. It is exported so a caller comparing a configured endpoint against
+// Endpoint() cannot drift from the normalisation Configure applies (CHAOS-130).
+func TestChaos130_NormalizeEndpointIsTheStoredForm(t *testing.T) {
+	cases := map[string]string{
+		"http://c:4318":    "http://c:4318",
+		"http://c:4318/":   "http://c:4318",
+		"http://c:4318///": "http://c:4318",
+		"  http://c:4318":  "http://c:4318",
+		"http://c:4318\t":  "http://c:4318",
+		" http://c:4318/ ": "http://c:4318",
+		"":                 "",
+		"   ":              "",
+		"/":                "",
+		"https://c/v1/x/":  "https://c/v1/x",
+	}
+	for in, want := range cases {
+		if got := NormalizeEndpoint(in); got != want {
+			t.Errorf("NormalizeEndpoint(%q) = %q; want %q", in, got, want)
+		}
+	}
+	// The invariant that matters: what Configure stores is what
+	// NormalizeEndpoint returns, for every shape above.
+	for in := range cases {
+		e := NewSpans()
+		e.interval = time.Hour
+		e.Configure(in, nil)
+		if got, want := e.Endpoint(), NormalizeEndpoint(in); got != want {
+			t.Errorf("Configure(%q) then Endpoint() = %q; NormalizeEndpoint says %q — a comparison against Endpoint() would be wrong", in, got, want)
+		}
+		e.Stop()
+	}
+}

@@ -131,8 +131,17 @@ still leaving a coherent plane alone (a reconfigure every apply would cancel a
 healthy loop and discard the buffered spans — this round's silent loss traded
 for a metronomic one); and a new `otlp_export_partial` WARN row names the dark
 half, read under the pair mutex so a transition in progress is never reported
-as a divergence. Thirteen gates, nine of them failing on the pre-fix tree with
-the fix reverted in place. **One of this round's own measurements was withdrawn
+as a divergence. A fifth finding surfaced while rewriting the reconcile and is
+fixed with it: the apply compared the RAW `snap.OTLPEndpoint` against
+`Endpoint()`, which returns the NORMALISED value, so a stored endpoint carrying
+a trailing slash or stray whitespace compared unequal on every apply —
+measured, 10 reconfigure log lines across 5 snapshots that change nothing.
+`CHAOS-126` flagged this class in `MetricsExporter.Configure`'s own comment and
+fixed the normalisation while leaving the COMPARISON reading the un-normalised
+side; `otlp.NormalizeEndpoint` is now the one exported definition both
+`Configure`s and the reconcile use. Rated LOW only because today's producers
+happen to emit a normalised value. Fifteen gates, ten of them failing on the
+pre-fix tree with the fix reverted in place. **One of this round's own measurements was withdrawn
 on review** — an early probe's "5 of 200 `Stop()`/`Configure()` races ended with
 `Enabled()` false behind a live loop" was partly counting the previous
 attempt's unwinding goroutine, did not reproduce under a settled count in 600

@@ -88,6 +88,53 @@ func TestChaos130_SnapshotLeavesACoherentPlaneAlone(t *testing.T) {
 	}
 }
 
+// A snapshot endpoint that differs from the stored one only by normalisation
+// must be a no-op. Endpoint() returns the NORMALISED value, so comparing a raw
+// snapshot string against it made such an endpoint unequal on every apply:
+// both push loops were cancelled and restarted, and the cancelled loop ran its
+// bounded final flush, each time a snapshot landed (CHAOS-130).
+//
+// The oracle is the exporters' own "exporting … to" line, which Configure
+// emits once per successful (re)configure and which an operator would see
+// repeating in the log for a node that is changing nothing.
+func TestChaos130_SnapshotEndpointNormalisationIsANoOp(t *testing.T) {
+	ensureObservabilityStartupTestLogger(t)
+	snapshotObservabilityGlobals(t)
+
+	configureOTLPPair(chaos130Endpoint, nil)
+	globalOTLPTraces.RecordSpan(SpanRecord{TraceID: "t", SpanID: "s", Name: "proxy_request"})
+	before := globalOTLPTraces.Health().DroppedSpans
+
+	variants := []string{
+		chaos130Endpoint + "/",
+		chaos130Endpoint + "///",
+		" " + chaos130Endpoint,
+		chaos130Endpoint + " ",
+		"  " + chaos130Endpoint + "/ ",
+	}
+	out := captureLogger(t, func() {
+		for _, raw := range variants {
+			applySnapshotExtendedState(ConfigSnapshot{OTLPEndpoint: raw})
+		}
+	})
+
+	if n := strings.Count(out, "OTLP: exporting"); n != 0 {
+		t.Errorf("%d reconfigure log line(s) across %d snapshots that change nothing; want 0 — each one is both push loops cancelled and restarted:\n%s",
+			n, len(variants), out)
+	}
+	for _, raw := range variants {
+		if got := globalOTLP.Endpoint(); got != chaos130Endpoint {
+			t.Errorf("snapshot %q: metrics endpoint = %q; want the normalised %q", raw, got, chaos130Endpoint)
+		}
+		if got := globalOTLPTraces.Endpoint(); got != chaos130Endpoint {
+			t.Errorf("snapshot %q: traces endpoint = %q; want the normalised %q", raw, got, chaos130Endpoint)
+		}
+	}
+	if got := globalOTLPTraces.Health().DroppedSpans; got != before {
+		t.Errorf("DroppedSpans moved from %d to %d; a snapshot differing only by normalisation must not restart the exporters", before, got)
+	}
+}
+
 // A repoint through the snapshot must move BOTH halves.
 func TestChaos130_SnapshotRepointMovesBothHalves(t *testing.T) {
 	ensureObservabilityStartupTestLogger(t)

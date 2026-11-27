@@ -170,7 +170,7 @@ func (e *SpanExporter) Configure(endpoint string, headers map[string]string) {
 	// start decision from the normalised value. Deriving them from the raw
 	// argument let Configure("/") store an empty endpoint while reporting
 	// Enabled() == true and starting a loop that could never post.
-	endpoint = strings.TrimRight(strings.TrimSpace(endpoint), "/")
+	endpoint = NormalizeEndpoint(endpoint)
 
 	// CHAOS-130: the loop's context is built BEFORE the lock so that
 	// cancelling the old loop, publishing the new endpoint and publishing the

@@ -126,6 +126,22 @@ single `enabled` read from the metrics exporter, and the legacy panel renders
 that flag as *"✓ Exporting metrics + traces to …"* (`static/index.html:11536`).
 Every surface an operator has agreed that everything was fine.
 
+**CHAOS-130e (LOW, found while rewriting the reconcile) — the reconcile
+compared two different alphabets.** `Configure` normalises its argument
+(`TrimSpace` then strip trailing `/`), so `Endpoint()` returns the *normalised*
+value — and the apply compared it against the **raw** `snap.OTLPEndpoint`. A
+control plane whose stored endpoint carries a trailing slash or stray
+whitespace therefore compared unequal on **every** apply. `CHAOS-126` flagged
+exactly this class in `MetricsExporter.Configure`'s own comment and fixed the
+normalisation; the comparison was left reading the un-normalised side.
+Measured on the pre-fix tree: five consecutive snapshots that change nothing
+produced **10 reconfigure log lines** — both push loops cancelled and
+restarted, and the cancelled loop's bounded final flush run, on each apply.
+Rated LOW because today's snapshot producers emit an already-normalised value
+(`snap.OTLPEndpoint = globalOTLP.Endpoint()`, `controlplane_snapshot.go:2209`,
+and `AdminSettings.OTLPEndpoint` likewise), so it is latent rather than live —
+but it is latent only by the grace of a producer, which is not a guarantee.
+
 **The asymmetry the design missed**, in one sentence: `Stop()` sets
 `cancel = nil` because it knows a disabled exporter owns no loop, and
 `Configure` published the endpoint before the `cancel` — so the one function
@@ -151,6 +167,7 @@ that creates ownership was the one that briefly had none.
 | F12 | Five applies carrying the endpoint already in use | no-op (correct) | unchanged — buffered spans are not discarded by a reconcile that changes nothing |
 | F13 | A plane half enabled for any reason | no row, no counter, no log line | `otlp_export_partial` WARN naming the dark half |
 | F14 | Reconfigure storm while recording and pushing | — | no leak, export continues (race detector clean) |
+| F15 | Snapshot endpoint differing only by a trailing slash or whitespace | both push loops restarted on **every** apply | a no-op |
 
 ---
 
@@ -162,6 +179,7 @@ that creates ownership was the one that briefly had none.
 | 130b | Traces (or metrics) dark forever after a half transition | **MED** | LOW–MED — needs 130a's window or any sequence interruption | all trace data for that node | **none** |
 | 130c | CP disable leaves the other half exporting | **MED→HIGH** posture | LOW — needs metrics already off | per-request client IP, host, rule and decision keep leaving the appliance | **none**; CP believes it complied |
 | 130d | A half-enabled plane is unreportable | **MED** | certain, given 130b/c | the operator's whole picture | n/a — this *is* the detectability finding |
+| 130e | Reconcile compares a raw endpoint against a normalised one | **LOW** | latent — needs a producer that does not normalise | both push loops restarted per apply, per node | a repeating log line nobody reads |
 
 Severity is capped at MED for 130a/b because the data at risk is telemetry, not
 traffic: proxy enforcement, policy and the audit trail are untouched on every
@@ -240,6 +258,11 @@ four callers go through them.
 `else if globalOTLP.Enabled()` arm that failed open is gone, replaced by a
 per-exporter stop.
 
+**One definition of the stored endpoint form (`otlp.NormalizeEndpoint`).**
+Exported from the engine and used by both `Configure`s and by the reconcile, so
+a caller comparing a configured endpoint against `Endpoint()` cannot drift from
+the normalisation `Configure` applies (130e).
+
 **A half-enabled plane is reportable (`diagnostics_otlp_export.go`).** A new
 `otlp_export_partial` WARN row names the dark half and says it will not recover
 on its own. It reads both halves under `otlpPairMu`, so a transition caught in
@@ -251,7 +274,7 @@ that exist today and the failure mode it guards is silence.
 
 ## 8. Required tests — shipped
 
-`internal/otlp/lifecycle_ownership_chaos130_test.go` (7 gates):
+`internal/otlp/lifecycle_ownership_chaos130_test.go` (8 gates):
 
 - `ConcurrentConfigureLeavesOneSpanPushLoop` / `…MetricsPushLoop` — 60 rounds
   of 8 concurrent `Configure` on a fresh exporter; exactly one loop, and zero
@@ -264,13 +287,19 @@ that exist today and the failure mode it guards is silence.
 - `DisableLeavesNoLoopAndNoStaleCancel`, `SpanExporterReportsItsEndpoint`,
   `ConfigureUnderConcurrentLoadStillDelivers` (recording + pushing +
   reconfiguring at once, must still deliver).
+- `NormalizeEndpointIsTheStoredForm` — the exported rule over ten endpoint
+  shapes, plus the invariant that binds it to `Configure`: for every shape,
+  what `Configure` stores is what `NormalizeEndpoint` returns.
 
-`otlp_pair_lifecycle_chaos130_test.go` (6 gates): the snapshot restoring a
+`otlp_pair_lifecycle_chaos130_test.go` (7 gates): the snapshot restoring a
 traces exporter stopped alone; the disabling snapshot stopping traces with
 metrics already off (F9); a coherent plane left alone with no span discarded
 (F12); a repoint moving both halves; 200 concurrent pair transitions never
-settling half on; and the `otlp_export_partial` row present for each direction
-and absent for both-on and both-off.
+settling half on; the `otlp_export_partial` row present for each direction
+and absent for both-on and both-off; and five snapshots differing from the
+stored endpoint only by normalisation emitting **zero** reconfigure log lines
+(the oracle is the exporters' own "exporting … to" line, which is what an
+operator would see repeating on a node that is changing nothing).
 
 **Differential oracle.** Each gate was run against the pre-fix shape, with the
 fix reverted in place and the rest of the tree held constant:
@@ -285,6 +314,7 @@ fix reverted in place and the rest of the tree held constant:
 | `SnapshotRestoresATracesExporterStoppedAlone` | FAIL |
 | `SnapshotDisableStopsTracesEvenWhenMetricsIsAlreadyOff` | FAIL |
 | `HalfEnabledExportIsReported` (both directions) | FAIL — the state was silent |
+| `SnapshotEndpointNormalisationIsANoOp` | FAIL — 10 reconfigure lines across 5 no-op snapshots |
 | `StopAndConfigureAreExclusive` | **PASS** — see §9 |
 
 ---
