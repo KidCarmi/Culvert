@@ -209,6 +209,40 @@ func authLDAPProfileDiagnostics() []OperatorContractCheck {
 	return checks
 }
 
+// authOIDCProfileDiagnostics reports enabled OIDC IdP profiles whose
+// certificate verification is disabled (tlsSkipVerify). Report-only, the OIDC
+// counterpart of ldap_tls_unverified: newOIDCFlowProvider then runs discovery,
+// the code exchange and the JWKS fetch over an unverified channel, and before
+// this the only signal was a compile-time log line (RISK-009).
+// Code: oidc_tls_unverified WARN. Contributes nothing when no enabled OIDC
+// profile skips verification.
+func authOIDCProfileDiagnostics() []OperatorContractCheck {
+	if idpRegistry == nil {
+		return nil
+	}
+	var unverified []string
+	for _, p := range idpRegistry.All() {
+		if p == nil || !p.Enabled || p.Type != IdPTypeOIDC || p.OIDC == nil || !p.OIDC.TLSSkipVerify {
+			continue
+		}
+		label := p.Name
+		if label == "" {
+			label = p.ID
+		}
+		unverified = append(unverified, label)
+	}
+	if len(unverified) == 0 {
+		return nil
+	}
+	return []OperatorContractCheck{{
+		Code:   "oidc_tls_unverified",
+		Status: diagWarn,
+		Message: "OIDC identity provider(s) have TLS certificate verification DISABLED — discovery, token exchange and signing-key (JWKS) fetches are open to interception, so a man-in-the-middle could mint accepted ID tokens: " +
+			strings.Join(unverified, ", "),
+		OperatorAction: "Give the IdP a certificate this appliance trusts, then clear \"Skip TLS certificate verification\" on the provider in Objects → Identity Providers.",
+	}}
+}
+
 // maxShadowFindings caps shadow rows so a pathological ruleset can't flood the
 // operator contract.
 const maxShadowFindings = 25
