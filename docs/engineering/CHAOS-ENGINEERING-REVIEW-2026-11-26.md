@@ -257,7 +257,10 @@ that was honestly absent.
    blocks, reassemble.
 4. **`shapeReassembledBody`: the origin's `Close` survives reassembly.** See
    §11 — this is the defect this round introduced and caught.
-5. **The host-exclusion short-circuit was moved AHEAD of the scanner gate on the
+5. **Streaming content types are skipped on the bounded path** so the stage
+   cannot stall an idle SSE or gRPC server-stream behind its own read — the one
+   place this round trades coverage for availability, recorded in §10.6.
+6. **The host-exclusion short-circuit was moved AHEAD of the scanner gate on the
    plain-HTTP leg**, so the admin allowlist still covers the stage now that the
    stage is reached with no scanner active. It is the one exemption that leaves a
    response without a shape verdict, on both legs, deliberately.
@@ -288,7 +291,7 @@ that was honestly absent.
 
 ## 8. Required tests — shipped
 
-`content_shape_chaos129_test.go` (12 gates) and
+`content_shape_chaos129_test.go` (13 gates) and
 `internal/filemagic/window_chaos129_test.go` (2 gates).
 
 | Gate | Property |
@@ -304,6 +307,7 @@ that was honestly absent.
 | `…_PlainHTTP_EmptyBodySurvives` | The degenerate case |
 | `…_Inspect_CleanBodyPassesIntact` | Negative control on the leg where reassembly is NEW; origin body not closed by the stage, and closing the reassembled body DOES close the origin |
 | `…_PlainHTTP_ShapeReadErrorFailsClosed` | 502 + `upstreamReadErr` for the breaker |
+| `…_StreamingContentTypesAreNeverRead` | §10.6; asserts the stage does not READ the body, with a fixture that fails the test when touched |
 | `…_ISO9660_IsTheRecordedResidueOfThePrefixWindow` | Residue in both directions: not caught on the prefix window, still caught on the full one |
 | `TestDetectionWindows_DeriveFromTable` | Both windows track the table; a hand-edited constant fails |
 | `TestPrefixWindow_MatchesEveryOffsetZeroSignature` | Every offset-0 signature matches at exactly `PrefixWindow()` bytes; the offset-16-sector one does not |
@@ -391,6 +395,23 @@ the way it briefly was here. In practice `net/http` auto-closes a body read to
 EOF, so the leak needs a client that disconnects mid-response; it is pre-existing
 and out of this round's finding, recorded so the asymmetry with
 `shapeReassembledBody` is deliberate and visible rather than accidental.
+
+**10.6 Streaming content types are skipped on the shape-only path, and that is
+an evasion.** The stage runs before the response reaches the client, so its
+≤6-byte read would hold an idle `text/event-stream`, `application/grpc` or
+`multipart/x-mixed-replace` response's headers back until the server had an
+event. Before this round the no-scanner path read nothing, so stalling one would
+be a regression in traffic that worked — and an operator on a node with no
+scanner has had no reason to populate the scan-exclusion host allowlist that is
+the existing remedy. The types are therefore skipped, which never makes anything
+worse than the status quo (with a scanner configured they go through the
+content-type-independent full-window path, which already buffers them), but it
+does mean an origin on an unscanned node can keep a body away from both
+content-shape blocks by DECLARING one of those types. Closing it needs a
+deadline-bounded read, which `io.Reader` cannot express.
+`TestCHAOS129_StreamingContentTypesAreNeverRead` asserts the no-read property
+with a body that fails the test when touched, so "no stall" is proven rather
+than assumed.
 
 **10.5 `IsBlockedArchive`'s `.zip`-implies-every-archive rule** (`filemagic.go:31`)
 is unchanged and unexamined by this round. It means an operator who blocks `.zip`

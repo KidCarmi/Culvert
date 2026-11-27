@@ -69,6 +69,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"strings"
 	"sync/atomic"
 
 	"github.com/KidCarmi/Culvert/internal/filemagic"
@@ -78,11 +79,51 @@ import (
 // the signature table rather than written down (filemagic.PrefixWindow).
 func shapeStagePrefixBytes() int64 { return int64(filemagic.PrefixWindow()) }
 
+// streamingContentTypes are the content types whose contract is "the body
+// arrives when the server has something to say". They are skipped by the
+// shape-only path for an availability reason, and it is the one place this
+// round trades coverage for it.
+//
+// The stage reads up to shapeStagePrefixBytes() before the response reaches the
+// client, and on these types that read can block indefinitely: an idle SSE or
+// gRPC server-stream sends headers and then nothing until an event occurs, so
+// a six-byte read holds the headers back with it. Before this round the
+// no-scanner path read NOTHING, so stalling one is a regression in working
+// traffic, which is a worse outcome than the coverage gap — the more so because
+// an operator on a node with no scanner has had no reason to populate the
+// scan-exclusion host allowlist that is the existing remedy.
+//
+// This never makes anything worse than the status quo: with a scanner
+// configured these same types go through the FULL window path, which is
+// content-type-independent and already buffers them. The gap is confined to the
+// posture that had no content-shape coverage at all, and it is a real evasion —
+// an origin that declares `text/event-stream` and serves a PE is not shape-
+// checked on an unscanned node. Recorded as a residue; closing it needs a
+// deadline-bounded read, which io.Reader cannot express.
+var streamingContentTypes = []string{
+	"text/event-stream",
+	"application/grpc",
+	"multipart/x-mixed-replace",
+}
+
 // contentShapeDeferredToFullWindow reports whether a response must be left to
-// the scanner's full-window path instead of the bounded shape-only one. A
-// declared Content-Encoding is the only such case: see the file comment.
+// the scanner's full-window path instead of the bounded shape-only one.
+//
+// Two cases. A declared Content-Encoding: six bytes cannot be expanded, and
+// judging the compressed bytes would block a gzip-encoded PDF as "GZIP
+// disguised as application/pdf" (see the file comment). And a streaming content
+// type: see streamingContentTypes.
 func contentShapeDeferredToFullWindow(resp *http.Response) bool {
-	return resp.Header.Get("Content-Encoding") != ""
+	if resp.Header.Get("Content-Encoding") != "" {
+		return true
+	}
+	ct := strings.ToLower(resp.Header.Get("Content-Type"))
+	for _, s := range streamingContentTypes {
+		if strings.Contains(ct, s) {
+			return true
+		}
+	}
+	return false
 }
 
 // shapeReassembledBody is "the prefix this stage read, then the untouched

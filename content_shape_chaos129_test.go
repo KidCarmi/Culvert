@@ -272,6 +272,50 @@ func TestCHAOS129_PlainHTTP_EncodedBodyIsNotAFalsePositive(t *testing.T) {
 	}
 }
 
+// A streaming content type must not be READ by the shape stage at all. The
+// stage runs before the response reaches the client, so a six-byte read on an
+// idle SSE or gRPC server-stream would hold the headers back until the server
+// has an event — a stall in traffic that worked before this round, since the
+// no-scanner path previously read nothing. The assertion is on the READ, not on
+// the verdict: a fixture body that fails the test when touched is the only way
+// to prove no stall is possible rather than merely unlikely.
+func TestCHAOS129_StreamingContentTypesAreNeverRead(t *testing.T) {
+	for _, ct := range []string{
+		"text/event-stream",
+		"text/event-stream; charset=utf-8",
+		"application/grpc+proto",
+		"multipart/x-mixed-replace; boundary=frame",
+	} {
+		t.Run(ct, func(t *testing.T) {
+			tripwire := &chaos129TripwireBody{t: t}
+			resp := &http.Response{
+				StatusCode:    http.StatusOK,
+				Header:        http.Header{"Content-Type": {ct}},
+				ContentLength: -1,
+				Body:          tripwire,
+			}
+			w := httptest.NewRecorder()
+			handled, readErr := scanHTTPResponseBody(w, chaos129Req(), resp, ProxyIdentity{})
+			if handled || readErr != nil {
+				t.Fatalf("a streaming response was handled: handled=%v err=%v status=%d", handled, readErr, w.Code)
+			}
+			if resp.Body != io.ReadCloser(tripwire) {
+				t.Error("the streaming body was wrapped; it must be left exactly as the origin gave it")
+			}
+		})
+	}
+}
+
+// chaos129TripwireBody fails the test if anything reads it.
+type chaos129TripwireBody struct{ t *testing.T }
+
+func (b *chaos129TripwireBody) Read([]byte) (int, error) {
+	b.t.Error("the shape stage read a streaming body — an idle stream would stall behind this read")
+	return 0, io.EOF
+}
+
+func (b *chaos129TripwireBody) Close() error { return nil }
+
 // ── The recorded residue ─────────────────────────────────────────────────────
 
 // ISO9660 is outside the prefix window by construction, so the shape-only path
