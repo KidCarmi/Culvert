@@ -702,6 +702,7 @@ contracts:
       forbidden:
         - "the observer beginning an operation, running a state-changing Docker command, or writing a journal record or audit entry"
         - "keeping a sample whose container, image, running state or fixed tag changed across the probe"
+        - "gating, or writing last_good, while the fixed tag could not be inspected"
         - "writing or clearing last_good from an unhealthy, unknown, stale or discarded observation"
         - "recording as last_good an image without a repo-bound, allow-listed digest reference"
         - "reporting a container id in GET /v1/status runtime_health"
@@ -709,6 +710,7 @@ contracts:
       - {file: "cmd/culvert-maint/internal/server/runtime_observer_test.go", name: TestObserver_GatedRecordsLastGood}
       - {file: "cmd/culvert-maint/internal/server/runtime_observer_test.go", name: TestObserver_BadObservationsKeepLastGood}
       - {file: "cmd/culvert-maint/internal/server/runtime_observer_test.go", name: TestObserver_IdentityChangeAcrossTheProbeDiscards}
+      - {file: "cmd/culvert-maint/internal/server/runtime_observer_test.go", name: TestObserver_UnreadableTagNeverGates}
       - {file: "cmd/culvert-maint/internal/server/runtime_observer_test.go", name: TestObserver_SkipsWhileTheLockIsHeldOrTheWindowIsOpen}
       - {file: "cmd/culvert-maint/internal/server/runtime_observer_test.go", name: TestObserver_WritesOnlyTheHealthDirectory}
       - {file: "cmd/culvert-maint/internal/server/runtime_observer_test.go", name: TestObserver_GatedWithoutValidatedRefIsNotLastGood}

@@ -336,7 +336,7 @@ operation, no journal record, no audit entry):
 
 | File | Written when | Never |
 |---|---|---|
-| `latest.json` | every reading kept: `gated`, `unhealthy` (no proxy container, not running, `/ready` failed) or `unknown` (Docker or the check could not be read) | |
+| `latest.json` | every reading kept: `gated`, `unhealthy` (no proxy container, not running, `/ready` failed) or `unknown` (Docker, `culvert/proxy:pinned` or the check could not be read; with the tag unreadable no check runs) | |
 | `last_good.json` | the check passed with nothing changing around it, on an image with a `<proxy_repo>@sha256:…` reference that `image_allowlist` admits | removed or overwritten by a failed, unknown or dropped reading |
 
 `GET /v1/status` gains `runtime_health` (absent when off):

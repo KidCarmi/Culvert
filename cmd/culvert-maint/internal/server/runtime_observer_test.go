@@ -163,6 +163,44 @@ func TestObserver_GatedWithoutValidatedRefIsNotLastGood(t *testing.T) {
 	}
 }
 
+// An unreadable fixed tag is unknown, not a value two reads agree on: with it
+// unreadable before the probe nothing is gated and last_good stays; with it
+// unreadable only after, the sample is discarded.
+func TestObserver_UnreadableTagNeverGates(t *testing.T) {
+	t.Run("unreadable before", func(t *testing.T) {
+		r := newObsRig(t)
+		if out := r.srv.observeOnce(context.Background()); out != obsRecordedAndGood {
+			t.Fatalf("first observation = %s", out)
+		}
+		good := r.lastGoodBytes(t)
+		r.docker.tag, r.docker.tagEr = "", errors.New("no such image: culvert/proxy:pinned")
+		probed := false
+		r.srv.observer.afterProbe = func() { probed = true }
+		if out := r.srv.observeOnce(context.Background()); out != obsRecorded {
+			t.Fatalf("observeOnce = %s", out)
+		}
+		if smp := r.latest(t); smp.State != runtimehealth.StateUnknown || smp.Reason != obsReasonTagUnreadable {
+			t.Fatalf("latest = %+v", smp)
+		}
+		if probed {
+			t.Fatal("the gate ran with the fixed tag unreadable")
+		}
+		if got := r.lastGoodBytes(t); got != good {
+			t.Fatalf("last_good changed:\nbefore %s\nafter  %s", good, got)
+		}
+	})
+	t.Run("unreadable after", func(t *testing.T) {
+		r := newObsRig(t)
+		r.srv.observer.afterProbe = func() { r.docker.tag, r.docker.tagEr = "", errors.New("inspect failed") }
+		if out := r.srv.observeOnce(context.Background()); out != obsDiscarded {
+			t.Fatalf("observeOnce = %s, want %s", out, obsDiscarded)
+		}
+		if b := r.lastGoodBytes(t); b != "" {
+			t.Fatalf("last_good written: %s", b)
+		}
+	})
+}
+
 // The repository binding holds even when the operator's image allowlist is
 // broader than the configured proxy repository.
 func TestObserver_LastGoodIsRepoBoundWhateverTheAllowlist(t *testing.T) {
