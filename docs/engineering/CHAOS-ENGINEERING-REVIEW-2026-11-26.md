@@ -329,7 +329,13 @@ Run on `claude/serene-cerf-fesvym` at the final tree.
   the shape window was not handled`; `outcome = 0, want scanBlocked`). The
   negative controls pass both ways, which is what makes them controls.
 - `go test ./internal/...` — PASS, exit 0, no failures.
-- `go test .` (root package, full) — see §9.1.
+- `go test .` (root package, full, 1690 test files) — **PASS, exit 0**, 453 s,
+  after the regression in §9.1 was fixed. Two earlier full runs are part of the
+  record: the first FAILED (§9.1) and the second passed before the streaming
+  skip (§10.6) was added, which is why a third was run.
+- `go test -race` over the affected tests (`TestCHAOS129*`, `TestCHAOS106*`,
+  `TestScanHTTPResponseBody*`, `TestRunInspectExchange*`, `TestC5_*`) — PASS.
+- `go test ./internal/filemagic/ ./internal/secscan/` — PASS.
 - `golangci-lint run --timeout=15m --new-from-rev origin/main` with the gate's
   own pin (`v2.15.0`, installed under the `go.mod` toolchain `go1.27.4`) —
   **0 issues.** Three `bodyclose` findings and one `noctx` finding in the new
@@ -354,9 +360,15 @@ The first full root run **FAILED**, on a test this round did not write:
     inspect_exchange_test.go:300: delivered: resp.Body closed 0 times, want 1
 ```
 
-That is finding 129e and §11. It was fixed and the suite re-run; the result of
-the re-run is recorded in the pull request rather than asserted here, because a
-hosted gate's verdict is not a local one's — see the closing note.
+That is finding 129e and §11. It was fixed and the suite re-run to a clean
+`ok … 453.356s`, exit 0.
+
+The full-tree lint totals are identical before and after this round — **174
+issues, the same 13 categories** — which is the comparison that matters for the
+declaration-line linters, and the stronger statement is that no finding in
+either run names `content_shape.go`, `content_shape_chaos129_test.go`,
+`internal/filemagic/window_chaos129_test.go`, `proxy_http.go` or
+`proxy_tunnel.go`.
 
 ---
 
