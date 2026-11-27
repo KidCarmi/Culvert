@@ -236,3 +236,41 @@ func TestAuthLDAPProfileDiagnostics(t *testing.T) {
 		}
 	}
 }
+
+// An enabled OIDC profile that skips certificate verification is a WARN row
+// naming it; a verifying or disabled profile contributes nothing.
+func TestAuthOIDCProfileDiagnostics(t *testing.T) {
+	orig := idpRegistry
+	t.Cleanup(func() { idpRegistry = orig })
+	oidc := func(id, name string, enabled, skip bool) *IdPProfile {
+		return &IdPProfile{ID: id, Name: name, Type: IdPTypeOIDC, Enabled: enabled,
+			OIDC: &OIDCProfileConfig{Issuer: "https://idp.example", ClientID: "c", TLSSkipVerify: skip}}
+	}
+	idpRegistry = &IdPRegistry{live: map[string]IdentityProvider{}, profiles: []*IdPProfile{
+		oidc("o-verify", "Verified Okta", true, false),
+		oidc("o-off", "Disabled Dev", false, true),
+	}}
+	if got := authOIDCProfileDiagnostics(); len(got) != 0 {
+		t.Fatalf("verifying/disabled profiles must contribute nothing, got %+v", got)
+	}
+
+	idpRegistry.profiles = append(idpRegistry.profiles, oidc("o-skip", "Lab Keycloak", true, true))
+	got := authOIDCProfileDiagnostics()
+	if len(got) != 1 || got[0].Code != "oidc_tls_unverified" || got[0].Status != diagWarn {
+		t.Fatalf("want one oidc_tls_unverified warn row, got %+v", got)
+	}
+	if !strings.Contains(got[0].Message, "Lab Keycloak") || strings.Contains(got[0].Message, "Disabled Dev") ||
+		strings.Contains(got[0].Message, "Verified Okta") {
+		t.Fatalf("row must name only the enabled unverified profile: %q", got[0].Message)
+	}
+
+	found := false
+	for _, c := range buildOperatorContract().Checks {
+		if c.Code == "oidc_tls_unverified" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("oidc_tls_unverified missing from the operator contract")
+	}
+}

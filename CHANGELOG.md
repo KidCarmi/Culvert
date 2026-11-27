@@ -9,6 +9,14 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Fixed
 
+- **An OIDC identity provider with certificate verification turned off is no
+  longer invisible.** `tlsSkipVerify` on an OIDC profile was kept in a hidden
+  field of the Identity Providers form and reported only by a log line, so an
+  operator could neither see nor clear it from the GUI. The form now shows it
+  as a "Skip TLS certificate verification (unsafe)" checkbox, the provider card
+  marks it "TLS unverified!", and Diagnostics adds an `oidc_tls_unverified`
+  warning naming each enabled provider that skips verification (the OIDC
+  counterpart of `ldap_tls_unverified`). Authentication behavior is unchanged.
 - **Restore now works on the Docker Compose deployment.** A restore commit
   swapped `/data` by renaming the directory itself, with its staging and
   backup directories beside it in `/`. In the shipped compose file `/data` is a

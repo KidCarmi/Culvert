@@ -1995,7 +1995,6 @@ table.mcpx-cat-tbl td{padding:6px 10px;border-bottom:1px solid var(--border)}
           <div id="idp-oidc-fields" style="display:none">
             <input type="hidden" id="idp-oidc-required-scope">
             <input type="hidden" id="idp-oidc-required-audience">
-            <input type="hidden" id="idp-oidc-tls-skip">
             <div style="border-top:1px solid var(--border);margin:18px 0 16px;position:relative">
               <span style="position:absolute;top:-9px;left:0;font-size:.7rem;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.08em;background:var(--surface1);padding-right:8px">OIDC Configuration</span>
             </div>
@@ -2033,6 +2032,10 @@ table.mcpx-cat-tbl td{padding:6px 10px;border-bottom:1px solid var(--border)}
                 <input id="idp-groups-claim" class="input" placeholder="groups" style="width:100%">
               </div>
             </div>
+            <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:.82rem;margin-top:12px">
+              <input type="checkbox" id="idp-oidc-tls-skip" style="width:auto">
+              <span>Skip TLS certificate verification <span style="color:#f87171;font-weight:600">(unsafe: discovery, token and signing-key fetches can be intercepted; test IdPs only)</span></span>
+            </label>
           </div>
 
           <!-- SAML fields -->
@@ -14272,7 +14275,7 @@ async function loadIdPList() {
     const metaLine = p.type === 'ldap' && p.ldap
       ? `<div style="font-size:.77rem;color:var(--muted);margin-top:4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escHtml(p.ldap.url || '')}">Server: <span style="color:var(--text)">${escHtml((p.ldap.url || '').replace(/^ldaps?:\/\//i,''))}</span> · Base DN: <span style="color:var(--text)">${escHtml(p.ldap.baseDn || '')}</span> · <span style="color:${ldapSecurity === 'Plain LDAP' ? '#f87171' : (ldapSecurity === 'LDAPS' ? '#22c55e' : 'var(--text)')}">${ldapSecurity}${p.ldap.tlsSkipVerify ? ' (unverified!)' : ''}</span></div>`
       : p.type === 'oidc' && p.oidc
-      ? `<div style="font-size:.77rem;color:var(--muted);margin-top:4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escHtml(p.oidc.issuer)}">Issuer: <span style="color:var(--text)">${escHtml(p.oidc.issuer)}</span></div>`
+      ? `<div style="font-size:.77rem;color:var(--muted);margin-top:4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escHtml(p.oidc.issuer)}">Issuer: <span style="color:var(--text)">${escHtml(p.oidc.issuer)}</span>${p.oidc.tlsSkipVerify ? ' · <span style="color:#f87171">TLS unverified!</span>' : ''}</div>`
       : p.type === 'saml' && p.saml && p.saml.metadataUrl
         ? `<div style="font-size:.77rem;color:var(--muted);margin-top:4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">Metadata URL configured</div>`
         : p.type === 'saml' && p.saml && !p.saml.metadataUrl
@@ -14540,7 +14543,7 @@ function openIdPModal(p) {
     document.getElementById('idp-groups-claim').value = oidc.groupsClaim  || '';
     document.getElementById('idp-oidc-required-scope').value = oidc.requiredScope || '';
     document.getElementById('idp-oidc-required-audience').value = oidc.requiredAudience || '';
-    document.getElementById('idp-oidc-tls-skip').value = oidc.tlsSkipVerify ? 'true' : '';
+    document.getElementById('idp-oidc-tls-skip').checked = !!oidc.tlsSkipVerify;
     const saml = p.saml || {};
     document.getElementById('idp-meta-url').value    = saml.metadataUrl    || '';
     document.getElementById('idp-meta-xml').value    = saml.metadataXml    || '';
@@ -14594,8 +14597,9 @@ function openIdPModal(p) {
     document.getElementById('idp-modal-title').textContent = 'Add Identity Provider';
     document.getElementById('idp-sp-info').style.display = 'none';
     // Reset form
-    ['idp-name','idp-domains','idp-issuer','idp-client-id','idp-client-secret','idp-scopes','idp-groups-claim','idp-oidc-required-scope','idp-oidc-required-audience','idp-oidc-tls-skip','idp-meta-url','idp-meta-xml','idp-saml-groups','idp-saml-email','idp-saml-nameid-format','idp-saml-name-attr','idp-ldap-server','idp-ldap-port','idp-ldap-basedn','idp-ldap-binddn','idp-ldap-bindpw','idp-ldap-filter','idp-ldap-email-attr','idp-ldap-name-attr','idp-ldap-group-attr','idp-ldap-required-group','idp-ldap-cachettl'].forEach(id => document.getElementById(id).value = '');
+    ['idp-name','idp-domains','idp-issuer','idp-client-id','idp-client-secret','idp-scopes','idp-groups-claim','idp-oidc-required-scope','idp-oidc-required-audience','idp-meta-url','idp-meta-xml','idp-saml-groups','idp-saml-email','idp-saml-nameid-format','idp-saml-name-attr','idp-ldap-server','idp-ldap-port','idp-ldap-basedn','idp-ldap-binddn','idp-ldap-bindpw','idp-ldap-filter','idp-ldap-email-attr','idp-ldap-name-attr','idp-ldap-group-attr','idp-ldap-required-group','idp-ldap-cachettl'].forEach(id => document.getElementById(id).value = '');
     document.getElementById('idp-ldap-skipverify').checked = false;
+    document.getElementById('idp-oidc-tls-skip').checked = false;
     document.getElementById('idp-ldap-sec-ldaps').checked = true;
     document.getElementById('idp-ldap-advanced').open = false;
     document.querySelectorAll('.idp-provider-card').forEach(c => c.classList.remove('selected'));
@@ -14862,7 +14866,7 @@ async function saveIdP() {
       groupsClaim:  document.getElementById('idp-groups-claim').value.trim(),
       requiredScope: document.getElementById('idp-oidc-required-scope').value.trim(),
       requiredAudience: document.getElementById('idp-oidc-required-audience').value.trim(),
-      tlsSkipVerify: document.getElementById('idp-oidc-tls-skip').value === 'true',
+      tlsSkipVerify: document.getElementById('idp-oidc-tls-skip').checked,
     };
     if (clearClientSecret) body.oidc.clientSecret = '';
     else if (clientSecret) body.oidc.clientSecret = clientSecret;
