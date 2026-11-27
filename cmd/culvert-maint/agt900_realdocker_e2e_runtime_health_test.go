@@ -229,10 +229,14 @@ func (e *e2eEnv) caseObserveHandRetag(t *testing.T, name string) {
 	r.noMutation(res, p, base)
 }
 
-// obs_upgrade: an upgrade runs while the observer is on. No sample is kept
-// while the upgrade holds the lock; afterwards the new image is gated.
+// obs_upgrade: an upgrade runs while the observer is on, and is held in the
+// shim right after its `compose up` (the new container is serving the target)
+// for longer than one observer interval, so at least one tick falls while the
+// upgrade holds the maintenance lock. No sample may be kept in that window;
+// afterwards the new image is gated. Without the hold the upgrade can finish
+// between two ticks and the row would prove nothing (review finding on #2129).
 func (e *e2eEnv) caseObserveAcrossUpgrade(t *testing.T, name string) {
-	res := &e2eResult{name: name, expected: "upgrade succeeds; no sample observed inside it; afterwards gated good, last_good=good"}
+	res := &e2eResult{name: name, expected: "upgrade held after its up for more than one interval: no sample kept while held; then succeeds, gated good, last_good=good"}
 	defer e.record(t, res)
 	if err := e.reset(); err != nil {
 		res.err = "reset: " + err.Error()
@@ -242,41 +246,45 @@ func (e *e2eEnv) caseObserveAcrossUpgrade(t *testing.T, name string) {
 	defer r.killProc(p)
 	v, _ := p.waitHealth(e2eFirstSample, healthIs("gated", "gate_passed", ""))
 	res.eq("before the upgrade", "gated/gate_passed", stateOf(v))
-	from := time.Now()
+	if err := os.WriteFile(filepath.Join(p.ctl, "block_on"), []byte("up_after:1\n"), 0o600); err != nil {
+		res.err = err.Error()
+		return
+	}
 	opID, err := r.apply(p, "good")
 	if err != nil {
 		res.err = err.Error()
 		return
 	}
-	var inside []time.Time
-	done := make(chan opView, 1)
-	go func() { done <- p.waitOp(opID, 10*time.Minute) }()
-	var op opView
-	for waiting := true; waiting; {
-		select {
-		case op = <-done:
-			waiting = false
-		case <-time.After(2 * time.Second):
-			if h := p.health().RuntimeHealth; h != nil && h.ObservedAt != nil && h.ObservedAt.After(from.Add(2*time.Second)) {
-				inside = append(inside, *h.ObservedAt)
-			}
-		}
+	if !waitFile(filepath.Join(p.ctl, "blocked"), 4*time.Minute) {
+		res.err = "the upgrade never reached up_after:1"
+		return
 	}
-	to := time.Now()
-	res.eq("upgrade", "succeeded", op.State)
+	heldFrom := time.Now()
+	// Longer than one interval: a tick is due while the upgrade is held, with
+	// the target already running and the fixed tag already on it.
+	_, seen := p.waitHealth(e2eNextSample-10*time.Second, func(e2eHealthView) bool { return false })
+	heldTo := time.Now()
+	if err := os.WriteFile(filepath.Join(p.ctl, "release"), []byte("1\n"), 0o600); err != nil {
+		res.err = err.Error()
+		return
+	}
 	kept := 0
-	for _, at := range inside {
-		if at.Before(to.Add(-2 * time.Second)) {
+	for _, at := range seen {
+		if at.After(heldFrom) && at.Before(heldTo) {
 			kept++
 		}
 	}
+	res.check("held across a scheduled tick", heldTo.Sub(heldFrom) > time.Minute, "> 1m", heldTo.Sub(heldFrom).Round(time.Second).String())
 	res.eq("samples kept while the upgrade held the lock", "0", fmt.Sprint(kept))
+	op := p.waitOp(opID, 10*time.Minute)
+	res.eq("upgrade", "succeeded", op.State)
 	goodID := e.snap().Image
 	v, _ = p.waitHealth(e2eNextSample+30*time.Second, healthIs("gated", "gate_passed", goodID))
 	res.eq("after the upgrade", "gated/gate_passed", stateOf(v))
 	if h := v.RuntimeHealth; h != nil && h.LastGood != nil {
 		res.eq("last_good", e.ref("good"), h.LastGood.Ref)
 	}
+	res.how = "held at up_after:1 for " + heldTo.Sub(heldFrom).Round(time.Second).String()
 	res.observed = fmt.Sprintf("op %s; %s", op.State, v)
 }
 
