@@ -72,6 +72,7 @@ const (
 // Reasons written into a sample.
 const (
 	obsReasonDockerUnreadable     = "docker_unreadable"
+	obsReasonTagUnreadable        = "pinned_tag_unreadable"
 	obsReasonNoContainer          = "no_proxy_container"
 	obsReasonNotRunning           = "container_not_running"
 	obsReasonProbeError           = "probe_error"
@@ -131,12 +132,15 @@ type observedIdentity struct {
 	containerID      string
 	imageID          string
 	repoDigests      []string
-	pinnedTagID      string // "" when the tag could not be read
+	pinnedTagID      string
+	// tagUnread: the fixed tag could not be inspected. Unknown is not a value
+	// that two reads can agree on, so such a read never counts as unchanged.
+	tagUnread bool
 }
 
 func (a observedIdentity) same(b observedIdentity) bool {
-	return a.present == b.present && a.running == b.running && a.containerID == b.containerID &&
-		a.imageID == b.imageID && a.pinnedTagID == b.pinnedTagID
+	return !a.tagUnread && !b.tagUnread && a.present == b.present && a.running == b.running &&
+		a.containerID == b.containerID && a.imageID == b.imageID && a.pinnedTagID == b.pinnedTagID
 }
 
 // readIdentity reads the proxy container and the fixed tag. An error means
@@ -148,9 +152,8 @@ func (s *Server) readIdentity(ctx context.Context) (observedIdentity, error) {
 		return observedIdentity{}, err
 	}
 	id := observedIdentity{present: pc.Present, running: pc.Running, containerID: pc.ContainerID, imageID: pc.ImageID, repoDigests: pc.RepoDigests}
-	if tag, terr := d.PinnedTagImageID(ctx); terr == nil {
-		id.pinnedTagID = tag
-	}
+	tag, terr := d.PinnedTagImageID(ctx)
+	id.pinnedTagID, id.tagUnread = tag, terr != nil || tag == ""
 	return id, nil
 }
 
@@ -178,6 +181,10 @@ func (s *Server) observeOnce(ctx context.Context) string {
 		return s.keep(runtimehealth.Sample{State: runtimehealth.StateUnhealthy, Reason: obsReasonNoContainer, PinnedTagImageID: before.pinnedTagID})
 	case !before.running:
 		return s.keep(before.sample(runtimehealth.StateUnhealthy, obsReasonNotRunning, ""))
+	case before.tagUnread:
+		// No gate without knowing what the next recreate would start: the
+		// sample is unknown and last_good is left as it is.
+		return s.keep(before.sample(runtimehealth.StateUnknown, obsReasonTagUnreadable, ""))
 	}
 	hr, perr := s.runProbe(ctx)
 	if s.observer.afterProbe != nil {
