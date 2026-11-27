@@ -124,7 +124,7 @@ func (r *e2eRig) noMutation(res *e2eResult, p *agentProc, base string) {
 // last_good; a failing /ready and then a stopped proxy are each reported
 // unhealthy and leave last_good byte for byte.
 func (e *e2eEnv) caseObserveGatedThenBad(t *testing.T, name string) {
-	res := &e2eResult{name: name, expected: "gated prior + last_good=prior; then unhealthy/not_ready; then unhealthy/no_proxy_container; last_good unchanged, Docker unchanged"}
+	res := &e2eResult{name: name, expected: "gated prior + last_good=prior; then unhealthy/not_ready; then (tag removed) unknown/pinned_tag_unreadable; then unhealthy/no_proxy_container; last_good unchanged throughout; the agent changed nothing"}
 	defer e.record(t, res)
 	if err := e.reset(); err != nil {
 		res.err = "reset: " + err.Error()
@@ -150,6 +150,21 @@ func (e *e2eEnv) caseObserveGatedThenBad(t *testing.T, name string) {
 	res.eq("after /ready fails", "unhealthy/not_ready", stateOf(v))
 	res.check("last_good unchanged after a failed gate", r.lastGoodFile() == good, "unchanged", sameOrChanged(r.lastGoodFile(), good))
 	_ = os.Remove(e.ctlFile("fail_ready_prior"))
+
+	// The fixed tag removed (the image stays, under its digest reference): the
+	// next recreate's image is unknown, so nothing is gated (review finding
+	// on #2127) and last_good stays.
+	if _, err := e.docker("image", "rm", e2ePinned); err != nil {
+		res.err = err.Error()
+		return
+	}
+	v, _ = p.waitHealth(e2eNextSample, healthIs("unknown", "pinned_tag_unreadable", ""))
+	res.eq("after the fixed tag is removed", "unknown/pinned_tag_unreadable", stateOf(v))
+	res.check("last_good unchanged with the tag unreadable", r.lastGoodFile() == good, "unchanged", sameOrChanged(r.lastGoodFile(), good))
+	if _, err := e.docker("tag", e.ref("prior"), e2ePinned); err != nil {
+		res.err = err.Error()
+		return
+	}
 
 	s := e.snap()
 	if _, err := e.docker("stop", s.ContainerID); err != nil {
