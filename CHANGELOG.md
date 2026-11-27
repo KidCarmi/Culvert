@@ -9,6 +9,31 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Fixed
 
+- **Archive magic-byte blocking and polyglot detection no longer need a malware
+  scanner to be configured.** Both controls decide from the first bytes of a
+  response alone — the polyglot check compares the type it detects against the
+  `Content-Type` the origin itself sent, and the archive check asks the
+  operator's own file profile — but both were reached only from inside the
+  scanner's response-buffering branch. On a gateway with no ClamAV address, no
+  YARA rules and no scan sidecar, neither ran: measured on the proxy response
+  path, a ZIP body served as `Content-Type: text/plain` was forwarded with
+  status 200 without a scanner and blocked with `403 POLYGLOT_BLOCKED` as soon
+  as an unrelated ClamAV client was configured. An operator who had blocked
+  `.zip` downloads got nothing on such a node either. It could also change at
+  runtime: deleting the last YARA rule from the admin UI took both controls
+  away on a node whose only engine was YARA, with no log line, no counter and
+  no alert — while a ClamAV daemon *outage* correctly left them alone. A
+  response whose declared `Content-Length` exceeded the scan window skipped
+  both controls too, with scanning fully configured. Both the plain-HTTP and
+  the SSL-inspect path now evaluate them over a bounded six-byte prefix, so the
+  memory the old gate was protecting is not spent: a scanner that is configured
+  still buffers its full window as before. The admin scan-exclusion host
+  allowlist still exempts the stage on both paths. ISO9660 (whose signature
+  sits 32 KiB into the file), bodies with a `Content-Encoding`, and streaming
+  content types (`text/event-stream`, `application/grpc`,
+  `multipart/x-mixed-replace` — where a six-byte read would hold an idle
+  stream's headers back) remain with the full-window path.
+
 - **Restore now works on the Docker Compose deployment.** A restore commit
   swapped `/data` by renaming the directory itself, with its staging and
   backup directories beside it in `/`. In the shipped compose file `/data` is a
