@@ -1031,6 +1031,10 @@ seed_from_catalog() {
   # volume-kept reinstall case.
   local floordir
   if floordir="$(stage_rollback_floor)"; then
+    # stage_rollback_floor ran in the $(...) subshell, so its own
+    # BOOTSTRAP_FLOOR_DIR assignment never reached this shell; record the dir
+    # here or the RETURN-trap cleanup leaves it behind in $INSTALL_DIR.
+    BOOTSTRAP_FLOOR_DIR="$floordir"
     info "Enforcing the anti-rollback floor from the surviving proxy-data volume."
     cmd+=(--data-dir "$floordir")
   fi
