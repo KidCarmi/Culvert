@@ -92,9 +92,9 @@ func writeAuditExport(w http.ResponseWriter, format string, entries []AuditEntry
 		cw.Write([]string{"timestamp", "time", "actor", "action", "object", "object_id", "detail", "before", "after"}) //nolint:errcheck // CSV write
 		for i := range entries {
 			e := &entries[i]
-			cw.Write([]string{ //nolint:errcheck // CSV write
+			cw.Write(csvTextRow( //nolint:errcheck // CSV write
 				fmt.Sprintf("%d", e.TS), e.Time, e.Actor, e.Action, e.Object, e.ObjectID, e.Detail, e.Before, e.After,
-			})
+			))
 		}
 		cw.Flush()
 	default: // json

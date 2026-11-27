@@ -3026,13 +3026,14 @@ func apiExport(w http.ResponseWriter, r *http.Request) {
 		cw.Write([]string{"timestamp", "time", "ip", "identity", "method", "host", "status", "level", "rule_matched", "action_taken", "bytes_sent", "bytes_recv", "ssl_action"}) //nolint:errcheck // CSV write
 		for i := range entries {
 			e := &entries[i]
-			cw.Write([]string{ //nolint:errcheck // CSV write
+			// Identity, Method and Host are chosen by the proxied client.
+			cw.Write(csvTextRow( //nolint:errcheck // CSV write
 				fmt.Sprintf("%d", e.TS),
 				e.Time, e.IP, e.Identity, e.Method, e.Host, e.Status, e.Level,
 				e.RuleMatched, e.ActionTaken,
 				fmt.Sprintf("%d", e.BytesSent), fmt.Sprintf("%d", e.BytesRecv),
 				e.SSLAction,
-			})
+			))
 		}
 		cw.Flush()
 
