@@ -338,6 +338,41 @@ Go 1.27.4 (`go.mod` `toolchain`), `GOTOOLCHAIN` not overridden.
   statement changes, so no `amended`/`retired` record is due.
 - `go test ./internal/contracts/ -count=1` — **ok** (registry soundness).
 - `python3 docs/agent-context/check.py` — passes.
+- `go test . -count=1` (the whole root package) — **ok**.
+- `go test . -run 'TestChaos130|OTLP|Observability|Chaos126' -count=2 -shuffle=on`
+  and `go test ./internal/otlp/ -count=2 -shuffle=on -race` — **ok**, for the
+  shared-global hygiene the conventions require of a test that touches
+  `globalOTLP`/`globalOTLPTraces`.
+- **golangci-lint v2.15.0**, the version
+  [pr-fast-gate.yml](../../.github/workflows/pr-fast-gate.yml) installs, built
+  with the `go.mod` toolchain (`GOTOOLCHAIN=go1.27.4 go install
+  …/golangci-lint@v2.15.0`) rather than the container's older binary:
+  - the gate's own command, `run --new-from-rev origin/main` — **0 issues**.
+  - a **full-tree** pass as well, because `cyclop`, `funlen` and `gocognit`
+    attribute to a function's DECLARATION line and a diff-scoped run cannot see
+    a function made more complex in place. The full tree reports 174
+    pre-existing issues; **none is in any file this change touches**, and none
+    names any function it changed or added. Checked explicitly: the complexity
+    findings in `controlplane_snapshot.go`, `admin_settings.go` and
+    `ui_config.go` are `validateConfigSnapshot`, `applySnapshotClusterRuntime`,
+    `CurrentConfigSnapshot`, `apiConfigExport`, `buildImportSettingsPreview`,
+    `saveAdminSettingsWithOverrides`, `buildLogFilterPredicate`,
+    `apiConfigImport` and a PAC `nestif` — not `applySnapshotExtendedState`,
+    `applyAdminServices` or `apiOTLPConfig`. That is a stronger result than a
+    count comparison against the base: no function in a touched file is over
+    any threshold at HEAD, so there is no regression for the base measurement
+    to reveal.
+
+Lengths of the two functions this round rewrote, against the configured bars
+(`funlen` 80 lines / 50 statements, `cyclop` 15, `gocognit` 30):
+`SpanExporter.Configure` 67 lines, `MetricsExporter.Configure` 46,
+`checkOTLPExport` 24. All under, and the linter confirms it.
+
+**Not run here**, and named rather than implied: the hosted Fast and Deep
+gates, CodeQL, the API-governance gate (no route, OpenAPI or
+`uiRoutes` change in this round — the new diagnostics row is a free-form `Code`
+string in an existing list, not an endpoint), and the race-sharded QA gate.
+A passing local check is not a passing merge gate.
 
 **An honest correction to this round's own measurements.** An early probe
 reported *"5 of 200 `Stop()`/`Configure()` races ended with `Enabled()` false
