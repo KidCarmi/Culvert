@@ -154,11 +154,11 @@ proxy_repo = "ghcr.io/kidcarmi/culvert"
 # slice 7). Startup-only; there is no API to change it. Accepted only with
 # reconcile_on_startup = "converge"; with any other mode the agent refuses to
 # start.
-#   false (default) an upgrade whose agent died while health-checking the new
+#   false (default) an upgrade whose agent died while health-gating the new
 #         image, or after starting it and before checking it, is reported
 #         (recovery_required, target_live_ungated) and the new image keeps
 #         serving unchecked until you act.
-#   true  the next start runs that health check itself, once: only when
+#   true  the next start runs that health gate itself, once: only when
 #         container, tag and the pinned upgrade reference are on one image
 #         that carries the pinned digest (and, if the restart recorded the
 #         new image's id, it is that one), no rollback was armed, and no

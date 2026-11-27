@@ -178,15 +178,17 @@ Where to look:
 - The audit log has one `failed` / `agent_restart_interrupted` entry per
   interrupted operation.
 
-What an entry tells you:
+What an entry tells you. The **health gate** is the agent's check that the
+restarted proxy is healthy, which an image must pass before the agent treats it
+as serving; `gate` in the field and reason names below is the same term:
 
 | Field | Meaning |
 |---|---|
 | `journal_phase` | the last step the operation recorded |
 | `docker_state: unchanged` | it stopped before moving the image tag; submit it again if still wanted |
-| `docker_state: indeterminate` | it may have moved `culvert/proxy:pinned`, or started an image that was never health-checked |
+| `docker_state: indeterminate` | it may have moved `culvert/proxy:pinned`, or started an image that was never health-gated |
 | `died_in_command` | `compose up` or `compose down`: the agent process died **inside** that command of this operation (killed, out of memory, power loss, or stopped while the command was still running: a `systemctl stop` waits for a running operation only up to its drain deadline). Shown by the agent process that found it, until that agent restarts; a restarted agent no longer shows it, because the state of the stack can no longer be put down to that command. Absent when the command had returned before the agent stopped, when the operation is known to have ended (its final audit entry exists), when the agent could not write to its state directory when the command began (unless an earlier command of the same operation is still recorded, see next), and when an older agent version was started in between. One case is reported although the command had returned: the state directory could not be written from the moment the command returned until the agent process ended; if the same operation was by then inside a later command, the name shown is the earlier command's. Only in `GET /v1/status`. With the default `reconcile_on_startup = "off"` it is information only; with `"converge"` see below |
-| `gate_checkpoint` | the operation's last health check: `step` is `gate:target` (the new image) or `gate:prior` (the automatic rollback's check of the previous image), `image_id` the image it checked, `attempts` how often it was begun, `result` `passed`, `failed:<detail>`, or absent when the agent stopped during the check. A value this agent version does not recognise is shown as `unrecognised`. Information only: the agent does not act on it |
+| `gate_checkpoint` | the operation's last health gate: `step` is `gate:target` (the new image) or `gate:prior` (the automatic rollback's check of the previous image), `image_id` the image it checked, `attempts` how often it was begun, `result` `passed`, `failed:<detail>`, or absent when the agent stopped during the check. A value this agent version does not recognise is shown as `unrecognised`. Information only: the agent does not act on it |
 | `docker_state: data_indeterminate` | a restore or a data rollback: no image tag was involved; see [After the agent stops during a restore](#after-the-agent-stops-during-a-restore) |
 | `running_image` | what the proxy runs now: `target`, `prior`, `other`, or `unknown` if Docker could not be read |
 | `pinned_tag.matches_running` | `false` means the next `docker compose up` would start a different image than the one running. Reported on every status, with or without an interrupted operation. It is also `false` for a moment during a normal upgrade or rollback, between the tag move and the recreate: read it together with the lock holder / running operation |
@@ -234,12 +236,12 @@ own `compose up`. A start that cannot wait out its settle window, or that dies
 before the restore's own `compose up`, forfeits the restore: the entry is then
 only reported. With the default `"off"` nothing is started.
 
-### Resuming an interrupted health check (`resume_interrupted_gate`)
+### Resuming an interrupted health gate (`resume_interrupted_gate`)
 
 Off by default. With `resume_interrupted_gate = true` (accepted only together
 with `reconcile_on_startup = "converge"`; the agent refuses to start otherwise),
 an upgrade whose agent died **after** starting the new image and **before** its
-health check finished is no longer only reported. The next start runs that
+health gate finished is no longer only reported. The next start runs that
 check again, on what it reads from Docker now:
 
 - only for an upgrade the record shows as restarting or restarted, with the
@@ -264,7 +266,7 @@ check again, on what it reads from Docker now:
 
 | Reconcile decision / reason | Meaning |
 |---|---|
-| `resume_gate/target_gate_interrupted` | the agent died during the health check; it is run again |
+| `resume_gate/target_gate_interrupted` | the agent died during the health gate; it is run again |
 | `resume_gate/target_gate_not_begun` | the agent died after the restart (recorded or not), before the check began; it is run |
 | `resume_gate/resumed_not_retired` | a previous start passed the resumed check and audited it, then died before clearing the entry; only the entry is cleared |
 | `resumed_gate_failed_unhealthy`, `resumed_gate_failed_verify` | the check failed; the rollback is recorded and, in the same start, the previous image is restored as for an armed rollback |
@@ -283,9 +285,9 @@ For `indeterminate`:
   `pinned_tag.matches_running` is `false`, the tag is ahead of it. Either submit
   the upgrade again, or roll back with
   `POST /v1/rollbacks {"mode":"image","image_ref":"<prior_ref>"}`. Both re-pin
-  the tag and run the health check.
+  the tag and run the health gate.
 - **`running_image: target`** — the new image is running but the agent never
-  health-checked it. Submitting the same upgrade again is reported as already
+  health-gated it. Submitting the same upgrade again is reported as already
   current and does **not** check it. Verify the proxy yourself, or roll back to
   `prior_ref`.
   With `resume_interrupted_gate = true` the next start does this check for
@@ -362,7 +364,7 @@ off). No alert fires on it yet.
 
 A restore (`POST /v1/restores/commit`) and a data rollback (`POST /v1/rollbacks`
 with `mode=data`) run the same steps: a read-only preflight, `docker compose
-down`, the restore's commit command, `docker compose up -d`, a health check. An
+down`, the restore's commit command, `docker compose up -d`, a health gate. An
 agent that dies between them leaves the proxy **down**. The next start reports
 the operation in the same three places as above — `interrupted_operations`, the
 operation itself (`failed` / `agent_restart_interrupted`, no longer `404`), one
@@ -381,7 +383,7 @@ each step:
 | `stopping` | after asking Docker to stop the stack, before the commit command | `true` | `no` | `in_place` |
 | `committing` | after starting the commit command; its result was never recorded | `true` | `unknown` | `recoverable_at_next_proxy_start_or_manual` |
 | `commit_failed` | after the commit command returned an error, before the stack was started again | `true` | `unknown` | `recoverable_at_next_proxy_start_or_manual` |
-| `committed`, `starting`, `started` | after the commit command returned success, before the health check passed | `true` | `yes` | `kept_in_backup_dir` |
+| `committed`, `starting`, `started` | after the commit command returned success, before the health gate passed | `true` | `yes` | `kept_in_backup_dir` |
 | `unrecorded` | at a point the record does not give (written by, or passed through, an agent version that did not record it) | absent | `unknown` | `unknown` |
 
 `stack_touched` is what the operation did, not what Docker says now: read
@@ -389,7 +391,7 @@ each step:
 if you start the proxy now, and `operator_action` what to do. In short:
 
 - **`data_changed: no`** — the data directory is as it was. If the proxy is
-  down, submit the restore again (it stops, restores, starts and health-checks
+  down, submit the restore again (it stops, restores, starts and health-gates
   the stack) or start the stack yourself.
 - **`data_changed: unknown`** — the agent cannot tell whether the data
   directory holds its previous content, the restored content or an unfinished
@@ -408,7 +410,7 @@ if you start the proxy now, and `operator_action` what to do. In short:
   **before** starting anything.
 - **`data_changed: yes`** — the restore committed; the previous content is kept
   in the restore's backup directory (`--list-restore-leftovers`). Nobody has
-  health-checked the proxy on the restored data. If it is down, start the stack
+  health-gated the proxy on the restored data. If it is down, start the stack
   and check it. Do not submit the restore again only to start the stack: it
   would restore the same backup a second time.
 
@@ -420,7 +422,7 @@ check, and with the proxy down there is no running image for
 `pinned_tag.matches_running` to compare it with.
 
 The entry stays until a later restore or data rollback commits **and** passes
-its health check (that operation's result lists it under
+its health gate (that operation's result lists it under
 `superseded_interrupted_ops`, and the audit log gets a
 `<kind>:interrupted_superseded` entry), or until a later upgrade or image
 rollback succeeds. A restore never clears the entry of an interrupted upgrade
@@ -430,7 +432,7 @@ A restore whose commit succeeded but could not be recorded in the agent's
 journal ends `failed` with `failure_reason: command_error`, a
 `run_cli_restore_commit` stage output that says the data directory was
 replaced, and `result.restore_committed: true`. The stack is still started and
-health-checked. Do not repeat that restore because it "failed".
+health-gated. Do not repeat that restore because it "failed".
 
 If the agent will not start and its log says `another culvert-maint process
 holds the instance lock on state_dir …`, a second agent is configured with the
