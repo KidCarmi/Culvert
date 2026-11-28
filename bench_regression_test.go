@@ -855,7 +855,7 @@ func TestBenchGate_ScanTimeoutAlertAllocs(t *testing.T) {
 //
 // The only allocation it ever had was time.Now().Format("15:04:05"), a
 // one-second-resolution render re-derived per request. It is now memoised per
-// wall-clock second (store_logclock.go), which took the record build from
+// wall-clock second (internal/reqlog clock.go), which took the record build from
 // 277 ns/1 alloc to 150 ns/0 allocs serially. This gate fails if a per-request
 // format, an fmt.Sprintf, or any other allocating field build returns to the
 // path.
@@ -878,7 +878,7 @@ func TestBenchGate_RequestLogEntryAllocs(t *testing.T) {
 		t.Errorf("REGRESSION: persistLogEntry allocates %d/op, exceeds bound %d — "+
 			"per-request allocation has returned to the request-log chokepoint "+
 			"(a re-introduced time.Format, or an allocating field build). "+
-			"See store.go persistLogEntry and store_logclock.go.", allocs, maxAllocs)
+			"See store.go persistLogEntry and internal/reqlog clock.go.", allocs, maxAllocs)
 	}
 }
 

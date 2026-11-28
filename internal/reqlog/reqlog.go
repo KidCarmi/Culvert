@@ -1,8 +1,8 @@
 // Package reqlog is the request-log engine: a bounded in-memory ring (the
 // newest MaxRing entries), an optional persistent JSONL layer with rotation
 // and a count-once-log-first write-error contract, a bounded newest-first
-// read over the persistent file with a short-TTL shared-parse cache, and the
-// status→level mapping. Extracted from package main's store.go per ADR-0002
+// read over the persistent file with a short-TTL shared-parse cache, the
+// status→level mapping, and the memoised Entry.Time render (clock.go). Extracted from package main's store.go per ADR-0002
 // (store.go decomposition Phase C — the slice that closes the program).
 //
 // package main keeps the surfaces: AuthLogFields and its applyTo (welded to

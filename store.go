@@ -2942,12 +2942,12 @@ func persistLogEntry(ip, method, host, status, ruleMatched, actionTaken, identit
 	// One clock read for the whole record. Two reads not only cost twice as
 	// much, they could straddle a second boundary and emit a TS and a Time that
 	// disagree. The human-readable field is memoised per wall-clock second
-	// (store_logclock.go) — byte-identical output, and it removes the only
+	// (internal/reqlog clock.go) — byte-identical output, and it removes the only
 	// remaining allocation on this per-request path.
 	now := time.Now()
 	entry := LogEntry{
 		TS:          now.UnixMilli(),
-		Time:        logClockStamp(now),
+		Time:        reqlog.Stamp(now),
 		IP:          ip,
 		Identity:    identity,
 		Method:      method,
