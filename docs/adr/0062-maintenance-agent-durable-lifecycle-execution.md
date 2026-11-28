@@ -444,6 +444,17 @@ gaps and make the #2051 executor the single path every recovery takes.
   image this agent gated, at runtime, when policy allows" — new contract
   text, its own tests, model property and real-Docker cases.
 
+- **Slice 6a (owner decision 2026-11-28): the compatibility contract comes
+  first.** Culvert had no data-schema marker and no image label, so nothing
+  could prove an earlier image reads the data. The owner chose to add the
+  contract before slice 6 (contract UPG-003, docs/engineering/data-epoch.md):
+  a data epoch marker under `/data` that only rises (absent = epoch 1), image
+  labels `io.culvert.data-epoch.min/max`, and a read-only
+  `culvert --print-data-epoch` the agent runs through the `cli` service. An
+  image without the labels is never put back. Every build so far is epoch 1,
+  so nothing is written yet; raising the epoch carries backup and restore
+  obligations that a tripwire test enforces.
+
 **Slice 7 — forward resumption of an interrupted health gate
 (approved as its own, independently qualified slice).**
 - Scope: a record whose open checkpoint is `gate:target` (slice 3) — the
