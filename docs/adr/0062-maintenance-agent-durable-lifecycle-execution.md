@@ -478,22 +478,35 @@ gaps and make the #2051 executor the single path every recovery takes.
      maintenance lock (operators get 409), writes the record fail-closed, and
      runs the plan through the startup executor's steps. Status reports it.
   4. *Real-Docker qualification* in all four cells, with negative controls.
-- **Conditions, all re-read before every mutating step:** the policy is on;
-  the lock is free and the settle window over; the container runs, and
-  container and fixed tag are on the same image; that image is the one
-  `installed.json` names, or the target of a kept interrupted upgrade record
-  of this agent; the restore target is the image that change replaced, and
-  it is in `gated.json`; its reference passes the repo-bound exact-digest
-  check and the image allowlist and is local; `dataCompat` (slice 6a) is
-  compatible for the target's labels and the data epoch; fewer than 2
-  runtime recoveries were begun for this unhealthy image (write-ahead
-  counter). Anything else is reported (`recovery_required/<reason>`), never
-  acted on. A stack that is down, an unknown or no-container sample, or a
-  running image that is the last gated image itself is reported only.
+- **Admission: checked once, on fresh facts, before the record is written.**
+  - The policy is on, the lock is free and the settle window is over.
+  - The container runs, and container and fixed tag are on the same image X.
+  - X is the image `installed.json` names, or the target of a kept interrupted
+    upgrade record of this agent.
+  - The restore target R is the image that change replaced (`installed.json`
+    `replaced_*`, or the record's prior). R is in `gated.json`. X may be the
+    newest gated entry: an upgrade A→B that passed, was gated, and later fails
+    restores A, which is the main case this slice exists for.
+  - R's reference passes the repo-bound exact-digest check and the image
+    allowlist, and R is local.
+  - `dataCompat` (slice 6a) is compatible for R's labels and the data epoch.
+  - Fewer than 2 runtime recoveries were begun for X (write-ahead counter).
+  - Anything else is reported (`recovery_required/<reason>`), never acted on.
+    A stack that is down, an unknown or no-container sample, or no provenance
+    is reported only.
+- **Each step then expects the state its predecessor leaves, as
+  `reconcilePlan` already does.** Before the retag: tag and container on X.
+  Before `up`: the tag on R and the container still on X (the state the
+  retag leaves, decided as `verdictFinishRollback`). After `up`: a fresh gate
+  of R, then container, tag and R's local image verified by id. The
+  compatibility check is repeated before `up`, the step that starts R on the
+  data. A state no step of this recovery explains stops it with nothing more
+  changed.
 - **After a crash** the record is an armed image-change record: with
   `reconcile_on_startup = "converge"` the startup reconcile decides it with
-  the same branch (and the same compatibility check); with `"off"` it is
-  reported (AGT-004). A runtime recovery retires only its own record; a kept
+  the same branch, which already decides the post-retag state (tag on R,
+  container on X) as `finish_rollback`, and with the same compatibility
+  check before `up`; with `"off"` it is reported (AGT-004). A runtime recovery retires only its own record; a kept
   interrupted-upgrade record stays until an existing rule retires it.
 - **Audit:** `runtime.recover:started` before the first mutation and
   `runtime.recover:succeeded|failed` at the end, audit before retire, as
