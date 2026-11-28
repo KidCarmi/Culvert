@@ -18,8 +18,9 @@ package main
 // LEASE mode is unchanged: every round that does not apply counts, and the
 // lease arbitrates the promotion (ADR-0005).
 //
-// The names and semantics here are shared with the HA authority change
-// (ADR-0064), which extends haLeaderAnswerOf.
+// The names and semantics here are shared with the HA authority change (the
+// legacy restart revalidation and publication gate), which extends
+// haLeaderAnswerOf.
 
 import "time"
 

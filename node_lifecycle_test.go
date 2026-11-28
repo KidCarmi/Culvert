@@ -576,8 +576,8 @@ func TestCPStartingListener_TeardownExceptionIsPinnedToTheMethod(t *testing.T) {
 			t.Errorf("%s named stopEarlyListener was exempted from the teardown wall", name)
 		}
 	}
-	real := "type cpStartingListener struct{ srv *grpc.Server }\nfunc (l *cpStartingListener) stopEarlyListener() { l.srv.Stop() }"
-	for _, v := range cpGRPCTeardownViolations(parse(real)) {
+	actual := "type cpStartingListener struct{ srv *grpc.Server }\nfunc (l *cpStartingListener) stopEarlyListener() { l.srv.Stop() }"
+	for _, v := range cpGRPCTeardownViolations(parse(actual)) {
 		if strings.Contains(v, "references Stop on a *grpc.Server") {
 			t.Errorf("the real method is not exempt: %s", v)
 		}
