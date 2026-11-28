@@ -125,15 +125,19 @@ The TTL is the **failover-latency ↔ tolerance trade**:
     standby stays read-only until an operator promotes it manually. Either
     way, reaching 3/3 means "stop waiting and try", not "leadership taken".
   - `last_sync_ok` — RFC3339 timestamp of the last successful sync apply.
-  - `sync_refused` — consecutive rounds in which the leader **answered** but
-    this standby did not apply its bundle (refused, or failed while applying).
+  - `sync_refused` — rounds since the last successful sync (or since the node
+    entered standby) in which the leader **answered** but this standby did
+    not apply its bundle (refused, or failed while applying). Rounds the
+    leader did not answer neither add to it nor reset it; it is always 0 in
+    lease mode.
     The leader is up and replication is stalled; the log line before `HA: the
     leader … answered but its state bundle was NOT applied` names the refusal.
     In legacy mode these rounds do not count toward `sync_fail_count` and
     restart it, so the standby never promotes against a leader that is
     answering; the `ha_sync_panic` alert fires once. In lease mode they still
-    count (the lease decides). A leader that answers with an RPC error, such
-    as a rejected HA token, is counted as unreachable in both modes.
+    count (the lease decides). A leader that rejects the HA token, or says it
+    is still starting, also counts as having answered; any other RPC error is
+    counted as unreachable.
   - `auto_promote_blocked` — empty when an automatic promotion would not be
     refused on synchronization grounds; otherwise the reason (`no successful
     state sync yet …`, or `last state sync … ago exceeds the 10m0s freshness

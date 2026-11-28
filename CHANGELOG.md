@@ -115,9 +115,9 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   applied`, fires the `ha_sync_panic` ("HA standby sync fault") alert once,
   reports `sync_refused` on `GET /api/cluster/ha` and the HA panel, and the
   cluster diagnosis turns unhealthy. Replication stays stalled until the
-  refusal is fixed. Lease mode is unchanged. Limit: a leader that answers with
-  an RPC error (for example a rejected HA token) is still treated as
-  unreachable.
+  refusal is fixed. Lease mode is unchanged. A leader that rejects the HA token, or reports
+  that it is still starting, also counts as answering; any other RPC error is
+  still treated as unreachable.
 - **A demoted HA leader no longer re-promotes itself on state it synced before
   it led (lease mode).** A node that synced as a standby, was promoted, then
   lost the fencing lease and re-entered standby against the new leader kept

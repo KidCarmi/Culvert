@@ -177,12 +177,18 @@ type HAState struct {
 	syncPanics       int
 	syncPanicAlerted bool
 
-	// syncRefused counts CONSECUTIVE standby sync rounds in which the leader
-	// answered but its bundle was not applied (refused or failed in the apply
-	// path). Like a contained panic, such a round is this node's fault, not
-	// evidence that the leader is gone; in legacy mode it is kept out of the
-	// failure streak (noteRefusedRound). Reset by the next successful sync.
-	syncRefused int
+	// syncRefused counts the standby sync rounds SINCE THE LAST SUCCESSFUL SYNC
+	// (or since this node entered standby) in which the leader answered but
+	// its bundle was not applied (refused or failed in the apply path). Rounds
+	// the leader did not answer neither add to it nor reset it. Counted in
+	// legacy mode only (noteRefusedRound); always 0 with a fencing lease, where
+	// such a round is an ordinary failed round. Like a contained panic, the
+	// round is this node's fault, not evidence that the leader is gone.
+	// syncRefusedAlerted is its own fire-once latch, re-armed by the next
+	// successful sync: sharing the panic latch would let a refusal swallow the
+	// alert of a later panic, and the other way round.
+	syncRefusedAlerted bool
+	syncRefused        int
 
 	// testResumeUnreachableWait / testResumeRetryBackoff shorten THIS
 	// instance's resume-acquire budget for an unreachable fencing backend
@@ -221,8 +227,9 @@ type HAStatus struct {
 	SyncFailCount int    `json:"sync_fail_count,omitempty"` // standby-side: consecutive HASync failures since last success
 	LastSyncOK    string `json:"last_sync_ok,omitempty"`    // standby-side: RFC3339 of the last successful HASync apply
 	SyncPanics    int    `json:"sync_panics,omitempty"`     // standby-side: sync rounds contained by the panic guard (CHAOS-25)
-	// SyncRefused is the standby-side count of consecutive sync rounds in which
-	// the leader answered but its bundle was not applied; 0 after a success.
+	// SyncRefused is the standby-side number of sync rounds since the last
+	// successful sync in which the leader answered but its bundle was not
+	// applied. Legacy mode only; always 0 with a fencing lease.
 	SyncRefused int `json:"sync_refused,omitempty"`
 	// AutoPromoteBlocked is the standby-side reason an AUTOMATIC promotion
 	// would be refused right now on synchronization grounds (never synced, or
@@ -825,6 +832,7 @@ func (h *HAState) notePanicRound(leaderAddr string) {
 func (h *HAState) clearSyncPanicAlert() {
 	h.mu.Lock()
 	h.syncPanicAlerted = false
+	h.syncRefusedAlerted = false
 	h.syncRefused = 0
 	h.mu.Unlock()
 }
@@ -840,11 +848,11 @@ func (h *HAState) noteRefusedRound(leaderAddr string) {
 	h.mu.Lock()
 	h.syncRefused++
 	n := h.syncRefused
-	first := !h.syncPanicAlerted
-	h.syncPanicAlerted = true
+	first := !h.syncRefusedAlerted
+	h.syncRefusedAlerted = true
 	h.mu.Unlock()
 
-	logger.Printf("HA: the leader %q answered but its state bundle was NOT applied (consecutive_rounds=%d) — "+
+	logger.Printf("HA: the leader %q answered but its state bundle was NOT applied (rounds_since_last_sync=%d) — "+
 		"state replication is stalled although the leader is reachable. This round does not count toward "+
 		"the leader-unreachable threshold, so this node will not auto-promote against a live leader. See the "+
 		"preceding line for the refusal; fix it on the leader (or upgrade this standby) to resume replication.",
@@ -1064,9 +1072,10 @@ func (h *HAState) syncFromLeader(ctx context.Context, client *DataPlaneClient, t
 	raw, err := client.call(ctx, methodHASync, json.RawMessage(reqBytes))
 	if err != nil {
 		logger.Printf("HA: HASync RPC error: %v", err)
-		// A leader that says it is STARTING answered: it is alive and coming
-		// up, which is the opposite of evidence that it is gone (ADR-0064).
-		return false, haLeaderStartingError(err)
+		// A leader that says it is STARTING, or that rejects this node's token,
+		// answered: it is alive, which is the opposite of evidence that it is
+		// gone (ADR-0064).
+		return false, haLeaderAnsweredError(err)
 	}
 	// Record the HA bundle size so the NEXT HASync poll's deadline scales with
 	// it. An HA-only standby never runs fetchAndApply (the GetConfig path), so

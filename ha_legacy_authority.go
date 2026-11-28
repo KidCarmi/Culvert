@@ -289,3 +289,11 @@ func haLeaderStartingError(err error) bool {
 	st, ok := status.FromError(err)
 	return ok && st.Code() == codes.Unavailable && strings.Contains(st.Message(), haNodeStartingMarker)
 }
+
+// haLeaderAnsweredError reports whether a failed HASync still proves the leader
+// is ALIVE: its "starting" refusal, or PermissionDenied — only a serving leader
+// evaluates the HA token. (A standby's own refusal is Unavailable and stays an
+// unanswered round: that peer does not lead.)
+func haLeaderAnsweredError(err error) bool {
+	return haLeaderStartingError(err) || status.Code(err) == codes.PermissionDenied
+}

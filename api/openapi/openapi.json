@@ -1295,7 +1295,7 @@
             "type": "string"
           },
           "sync_refused": {
-            "description": "Standby only. Consecutive sync rounds in which the leader answered but this standby did not apply its state bundle; 0 after a successful sync. Replication is stalled while it is non-zero.",
+            "description": "Standby only, legacy mode (always 0 with a fencing lease). Sync rounds since the last successful sync, or since the node entered standby, in which the leader answered but this standby did not apply its state bundle. Rounds the leader did not answer neither add to it nor reset it. Replication is stalled while it is non-zero.",
             "type": "integer"
           }
         },
