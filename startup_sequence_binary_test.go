@@ -449,6 +449,56 @@ func TestBinaryStartup_DataPlane_FirstEnrolmentNoLastGood(t *testing.T) {
 	n.wantLogOrder("Policy: 1 rule(s) loaded", "DataPlane: no last-known-good config", "DataPlane: polling ControlPlane")
 }
 
+// TestBinaryStartup_DataPlane_BadIdentityStopsBeforeTheStores: a data plane
+// whose mTLS certificate cannot be loaded exits in phase 1. It must not have
+// loaded its policy, bound its SOCKS5 or proxy listener, or replayed its
+// last-good snapshot (which would rewrite the policy file) on the way out.
+func TestBinaryStartup_DataPlane_BadIdentityStopsBeforeTheStores(t *testing.T) {
+	bin := buildOrFindBinary(t)
+	cfgDir := t.TempDir()
+	const stale = `[{"priority":1,"name":"stale-rule","destFQDN":"stale.example.com","action":"Allow"}]`
+	policyPath := suBinWrite(t, filepath.Join(cfgDir, "policy.json"), stale)
+	junk := suBinWrite(t, filepath.Join(cfgDir, "junk.pem"), "not a certificate\n")
+	socksPort := suBinPort(t)
+	n, proxyPort := suBinNewNode(t, bin, "-dp-cp-addr", fmt.Sprintf("127.0.0.1:%d", suBinPort(t)), "-dp-node-id", "dp-bad-id",
+		"-dp-cert", junk, "-dp-key", junk, "-policy", policyPath, "-socks5-port", fmt.Sprint(socksPort))
+	suBinLastGood(t, n.dataDir, ConfigSnapshot{
+		Version: 7, DefaultAction: "allow",
+		PolicyRules: []PolicyRule{{Priority: 1, Name: "from-control-plane", DestFQDN: "localhost", Action: ActionDrop}},
+	})
+
+	n.start()
+	exited := make(chan error, 1)
+	go func() { exited <- n.cmd.Wait() }()
+	select {
+	case err := <-exited:
+		n.cmd = nil
+		if err == nil {
+			t.Fatal("a data plane with an unloadable certificate exited 0")
+		}
+	case <-time.After(60 * time.Second):
+		t.Fatal("a data plane with an unloadable certificate is still running after 60 s")
+	}
+	log := n.log()
+	if !strings.Contains(log, "DataPlane client:") {
+		t.Errorf("the exit does not name the data-plane identity failure")
+	}
+	for _, mustNot := range []string{"Policy: 1 rule(s) loaded", "applied last-known-good config snapshot", "Blocklist loaded"} {
+		if strings.Contains(log, mustNot) {
+			t.Errorf("the node logged %q before exiting on a bad identity: it got past phase 1", mustNot)
+		}
+	}
+	if onDisk, err := os.ReadFile(policyPath); err != nil || string(onDisk) != stale {
+		t.Errorf("the policy file was touched before the identity failure (err=%v):\n%s", err, onDisk)
+	}
+	for _, port := range []int{socksPort, proxyPort} {
+		if c, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), 300*time.Millisecond); err == nil {
+			_ = c.Close()
+			t.Errorf("port %d is still accepting connections after the exit", port)
+		}
+	}
+}
+
 // ── the other roles ─────────────────────────────────────────────────────────
 
 // TestBinaryStartup_Standalone: no cluster wiring — the sequence runs to the

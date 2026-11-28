@@ -281,11 +281,16 @@ func prepareDataPlane(ctx context.Context, addr, nodeID, certFile, keyFile, caFi
 	// restart cannot reopen the epoch-0 window an epoch-0 zombie CP would exploit.
 	loadDPLastSeenEpoch()
 
-	// F3b-4 finding #2: wire the durable feed-authority mirror store BEFORE replaying the
-	// last-good snapshot below, so the replay persists the authoritative feed config on the
-	// first restart after upgrade — without depending on the CP incrementing its config
-	// version. The signed-feed lifecycle (initURLCategories, run later) re-uses this same
-	// instance.
+	// F3b-4 finding #2: wire the durable feed-authority mirror store in the
+	// EARLY half. Two later steps use this one instance: the signed-feed
+	// lifecycle (initURLCategories, a store loader) reads the mirror to resolve
+	// a managed data plane's feed authority, and the last-good replay (the late
+	// half, runDataPlane) writes it — so the replay persists the authoritative
+	// feed config on the first restart after upgrade without depending on the
+	// CP incrementing its config version. The feed runtime now starts BEFORE
+	// that replay; it re-resolves its authority on every cycle and the replay
+	// wakes it (applySnapshotSaaSFeed), so a mirror first written by the replay
+	// is picked up within the same boot.
 	wireSaaSFeedAuthorityStore()
 
 	if certFile != "" {
@@ -301,6 +306,14 @@ func prepareDataPlane(ctx context.Context, addr, nodeID, certFile, keyFile, caFi
 			logFatalf("DataPlane: DP node key at-rest: %v", err)
 		}
 	}
+	// The mTLS material is validated HERE, in the early half, not when the
+	// client is built in the late half: a data plane whose certificate, key or
+	// CA cannot be loaded must stop before it loads a store, binds a listener
+	// or replays (and rewrites local files from) its last-good snapshot — under
+	// a supervisor the late failure was a crash loop that did all three first.
+	if err := validateDPClientIdentity(certFile, keyFile, caFile); err != nil {
+		logFatalf("DataPlane client: %v", err)
+	}
 	// Data-plane audit queuing is part of the node's identity, not of its
 	// activation: it is switched on here, where it always was relative to the
 	// init steps that follow, so an audit entry one of them records is still
@@ -308,6 +321,20 @@ func prepareDataPlane(ctx context.Context, addr, nodeID, certFile, keyFile, caFi
 	// with the client, in the late half.
 	audit.SetDPMode(true)
 	return func() { runDataPlane(ctx, addr, nodeID, certFile, keyFile, caFile) }
+}
+
+// validateDPClientIdentity loads the data plane's mTLS material exactly as the
+// client's connect will (buildClientTLS) and reports why it cannot be used.
+// No certificate configured is the insecure development mode, which connect
+// itself announces; nothing to validate.
+func validateDPClientIdentity(certFile, keyFile, caFile string) error {
+	if certFile == "" || keyFile == "" {
+		return nil
+	}
+	if _, err := buildClientTLS(certFile, keyFile, caFile); err != nil {
+		return fmt.Errorf("gRPC client TLS: %w", err)
+	}
+	return nil
 }
 
 // runDataPlane is the data plane's LATE half: replay the last-good snapshot,

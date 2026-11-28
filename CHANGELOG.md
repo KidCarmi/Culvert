@@ -89,11 +89,29 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
     listener's pre-posture gate is now released after the replay, followed by
     the admin UI and the proxy listener. After a restart its rules and default
     action are the last-good snapshot's, and its policy file is rewritten to
-    match. The same now holds for every slice of the last-good snapshot — IP
-    filter, rate limit, blocklist feed, categories, SSL bypass: a node-local
-    file or admin setting loaded earlier in the boot no longer overrides it
-    until the next configuration version. Bandwidth policies and node groups
-    in the last-good snapshot are no longer skipped at boot.
+    match. Bandwidth policies and node groups in the last-good snapshot are no
+    longer skipped at boot. A data plane whose cluster certificate, key or CA
+    cannot be loaded still stops before any of this, as it did.
+  - **On a data plane, node-local admission settings no longer win over the
+    control plane at boot.** The default action, IP-filter mode and list, and
+    rate limit saved in the node's own admin settings used to be applied
+    after the last-good replay, so a local override survived a restart until
+    the control plane next published a new configuration version. The
+    snapshot is now applied last, which is what a live sync has always done.
+    The security settings page still accepts such edits on a managed data
+    plane; they take effect until the next sync or restart and are then
+    overwritten (unchanged; refusing or labelling those edits on a managed
+    data plane is a follow-up). The same holds for the other slices a
+    snapshot carries — blocklist feed, categories, SSL bypass.
+  - A last-good snapshot that is absent, unreadable or refused is not
+    replayed: the node keeps its file-loaded state until it next syncs. A
+    last-good file whose last write failed is older than the node's local
+    files and is replayed over them; the next successful sync corrects it.
+  - **High availability:** the control-plane listener now comes up after the
+    stores, so a restarting leader is unreachable for longer than before, and
+    a standby counts an unreachable leader toward failover. This change ships
+    together with the early-listener change that keeps a starting leader
+    reachable; do not deploy it to an HA pair without that change.
   No data migration is needed; existing data directories start as they are.
 
 - **A policy edit on a control plane now reaches data planes when it is

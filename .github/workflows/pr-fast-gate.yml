@@ -386,6 +386,28 @@ jobs:
       - name: Run benchgate
         run: go test -tags benchgate -run 'TestBenchGate_' -count=1 -p 1 -timeout=10m -v . ./internal/admission ./internal/threatfeed ./internal/catgroup ./internal/session ./internal/decryptprofile ./internal/catoverride ./internal/secscan ./internal/catdb ./internal/identcache ./internal/syslog
 
+  # ─── 4b. Start-up sequence on the real binary ──────────────────────────────
+  # `proxybinload`-tagged tests are OUTSIDE the default `go test ./...` build,
+  # and nothing in-process can run main()'s start-up sequence (it registers the
+  # process flag set and starts unjoinable goroutines), so this job is the
+  # required path that EXECUTES it: one build, then the shipped binary started
+  # per cluster role (startup_sequence_binary_test.go).
+  startup-sequence:
+    name: "Gate · start-up sequence (real binary)"
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/setup-go-cache
+      - name: Build the binary once
+        run: CGO_ENABLED=0 go build -o "$RUNNER_TEMP/culvert" .
+      - name: Start the real binary per cluster role
+        env:
+          CULVERT_BIN: ${{ runner.temp }}/culvert
+        run: go test -tags proxybinload -run 'TestBinaryStartup_' -count=1 -p 1 -timeout=10m -v .
+
   # ─── 5. Fast security: govulncheck + gosec (pinned) ────────────────────────
   security-fast:
     name: "Gate · govulncheck + gosec"
@@ -819,6 +841,7 @@ jobs:
       - test-race
       - coverage-floors
       - benchgate
+      - startup-sequence
       - security-fast
       - gitleaks
       - agent

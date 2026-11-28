@@ -914,7 +914,7 @@ contracts:
     validation: integration
     compatibility: "Data planes apply a published snapshot whole; an edit that was waiting for a publish is delivered by the first policy edit after upgrade."
 
-  - id: CLU-004
+  - id: CLU-005
     area: cluster-sync
     status: enforced
     owner_approved: false
@@ -934,16 +934,18 @@ contracts:
     tests:
       - {file: "startup_sequence_order_test.go", name: TestStartupSequence_PhasesNeverGoBackwards}
       - {file: "startup_sequence_order_test.go", name: TestStartupSequence_NothingBeforeTheActivationActivates}
+      - {file: "startup_sequence_order_test.go", name: TestStartupSequence_NothingAfterTheActivationLoadsAStore}
+      - {file: "startup_sequence_order_test.go", name: TestStartupSequence_MainRunsTheOneSequence}
       - {file: "startup_sequence_order_test.go", name: TestClusterHalves_ControlPlane_IdentityEarly_ServesOnlyLoadedConfig}
       - {file: "startup_sequence_order_test.go", name: TestClusterHalves_ControlPlane_LeaseLeaderResumeCommitsItsEpoch}
     validation: integration
     compatibility: "The control-plane listener binds later in the boot; data planes see connection refused until then and keep their last-good configuration. The real-binary form of these tests is TestBinaryStartup_* (build tag proxybinload)."
 
-  - id: CLU-005
+  - id: CLU-006
     area: cluster-sync
     status: enforced
     owner_approved: false
-    invariant: "A data plane replays its last-good snapshot after its own configuration stores have loaded and before any listener that enforces policy opens; after a restart its rules and default action are the last-good snapshot's, active and persisted, whatever its policy file held."
+    invariant: "A data plane validates its cluster identity before loading any store, and replays its last-good snapshot after its own configuration stores have loaded and before any listener that enforces policy opens. When that replay is accepted, the node's default action and every slice the snapshot carries (policy rules included) are the snapshot's, active and persisted, whatever its node-local files and admin settings held. When there is no last-good snapshot, or it is unreadable, over a cap, or refused (identity-provider sync, an unenforceable rule), nothing is replayed and the node keeps its file-loaded state until it next syncs."
     authority: "Start-up sequence (main.go runStartupSequence) and data-plane start-up (dp_enrollment.go)."
     code:
       - "dp_enrollment.go"
@@ -959,9 +961,12 @@ contracts:
     tests:
       - {file: "startup_sequence_order_test.go", name: TestStartupSequence_PhasesNeverGoBackwards}
       - {file: "startup_sequence_order_test.go", name: TestClusterHalves_DataPlane_ReplayAfterStores_KeepsControlPlaneState}
+      - {file: "startup_sequence_order_test.go", name: TestClusterHalves_DataPlane_FirstEnrolmentNoLastGood}
+      - {file: "startup_sequence_order_test.go", name: TestClusterHalves_DataPlane_IdentityIsValidatedInTheEarlyHalf}
+      - {file: "startup_sequence_order_test.go", name: TestStartupSequence_NothingAfterTheActivationLoadsAStore}
       - {file: "socks5_posture_gate_chaos_test.go", name: TestCHAOS102_Wall_ThePostureRestoreReleasesTheGate}
     validation: integration
-    compatibility: "Existing data directories need no migration: the policy file is rewritten from the last-good snapshot at the first start on this build."
+    compatibility: "Existing data directories need no migration: the policy file is rewritten from the last-good snapshot at the first start on this build. The node holds no durable record of the configuration version it last APPLIED other than the last-good snapshot itself, so a last-good file whose write failed (and is therefore older than the node's local files) is replayed over them at boot and corrected at the next successful sync."
 
   - id: REC-001
     area: failure-recovery

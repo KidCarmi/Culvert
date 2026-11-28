@@ -222,17 +222,108 @@ func TestStartupSequence_NothingBeforeTheActivationActivates(t *testing.T) {
 	}
 }
 
-// TestStartupSequence_MainRunsTheOneSequence: main() runs runStartupSequence,
-// and no start-up step of its own.
+// startupMainCallees is EVERYTHING main() may call: process-level plumbing
+// (argv, data dir, single-writer lock, restore recovery, file config, logger,
+// lifecycle context), the one start-up sequence, and the serve loop. An
+// allowlist, not a denylist: a new `initFoo(s)` written straight into main()
+// — outside the sequence, and so outside every phase guard — fails here
+// whatever it is called.
+var startupMainCallees = map[string]bool{
+	// one-shot subcommands and argv
+	"maybeRunBootstrapResolve": true, "maybeRunPolicyPreflight": true, "parseFlags": true,
+	"checkPositionalArgs": true, "handleOneShotCommands": true, "runEnrollmentMode": true,
+	// the persisted-state root
+	"applyDataDirFromEnv": true, "checkInterruptedRestore": true, "checkDataDirSingleWriter": true,
+	"recoverInPlaceRestoreAtBoot": true, "checkDataEpochAtBoot": true, "dataDirOverridden": true,
+	"logDataDirWriterLockNotice": true,
+	// process configuration, logger, lifecycle
+	"setInsecureFlag": true, "loadFileConfigAndFlags": true, "initUIExtras": true, "initLogger": true,
+	"initMemoryBackstop": true, "initLifecycleContext": true, "appLifecycleCancel": true,
+	// the sequence, then serving
+	"runStartupSequence": true, "installSignalHandlers": true, "runProxyUntilShutdown": true,
+	// stderr + exit on a refused boot
+	"Fprintf": true, "Printf": true, "Exit": true,
+}
+
+// TestStartupSequence_MainRunsTheOneSequence: main() runs runStartupSequence
+// and, besides it, only the process-level plumbing in startupMainCallees.
 func TestStartupSequence_MainRunsTheOneSequence(t *testing.T) {
 	callees := calleeNames(funcDeclForTest(t, parseMainPkgFileForTest(t, "main.go"), "main"))
-	for callee := range callees {
-		if _, isStep := startupStepPhases[callee]; isStep {
-			t.Errorf("main() calls the start-up step %s itself; every step belongs to runStartupSequence", callee)
-		}
-	}
 	if !callees["runStartupSequence"] {
 		t.Error("main() does not call runStartupSequence")
+	}
+	if bad := startupMainUnexpectedCallees(callees); len(bad) > 0 {
+		t.Errorf("main() calls %v, which startupMainCallees does not allow: a start-up step belongs in runStartupSequence "+
+			"(where the phase guards see it); genuine process-level plumbing must be added to the allowlist deliberately", bad)
+	}
+	// Negative controls: a step smuggled into main() under any name is caught.
+	for _, extra := range []string{"initFoo", "initPolicy", "loadSomething", "activateClusterRoles"} {
+		with := map[string]bool{extra: true}
+		for c := range callees {
+			with[c] = true
+		}
+		if len(startupMainUnexpectedCallees(with)) == 0 {
+			t.Errorf("control: the allowlist accepted %s in main()", extra)
+		}
+	}
+}
+
+func startupMainUnexpectedCallees(callees map[string]bool) []string {
+	var bad []string
+	for c := range callees {
+		if !startupMainCallees[c] {
+			bad = append(bad, c)
+		}
+	}
+	sort.Strings(bad)
+	return bad
+}
+
+// startupStoreLoaders is the set a phase-4 step must not reach: every phase
+// 1–2 step, and every plain `load*` function one of them calls directly (the
+// loader each init shim delegates to), plus the admin-settings restore.
+func startupStoreLoaders(funcs map[string]*ast.FuncDecl) map[string]bool {
+	loaders := map[string]bool{"LoadAdminSettings": true, "tryLoadBlocklistFile": true}
+	for step, ph := range startupStepPhases {
+		if ph >= phaseActivation {
+			continue
+		}
+		loaders[step] = true
+		fn := funcs[step]
+		if fn == nil {
+			continue
+		}
+		for callee := range calleeNames(fn) {
+			if strings.HasPrefix(callee, "load") && funcs[callee] != nil && funcs[callee].Recv == nil {
+				loaders[callee] = true
+			}
+		}
+	}
+	return loaders
+}
+
+// TestStartupSequence_NothingAfterTheActivationLoadsAStore: the phase guard
+// classifies the STEPS of the sequence; this closes the hole underneath it. A
+// store loader nested inside the activation, a traffic gate, the admin UI
+// start or the proxy build would run after the role started acting while the
+// sequence still read as correctly ordered.
+func TestStartupSequence_NothingAfterTheActivationLoadsAStore(t *testing.T) {
+	funcs := startupProdFuncs(t)
+	loaders := startupStoreLoaders(funcs)
+	if !loaders["loadBlocklist"] || !loaders["loadPersistentAdminState"] || !loaders["initPolicy"] {
+		t.Fatalf("the loader set is missing known loaders (%d entries); this guard is not reading the boot steps", len(loaders))
+	}
+	for step, ph := range startupStepPhases {
+		if ph < phaseActivation {
+			continue
+		}
+		if via := startupReaches(funcs, loaders, step); via != "" {
+			t.Errorf("%s (phase %d) reaches the store loader %s: every store must be loaded BEFORE the cluster role activates", step, ph, via)
+		}
+	}
+	// Not vacuous: a phase-2 step reaches one (itself).
+	if startupReaches(funcs, loaders, "initBlocklist") == "" {
+		t.Error("control: the call graph cannot see that initBlocklist loads a store")
 	}
 }
 
@@ -323,6 +414,16 @@ func suIsolate(t *testing.T) *suEnv {
 	// The data-plane client's loops cannot be joined, and they read package
 	// globals this fixture restores; record the hand-off instead of starting
 	// them. The real loops run in the real-binary tests.
+	// initPolicy (loadStores) wires the policy-draft coordinator to the policy
+	// file's sibling; give it back.
+	policyDraft.mu.Lock()
+	origDraftPath, origDraftState, origDraftCand := policyDraft.path, policyDraft.state, policyDraft.cand
+	policyDraft.mu.Unlock()
+	t.Cleanup(func() {
+		policyDraft.mu.Lock()
+		policyDraft.path, policyDraft.state, policyDraft.cand = origDraftPath, origDraftState, origDraftCand
+		policyDraft.mu.Unlock()
+	})
 	origLoops := dpStartClientLoops
 	dpStartClientLoops = func(context.Context, *DataPlaneClient, string, string, string, string) { suClientLoopsStarted.Add(1) }
 	suClientLoopsStarted.Store(0)
@@ -356,14 +457,7 @@ func suIsolate(t *testing.T) *suEnv {
 
 	dir := t.TempDir()
 	env.policyFile, env.blockFile = filepath.Join(dir, "policy_rules.json"), filepath.Join(dir, "blocklist.txt")
-	seed := &PolicyStore{}
-	if err := seed.Load(env.policyFile); err != nil {
-		t.Fatal(err)
-	}
-	seed.ReplaceAll(suRules("on-disk-a", "on-disk-b"))
-	if err := seed.SaveErr(); err != nil {
-		t.Fatal(err)
-	}
+	env.seedPolicyFile(t, "on-disk-a", "on-disk-b")
 	if err := os.WriteFile(env.blockFile, []byte("blocked-on-disk.example\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -381,17 +475,44 @@ func suRules(names ...string) []PolicyRule {
 	return out
 }
 
-// loadStores runs the store loaders the snapshot capture and the last-good
-// replay depend on, through the functions the boot steps call (initBlocklist,
-// initPolicy, initRewriteAndDefaultAction). configuredDefault is the node's
-// own config.yaml default_action ("" = unset, derived from the rule count).
+// loadStores is phase 2 for the stores these tests assert on, through the REAL
+// boot steps where one can run in-process:
+//
+//	initPolicy(s)                    the step itself (policy file + draft wiring)
+//	initRewriteAndDefaultAction(s)   the step itself (default-action derivation)
+//	tryLoadBlocklistFile             initBlocklist's file half
+//
+// The rest of phase 2 cannot run inside the test binary, which is why the
+// real-binary tests are the authority on the sequence: initBlocklist also
+// starts the feed syncer goroutine; initRootCA mints/loads the inspection CA
+// and starts the CA auto-rotation loop; initURLCategories opens the feed
+// database and starts its syncers; initBackgroundServices and
+// initPersistentAdminState start janitor/upload/hit-counter workers and apply
+// the admin settings to dozens of package globals; initSOCKS5 binds a socket;
+// the initMCP* steps compose listener runtimes — none of them joinable or
+// restorable from a test. configuredDefault is the node's own config.yaml
+// default_action ("" = unset, derived from the rule count).
 func (e *suEnv) loadStores(t *testing.T, configuredDefault string) {
 	t.Helper()
 	tryLoadBlocklistFile(e.blockFile)
-	if err := policyStore.Load(e.policyFile); err != nil {
-		t.Fatalf("load policy file: %v", err)
+	noFlag := ""
+	s := &startupState{policyFile: &noFlag, fc: &FileConfig{DefaultAction: configuredDefault}}
+	s.fc.Proxy.PolicyFile = e.policyFile
+	initPolicy(s)
+	initRewriteAndDefaultAction(s)
+}
+
+// seedPolicyFile replaces the node's on-disk policy with rules named names.
+func (e *suEnv) seedPolicyFile(t *testing.T, names ...string) {
+	t.Helper()
+	seed := &PolicyStore{}
+	if err := seed.Load(e.policyFile); err != nil {
+		t.Fatal(err)
 	}
-	loadRewriteAndDefaultAction(rewriteDefaultActionStartupConfig{DefaultAction: configuredDefault}, policyStore.ConfiguredRuleCount())
+	seed.ReplaceAll(suRules(names...))
+	if err := seed.SaveErr(); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func suRuleNames(rules []PolicyRule) string {
@@ -584,50 +705,70 @@ func TestClusterHalves_ControlPlane_LeaseLeaderResumeCommitsItsEpoch(t *testing.
 func TestClusterHalves_DataPlane_ReplayAfterStores_KeepsControlPlaneState(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
-		cpDefault string
-		cpRules   []string
+		fileRules []string // the node's own (stale) policy file
+		derived   string   // what boot derives from that file with no configured default
+		cpDefault string   // the last-good snapshot's default action
+		cpRules   []string // the last-good snapshot's rules (nil: the snapshot carries none)
+		wantRules []string
 	}{
-		{"cp_allow_with_rules", "allow", []string{"from-control-plane"}},
-		{"cp_deny_with_rules", "deny", []string{"from-control-plane"}},
+		// Derivation says deny (the file has rules); the control plane says allow.
+		{"cp_allow_over_derived_deny", []string{"on-disk-a", "on-disk-b"}, "deny", "allow", []string{"from-control-plane"}, []string{"from-control-plane"}},
+		// Derivation says allow (the file has NO rules); the control plane says
+		// deny — the fail-open direction. The snapshot carries no rules either
+		// (policy_rules is omitted when empty), so only the default action moves.
+		{"cp_deny_over_derived_allow", nil, "allow", "deny", nil, nil},
+		// Both agree: the control: rules still replaced.
+		{"cp_deny_matches_derived_deny", []string{"on-disk-a", "on-disk-b"}, "deny", "deny", []string{"from-control-plane"}, []string{"from-control-plane"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			env := suIsolate(t)
+			env.seedPolicyFile(t, tc.fileRules...)
 			persistDPLastGoodConfigSnapshot(ConfigSnapshot{Version: 7, DefaultAction: tc.cpDefault, PolicyRules: suRules(tc.cpRules...)})
 			ctx, cancel := context.WithCancel(context.Background())
-			t.Cleanup(cancel) // LIFO: the client's loops stop before suIsolate restores the globals under them
+			t.Cleanup(cancel)
 
 			act := loadClusterIdentity(clusterStartupConfig{ClusterDBPath: env.clusterDB, DPAddr: "127.0.0.1:1", DPNodeID: "dp-under-test"}, ctx, nil)
-			if r := cpRoleNow(); r != "data-plane" {
-				t.Errorf("role after the early half = %q, want data-plane (later init steps classify the node by it)", r)
-			}
-			if activeDPClient.Load() != nil {
-				t.Error("the early half started the data-plane client")
-			}
-			if n := policyStore.ConfiguredRuleCount(); n != 0 {
-				t.Errorf("the early half replayed the last-good snapshot (%d rules) into a store that has not loaded", n)
-			}
+			suWantDataPlaneEarlyHalfOnly(t)
 
-			env.loadStores(t, "") // stale policy file: on-disk-a, on-disk-b; derivation: rules ⇒ deny
+			env.loadStores(t, "")
+			if got := defaultPolicyAction(); got != tc.derived {
+				t.Fatalf("control: boot derived default action %q from the policy file, this case needs %q", got, tc.derived)
+			}
 			act.activate()
 
-			if got := suRuleNames(policyStore.List()); got != strings.Join(tc.cpRules, ",") {
-				t.Errorf("active rules after restart = [%s], want the last-good snapshot's %v (not the stale policy file)", got, tc.cpRules)
+			if got := suRuleNames(policyStore.List()); got != strings.Join(tc.wantRules, ",") {
+				t.Errorf("active rules after restart = [%s], want %v", got, tc.wantRules)
 			}
 			onDisk, err := os.ReadFile(env.policyFile)
 			if err != nil {
 				t.Fatal(err)
 			}
-			if !strings.Contains(string(onDisk), "from-control-plane") || strings.Contains(string(onDisk), "on-disk-a") {
+			if len(tc.cpRules) > 0 && (!strings.Contains(string(onDisk), "from-control-plane") || strings.Contains(string(onDisk), "on-disk-a")) {
 				t.Errorf("the replayed rules were not persisted over the stale policy file:\n%s", onDisk)
 			}
 			if got := defaultPolicyAction(); got != tc.cpDefault {
-				t.Errorf("default action after restart = %q, want the control plane's %q", got, tc.cpDefault)
+				t.Errorf("default action after restart = %q, want the control plane's %q (boot had derived %q)", got, tc.cpDefault, tc.derived)
 			}
 			c := activeDPClient.Load()
 			if c == nil || c.lastVersion.Load() != 7 || suClientLoopsStarted.Load() != 1 {
 				t.Fatalf("the data-plane client was not started, once, on the replayed version (client=%v loops=%d)", c != nil, suClientLoopsStarted.Load())
 			}
 		})
+	}
+}
+
+// suWantDataPlaneEarlyHalfOnly: after the early half a data plane has its role
+// and nothing else — no client, no replayed rules.
+func suWantDataPlaneEarlyHalfOnly(t *testing.T) {
+	t.Helper()
+	if r := cpRoleNow(); r != "data-plane" {
+		t.Errorf("role after the early half = %q, want data-plane (later init steps classify the node by it)", r)
+	}
+	if activeDPClient.Load() != nil {
+		t.Error("the early half started the data-plane client")
+	}
+	if n := policyStore.ConfiguredRuleCount(); n != 0 {
+		t.Errorf("the early half replayed the last-good snapshot (%d rules) into a store that has not loaded", n)
 	}
 }
 
@@ -702,4 +843,77 @@ func TestClusterHalves_Standalone_NothingToActivate(t *testing.T) {
 	}
 	var nilAct *clusterActivation
 	nilAct.activate() // must not panic
+}
+
+// TestClusterHalves_DataPlane_IdentityIsValidatedInTheEarlyHalf: a data plane
+// whose mTLS certificate, key or CA cannot be loaded must stop in phase 1 —
+// before any store loads, any listener binds, or the last-good replay rewrites
+// local files. prepareDataPlane validates the material itself (a failure there
+// is fatal; TestBinaryStartup_DataPlane_BadIdentityStopsBeforeTheStores shows
+// the process exit), and the client built in the late half can then only fail
+// for a reason that is not the node's identity.
+func TestClusterHalves_DataPlane_IdentityIsValidatedInTheEarlyHalf(t *testing.T) {
+	dir := t.TempDir()
+	junk := filepath.Join(dir, "junk.pem")
+	if err := os.WriteFile(junk, []byte("not a certificate"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateDPClientIdentity("", "", ""); err != nil {
+		t.Errorf("no certificate configured (insecure development mode) must not be an identity failure: %v", err)
+	}
+	for name, files := range map[string][3]string{
+		"unreadable certificate": {filepath.Join(dir, "missing.crt"), junk, ""},
+		"garbage key pair":       {junk, junk, ""},
+	} {
+		if err := validateDPClientIdentity(files[0], files[1], files[2]); err == nil {
+			t.Errorf("%s: validateDPClientIdentity accepted it", name)
+		}
+	}
+
+	// Structure: the validation is in the early half, ahead of everything the
+	// late half does, and the late half is not where it first happens.
+	file := parseMainPkgFileForTest(t, "dp_enrollment.go")
+	early, late := funcDeclForTest(t, file, "prepareDataPlane"), funcDeclForTest(t, file, "runDataPlane")
+	if !startupCallees(early)["validateDPClientIdentity"] {
+		t.Fatal("prepareDataPlane does not validate the data plane's mTLS identity: a node with an unloadable " +
+			"certificate would load every store, bind SOCKS5 and replay its last-good snapshot before exiting")
+	}
+	if !calleeNames(late)["NewDataPlaneClient"] || !calleeNames(late)["applyDPLastGoodConfigSnapshot"] {
+		t.Fatal("runDataPlane no longer replays and builds the client; this guard's premise is stale")
+	}
+	if startupCallees(early)["applyDPLastGoodConfigSnapshot"] || startupCallees(early)["NewDataPlaneClient"] {
+		t.Error("prepareDataPlane replays or builds the client: that is the late half")
+	}
+}
+
+// TestStartupSequence_PRGateRunsTheRealBinary: nothing in the default test
+// build can run runStartupSequence, so the PR gate must start the real binary.
+// The Fast PR Gate has a job that builds once and runs TestBinaryStartup_*,
+// and the gate's aggregate needs it (a failure there fails the gate).
+func TestStartupSequence_PRGateRunsTheRealBinary(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join(pkgSourceDir(), ".github", "workflows", "pr-fast-gate.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	wf := string(raw)
+	job := strings.Index(wf, "\n  startup-sequence:\n")
+	if job < 0 {
+		t.Fatal("pr-fast-gate.yml has no startup-sequence job: the real start-up sequence is not executed by the PR gate")
+	}
+	body := wf[job:]
+	if end := strings.Index(body[1:], "\n  # ───"); end > 0 {
+		body = body[:end+1]
+	}
+	for _, want := range []string{"go build -o", "-tags proxybinload", "-run 'TestBinaryStartup_'", "CULVERT_BIN:"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("the startup-sequence job does not contain %q", want)
+		}
+	}
+	aggAt := strings.Index(wf, "\n  fast-gate-approved:\n")
+	if aggAt < 0 {
+		t.Fatal("pr-fast-gate.yml has no fast-gate-approved aggregate job")
+	}
+	if !strings.Contains(wf[aggAt:], "\n      - startup-sequence\n") {
+		t.Error("the Fast PR Gate aggregate does not need startup-sequence: a failing start-up test would not fail the gate")
+	}
 }
