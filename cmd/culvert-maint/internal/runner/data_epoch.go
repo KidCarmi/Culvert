@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"strconv"
 	"strings"
 )
@@ -84,6 +85,9 @@ func parseDataEpoch(stdout []byte) (*DataEpoch, error) {
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&rep); err != nil {
 		return nil, fmt.Errorf("data epoch: %w", err)
+	}
+	if err := dec.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		return nil, errors.New("data epoch: trailing data after the report object")
 	}
 	switch {
 	case rep.Schema != 1:
