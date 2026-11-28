@@ -443,6 +443,61 @@ gaps and make the #2051 executor the single path every recovery takes.
 - AGT-900 extension, recorded explicitly: "converge may restore the last
   image this agent gated, at runtime, when policy allows" — new contract
   text, its own tests, model property and real-Docker cases.
+- **Scope (owner decision 2026-11-28): only images this agent installed.**
+  The agent acts only when it put the unhealthy image there itself: a later
+  failure of an upgrade (or image rollback) that passed, or an interrupted
+  upgrade whose target is now unhealthy. It restores the image that was gated
+  before that change. A hand retag or a hand `compose up` is reported, never
+  acted on: a manual change is evidence of state, not authorization.
+- **Design (2026-11-28), in four PRs, each production change separate from
+  its real-Docker qualification:**
+  1. *Provenance and gated history (data only).* When an upgrade or image
+     rollback this agent ran passes its gate and verify, it writes
+     `<state_dir>/health/installed.json`: the op id, the image it installed
+     (id, validated ref, digest) and the image it replaced (id, ref). The
+     observer keeps the last two distinct gated images in
+     `<state_dir>/health/gated.json` (newest first); `last_good.json` is
+     unchanged. Both are best-effort and nothing acts on them yet; a file that
+     is absent or unreadable means "no provenance" and blocks every action.
+  2. *Decision (pure) and lifecycle model.* A new journal kind
+     `runtime.recover` (schema 2, so an agent before slice 2 is fenced off).
+     Its record names the restore target as the prior (`PriorRef`,
+     `PriorDigest`, `PriorImageID`), the unhealthy image as the target, and
+     is written with `RollbackArmed` set before anything moves. The decision
+     for it is the armed-rollback branch the startup reconcile already runs
+     (`finish_rollback_retag`: tag the prior, `up`, gate, verify by id,
+     audit-first retire), entered only when every condition below holds on
+     fresh facts. The lifecycle model and its properties gain the kind before
+     the executor relies on it.
+  3. *Executor, trigger, policy and status.* `runtime_recovery = "off"`
+     (default) or `"restore_last_gated"`, startup-only, valid only with
+     `runtime_health_interval` on. A separate loop (the observer stays
+     non-mutating, AGT-007) acts after **3 consecutive kept `not_ready`
+     samples** of the same running container and image (in memory; a
+     restart starts the count again). It begins the operation under the
+     maintenance lock (operators get 409), writes the record fail-closed, and
+     runs the plan through the startup executor's steps. Status reports it.
+  4. *Real-Docker qualification* in all four cells, with negative controls.
+- **Conditions, all re-read before every mutating step:** the policy is on;
+  the lock is free and the settle window over; the container runs, and
+  container and fixed tag are on the same image; that image is the one
+  `installed.json` names, or the target of a kept interrupted upgrade record
+  of this agent; the restore target is the image that change replaced, and
+  it is in `gated.json`; its reference passes the repo-bound exact-digest
+  check and the image allowlist and is local; `dataCompat` (slice 6a) is
+  compatible for the target's labels and the data epoch; fewer than 2
+  runtime recoveries were begun for this unhealthy image (write-ahead
+  counter). Anything else is reported (`recovery_required/<reason>`), never
+  acted on. A stack that is down, an unknown or no-container sample, or a
+  running image that is the last gated image itself is reported only.
+- **After a crash** the record is an armed image-change record: with
+  `reconcile_on_startup = "converge"` the startup reconcile decides it with
+  the same branch (and the same compatibility check); with `"off"` it is
+  reported (AGT-004). A runtime recovery retires only its own record; a kept
+  interrupted-upgrade record stays until an existing rule retires it.
+- **Audit:** `runtime.recover:started` before the first mutation and
+  `runtime.recover:succeeded|failed` at the end, audit before retire, as
+  every other recovery.
 
 **Slice 7 — forward resumption of an interrupted health gate
 (approved as its own, independently qualified slice).**
