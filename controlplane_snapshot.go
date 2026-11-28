@@ -1839,16 +1839,12 @@ func applySnapshotExtendedState(snap ConfigSnapshot) {
 		fileBlocker.ReplaceAll(snap.FileBlockExtensions)
 	}
 
-	// OTLP endpoint (CRIT-3).
-	if snap.OTLPEndpoint != "" {
-		if !globalOTLP.Enabled() || globalOTLP.Endpoint() != snap.OTLPEndpoint {
-			globalOTLP.Configure(snap.OTLPEndpoint, nil)
-			globalOTLPTraces.Configure(snap.OTLPEndpoint, nil)
-		}
-	} else if globalOTLP.Enabled() {
-		globalOTLP.Stop()
-		globalOTLPTraces.Stop()
-	}
+	// OTLP endpoint (CRIT-3). CHAOS-130: each exporter is reconciled from ITS
+	// OWN state. Deciding both from globalOTLP.Enabled() left a traces
+	// exporter that had been stopped on its own dark through every later
+	// snapshot carrying the right endpoint, and left it RUNNING through a
+	// snapshot that disabled export while metrics was already off.
+	reconcileOTLPPairToEndpoint(snap.OTLPEndpoint)
 
 	// Node groups.
 	if snap.NodeGroups != nil && globalNodeGroups != nil {

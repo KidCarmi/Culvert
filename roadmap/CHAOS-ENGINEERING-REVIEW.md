@@ -8,6 +8,48 @@ workers/feeds/scanning/alerting.
 inferred without reading the code path. Failure modes were assessed against the project's stated
 posture — **default deny, fail closed when recovery is impossible, graceful degradation otherwise.**
 
+**2026-11-27 — `CHAOS-130` CLAIMED (placeholder, commit one). Domain: the OTLP
+EXPORT PLANE'S LIFECYCLE OWNERSHIP — not what the exporters do with a batch
+(CHAOS-126 settled that) but WHO OWNS THE PUSH LOOP, and what the pair becomes
+when two owners decide at once. `Configure` publishes the new endpoint and the
+new `cancel` under TWO SEPARATE holds of the mutex, identically in both
+exporters (`internal/otlp/spans.go:174-205`, `internal/otlp/otlp.go:110-127`):
+it cancels the old loop, stores the endpoint, RELEASES the lock, and only then
+takes it again to store the `cancel` of the loop it is about to start. Two
+concurrent callers therefore overwrite each other's `cancel`, and the loser's
+push loop becomes UNREACHABLE — no `Stop()` can ever cancel it, because the
+only handle to it was overwritten. Measured on this tree through the production
+constructors: 8 concurrent `Configure` calls leave **2 live `pushLoop`
+goroutines** on each exporter, and **1 of them survives `Stop()`** — the
+operator's disable — for the rest of the process's life. This is the
+CHAOS-126 residual risk `R9` recorded as pre-existing and unchanged; it is also
+the exact condition the span exporter's own `pushSlot` comment documents as
+having INVERTED the ring, so the leak reintroduces by accident the defect that
+round's independent review fixed by design. The same gap makes `Stop()` and
+`Configure` non-exclusive in the other direction: a disable that interleaves
+leaves `Enabled()` reporting FALSE with a live loop behind it. And the pair's
+two halves can come apart, which is where it stops being a leak and becomes a
+SILENT failure: every caller configures metrics and traces in sequence, never
+atomically, while the CP snapshot apply decides for BOTH from the METRICS
+exporter's state alone (`controlplane_snapshot.go:1844-1850`,
+`globalOTLP.Enabled()` gating the `Stop()` and `Configure` of each) — residual
+risk `R7`. A traces exporter stopped alone is therefore never restarted by any
+subsequent snapshot whose endpoint already matches metrics, `GET /api/otlp`
+reports one `enabled` flag taken from metrics, and `checkOTLPExport`
+(`diagnostics_otlp_export.go:29-34`) is structurally incapable of seeing it:
+it reports an export that is FAILING and says nothing at all about one that is
+OFF. Spans — client IPs, target hosts, enforcement decisions — simply stop
+being exported, with no counter, no row and no log line.** Id claimed in this
+committed row before any code was written, per the convention below, and
+checked against `origin/main` rather than the working tree per the 2026-09-25
+amendment: `CHAOS-126` is the highest id anywhere on `origin/main` (at
+`2fad1fb`), and `CHAOS-127`, `CHAOS-128` and `CHAOS-129` are held by open PRs
+#2075, #2119 and #2125 respectively — which is exactly the case the amendment
+exists for, so this sweep did NOT take the next id after main's highest. Of the
+other 58 open PRs none is a chaos sweep and none claims a chaos id. This sweep
+took 130 and will not move. Recent rounds do not claim a `§` section number
+(`CHAOS-123` through `CHAOS-126` all omit it); this one follows them.
+
 **2026-11-21 — `CHAOS-126` CLAIMED (placeholder, commit one). Domain: the
 OBSERVABILITY PLANE'S OWN LOSS ACCOUNTING — the OTLP SPAN BUFFER at a
 collector failure and at a restart. `SpanExporter.push` DRAINS the ring buffer
@@ -42,6 +84,73 @@ drain-before-post it credited for lock hygiene is the same statement that
 destroys an undelivered batch, and exporting `droppedSpans` to the scrape
 surface — OBS-2's remaining ask — would have published a counter that reads 0
 through a total outage.
+
+The 2026-11-27 round is recorded in
+[the dated review](../docs/engineering/CHAOS-ENGINEERING-REVIEW-2026-11-27.md) —
+CHAOS-130 (THE FUNCTION THAT CREATED OWNERSHIP WAS THE ONE THAT BRIEFLY HAD
+NONE). Entry point: `CHAOS-126`'s residual risks `R9` and `R7`, both recorded
+as pre-existing and unchanged. Both are real, both reproduce, and they are the
+same defect at two distances — **a lifecycle transition that is not atomic with
+the state it publishes.** `Configure` published the endpoint, RELEASED the
+mutex, and only then re-took it to store the `cancel` of the loop it was about
+to start, identically in both exporters. A concurrent caller overwrote that
+handle and the loser's push loop was left with NONE: `Stop()` cancels what
+`e.cancel` holds, and that was not it. Measured through the production
+constructors: 8 concurrent `Configure` left **3** live span loops (want 1) and
+**2 survived `Stop()`** — the operator's disable; 40 raced saves at the
+production 15 s cadence left **9**, of which **8** survived. The leak is
+permanent (only the process exit clears it), it GROWS with operator activity,
+and because `MetricsExporter.push` always POSTs a cumulative snapshot it bills
+the collector: **19 and 50 POSTs over 10 intervals against the 10 configured,
+measured AFTER a clean disable and re-enable.** It also manufactures the second
+concurrent pusher that the span exporter's own `pushSlot` comment records as
+having INVERTED the ring — the defect CHAOS-126's independent review removed by
+design, reintroduced here by accident. One level up, the pair is never applied
+atomically by any of its four callers, so the plane settles HALF ON — and the
+CP snapshot apply then CEMENTED it, because it decided both halves from the
+METRICS exporter's state: metrics at the right endpoint with traces stopped
+survived **five consecutive applies carrying that endpoint**. The same guard
+fails OPEN in the other direction: with metrics already off, a snapshot that
+DISABLES export reached `else if globalOTLP.Enabled()`, found false, and
+stopped NEITHER — so a fleet-wide instruction to stop shipping telemetry left
+the gateway shipping per-request client IPs, target hosts, rules and
+enforcement decisions, and the control plane believed it had complied. **And
+none of it was visible:** `checkOTLPExport` reports an export that is FAILING
+and has nothing to say about one that is OFF (measured: **zero** rows for a
+plane with traces dark), `GET /api/otlp` reports one `enabled` read from
+metrics, and the legacy panel renders that flag as "✓ Exporting metrics +
+traces". Shipped: the loop's context is built BEFORE the lock so cancelling the
+old loop, publishing the endpoint and publishing the new `cancel` happen under
+ONE hold, with `cancel` stored as nil on the disable path; `SpanExporter`
+gained the `Endpoint()` reader whose absence is WHY the apply was reading
+metrics for both; `otlpPairMu` plus `configureOTLPPair`/`stopOTLPPair`/
+`reconcileOTLPPairToEndpoint` make the pair one decision and are the only way
+all four callers touch it; the CP apply reconciles each exporter from its OWN
+state, which closes the dark-forever and the fail-open arms together while
+still leaving a coherent plane alone (a reconfigure every apply would cancel a
+healthy loop and discard the buffered spans — this round's silent loss traded
+for a metronomic one); and a new `otlp_export_partial` WARN row names the dark
+half, read under the pair mutex so a transition in progress is never reported
+as a divergence. A fifth finding surfaced while rewriting the reconcile and is
+fixed with it: the apply compared the RAW `snap.OTLPEndpoint` against
+`Endpoint()`, which returns the NORMALISED value, so a stored endpoint carrying
+a trailing slash or stray whitespace compared unequal on every apply —
+measured, 10 reconfigure log lines across 5 snapshots that change nothing.
+`CHAOS-126` flagged this class in `MetricsExporter.Configure`'s own comment and
+fixed the normalisation while leaving the COMPARISON reading the un-normalised
+side; `otlp.NormalizeEndpoint` is now the one exported definition both
+`Configure`s and the reconcile use. Rated LOW only because today's producers
+happen to emit a normalised value. Fifteen gates, ten of them failing on the
+pre-fix tree with the fix reverted in place. **One of this round's own measurements was withdrawn
+on review** — an early probe's "5 of 200 `Stop()`/`Configure()` races ended with
+`Enabled()` false behind a live loop" was partly counting the previous
+attempt's unwinding goroutine, did not reproduce under a settled count in 600
+attempts, and its gate is recorded as an INVARIANT gate rather than a
+reproduction. Residual: no gauge of live push loops on a running appliance (the
+gates are the only detection), `GET /api/otlp` still reports one `enabled`
+because splitting it pulls in the OpenAPI spec and the generated client, and
+`otlpPairMu` is a convention rather than a type, so nothing stops a future
+caller from reaching the globals directly.
 
 The 2026-11-21/22 round is recorded in
 [the dated review](../docs/engineering/CHAOS-ENGINEERING-REVIEW-2026-11-22.md) —

@@ -13,6 +13,7 @@ package main
 
 import (
 	"fmt"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -36,6 +37,104 @@ var (
 	globalOTLP       = otlp.NewMetrics(culvertMetricsSnapshot)
 	globalOTLPTraces = otlp.NewSpans()
 )
+
+// otlpPairMu serializes the metrics+traces lifecycle transition so the pair
+// is applied as ONE decision (CHAOS-130).
+//
+// Every caller configures or stops the two exporters in sequence —
+// loadObservability, applyAdminServices, the admin handler and the CP
+// snapshot apply. Nothing made that sequence atomic, so two concurrent
+// transitions interleaved and left the plane HALF configured, in either
+// direction, permanently:
+//
+//   - metrics enabled, traces stopped. No later snapshot restored it: the CP
+//     apply compared the snapshot's endpoint against the METRICS exporter's
+//     and skipped both when it matched (measured: traces still off after five
+//     applies carrying the right endpoint). Spans simply stopped being
+//     exported, and nothing said so — checkOTLPExport reports an export that
+//     is FAILING and has nothing to say about one that is OFF (measured: zero
+//     diagnostic rows), while GET /api/otlp reported enabled=true because
+//     that flag is read from the metrics exporter alone.
+//   - traces enabled, metrics stopped. A snapshot that DISABLES export then
+//     stopped neither, because the `else if globalOTLP.Enabled()` guard was
+//     false (measured: traces still exporting after the disabling apply).
+//     That one is a fail-OPEN: a fleet-wide instruction to stop shipping
+//     telemetry left the gateway shipping client IPs, target hosts and
+//     enforcement decisions to the collector, and the control plane believed
+//     it had complied.
+//
+// Held across only the two engine calls. Each engine's own transition is
+// internally atomic (CHAOS-130, internal/otlp); this mutex is what keeps the
+// PAIR from being observed, or decided upon, half-applied.
+var otlpPairMu sync.Mutex
+
+// configureOTLPPair enables (or repoints) metrics and traces export as one
+// transition. Pass an empty endpoint only through stopOTLPPair.
+func configureOTLPPair(endpoint string, headers map[string]string) {
+	otlpPairMu.Lock()
+	defer otlpPairMu.Unlock()
+	globalOTLP.Configure(endpoint, headers)
+	globalOTLPTraces.Configure(endpoint, headers)
+}
+
+// stopOTLPPair disables both exporters as one transition.
+func stopOTLPPair() {
+	otlpPairMu.Lock()
+	defer otlpPairMu.Unlock()
+	globalOTLP.Stop()
+	globalOTLPTraces.Stop()
+}
+
+// reconcileOTLPPairToEndpoint brings BOTH exporters to the endpoint a CP
+// snapshot carries. An empty endpoint means export is off for the fleet and
+// stops whichever halves are still running — each tested on its own, which is
+// the fail-OPEN arm this replaces: `else if globalOTLP.Enabled()` stopped
+// NEITHER half when metrics was already off, leaving the gateway shipping
+// request spans the control plane had told it to stop shipping (CHAOS-130).
+//
+// Reconciliation, not an unconditional reconfigure: when both halves already
+// sit at the snapshot's endpoint this returns having done nothing, because
+// Configure would cancel a healthy push loop and — for traces — throw away the
+// buffered spans on every apply.
+//
+// When EITHER half is wrong, BOTH are reconfigured, and that is deliberate.
+// Reconfiguring only the wrong half is what the per-exporter version of this
+// function did, and it could leave the two halves holding DIFFERENT
+// credentials: starting from metrics off and traces at E with a locally
+// configured auth header, a snapshot carrying E would configure metrics with
+// the snapshot's nil headers and skip traces, so metrics would 401 against an
+// authenticating collector forever while traces kept working. The old coupled
+// guard never produced that state because it always configured both. One
+// transition for the pair, from one set of inputs, is the property worth
+// keeping; the cost is restarting one healthy loop in an already-anomalous
+// state, which no steady-state apply ever reaches.
+func reconcileOTLPPairToEndpoint(endpoint string) {
+	// Compare in the alphabet the exporters STORE. Endpoint() returns the
+	// normalised value, so comparing a raw snapshot string against it made a
+	// stored endpoint with a trailing slash or stray whitespace unequal on
+	// every apply — restarting both push loops each time a snapshot landed
+	// (CHAOS-130).
+	endpoint = otlp.NormalizeEndpoint(endpoint)
+
+	otlpPairMu.Lock()
+	defer otlpPairMu.Unlock()
+	if endpoint == "" {
+		if globalOTLP.Enabled() {
+			globalOTLP.Stop()
+		}
+		if globalOTLPTraces.Enabled() {
+			globalOTLPTraces.Stop()
+		}
+		return
+	}
+	metricsAtEndpoint := globalOTLP.Enabled() && globalOTLP.Endpoint() == endpoint
+	tracesAtEndpoint := globalOTLPTraces.Enabled() && globalOTLPTraces.Endpoint() == endpoint
+	if metricsAtEndpoint && tracesAtEndpoint {
+		return
+	}
+	globalOTLP.Configure(endpoint, nil)
+	globalOTLPTraces.Configure(endpoint, nil)
+}
 
 // parseTraceparent extracts trace-id and span-id from a W3C Traceparent
 // header value. Wrapper function (not a func var) — called per request on

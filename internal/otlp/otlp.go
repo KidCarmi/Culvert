@@ -32,6 +32,21 @@ import (
 // breaking the taint chain on the endpoint URL (go/request-forgery).
 var validEndpoint = regexp.MustCompile(`^https?://[^/]`)
 
+// NormalizeEndpoint is the ONE definition of how a configured collector URL is
+// reduced to the form both exporters store and compare.
+//
+// CHAOS-130: Configure normalises internally and Endpoint() therefore returns
+// the normalised value, so any caller that compares a RAW configured endpoint
+// against Endpoint() is comparing two different alphabets. The CP snapshot
+// apply did exactly that, and a stored endpoint carrying a trailing slash or
+// surrounding whitespace compared unequal on EVERY apply — cancelling and
+// restarting both push loops, and running the cancelled loop's bounded final
+// flush, each time a snapshot landed. CHAOS-126 fixed the normalisation; this
+// exports it so the comparison cannot drift from it.
+func NormalizeEndpoint(endpoint string) string {
+	return strings.TrimRight(strings.TrimSpace(endpoint), "/")
+}
+
 // SnapshotFunc returns the current metric set, stamped with the given
 // UnixNano timestamp string. package main's implementation reads the
 // culvert_* stat singletons.
@@ -105,7 +120,25 @@ func (o *MetricsExporter) Configure(endpoint string, headers map[string]string) 
 	// the METRICS exporter's stored endpoint (controlplane_snapshot.go), so a
 	// snapshot endpoint carrying whitespace would have compared unequal on
 	// every single apply and reconfigured both exporters each time.
-	endpoint = strings.TrimRight(strings.TrimSpace(endpoint), "/")
+	endpoint = NormalizeEndpoint(endpoint)
+
+	// CHAOS-130: the whole transition — cancelling the old loop, publishing
+	// the endpoint, publishing the new loop's cancel — happens under ONE hold
+	// of o.mu, so two concurrent callers cannot overwrite each other's cancel
+	// and strand a push loop that Stop() can never reach. See
+	// SpanExporter.Configure for the measurements; this exporter leaked the
+	// same way and its leak is the one with a bill attached, because push()
+	// here always POSTs a cumulative snapshot: one stranded loop doubled the
+	// collector's request rate (measured: 10 POSTs over 5 intervals against
+	// the 5 the operator configured) and the doubling survived a disable and
+	// re-enable, because only the process exit clears it.
+	var (
+		ctx    context.Context
+		cancel context.CancelFunc
+	)
+	if endpoint != "" {
+		ctx, cancel = context.WithCancel(context.Background())
+	}
 
 	o.mu.Lock()
 	// Stop existing loop if reconfiguring.
@@ -114,15 +147,14 @@ func (o *MetricsExporter) Configure(endpoint string, headers map[string]string) 
 	}
 	o.endpoint = endpoint
 	o.headers = headers
+	// nil when disabling, which also clears the stale already-cancelled
+	// handle the two-phase version left behind on that path.
+	o.cancel = cancel
 	o.mu.Unlock()
 
 	if endpoint == "" {
 		return
 	}
-	ctx, cancel := context.WithCancel(context.Background())
-	o.mu.Lock()
-	o.cancel = cancel
-	o.mu.Unlock()
 	go o.pushLoop(ctx)
 	obs.Printf("OTLP: exporting metrics to %s every %s", obs.Sanitize(endpoint), o.interval)
 }
