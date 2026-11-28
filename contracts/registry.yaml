@@ -722,6 +722,31 @@ contracts:
     validation: unit
     compatibility: "New, off by default: with runtime_health_interval unset nothing runs, nothing is written and the GET /v1/status payload is unchanged. When on, it adds state_dir/health/{latest,last_good}.json (schema 1; a reader refuses any other schema, an unknown field or a file over 16 KiB) and the additive status key runtime_health. An older agent ignores the directory; a downgrade leaves it in place unread."
 
+  - id: AGT-008
+    area: agent-lifecycle
+    status: enforced
+    owner_approved: false
+    invariant: "The maintenance agent treats an image as able to run on the current data only when the data epoch read through `cli --print-data-epoch` succeeded and lies within the image's io.culvert.data-epoch.min..max labels. An unreadable or absent report, an unlabelled image, one label without the other, or a malformed label is unknown, never compatible; a data epoch outside the range is incompatible."
+    authority: "Maintenance agent (cmd/culvert-maint, separate module). Design: docs/adr/0062-maintenance-agent-durable-lifecycle-execution.md slice 6a; owner decision 5 (image and data compatibility before restoring an earlier image) and owner decision 2026-11-28; the proxy side is UPG-003."
+    code:
+      - "cmd/culvert-maint/internal/server/data_compat.go"
+      - "cmd/culvert-maint/internal/runner/data_epoch.go"
+    configs: []
+    transitions:
+      permitted:
+        - "reading the data epoch through the profile-gated cli service"
+      forbidden:
+        - "treating an unlabelled image, or an unreadable data epoch, as compatible"
+        - "treating a data epoch outside the image's labelled range as compatible"
+        - "accepting a data-epoch report with an unknown field, a missing field or more than one line"
+    tests:
+      - {file: "cmd/culvert-maint/internal/server/data_compat_test.go", name: TestDataCompat}
+      - {file: "cmd/culvert-maint/internal/runner/data_epoch_test.go", name: TestParseDataEpoch}
+      - {file: "cmd/culvert-maint/internal/runner/data_epoch_test.go", name: TestParseEpochLabels}
+      - {file: "cmd/culvert-maint/internal/runner/data_epoch_test.go", name: TestDataEpochTemplate}
+    validation: unit
+    compatibility: "Additive: a new read-only template and its fixed-argv sudoers line. An install whose sudoers file predates the line cannot read the data epoch, so every check is unknown and nothing is ever restored (fails closed). No caller acts on it until slice 6."
+
   - id: CFG-001
     area: config-compatibility
     status: enforced

@@ -143,6 +143,13 @@ culvert-maint ALL=(root) NOPASSWD: /usr/bin/docker compose -f {compose_path} ps 
 # Fixed argv, no variable part: allowlisted directly.
 culvert-maint ALL=(root) NOPASSWD: /usr/bin/docker compose -f {compose_path} --profile cli run --rm cli --list-backups --backup-dir /backup
 
+# ─── compose.cli.data_epoch (ADR-0062 slice 6a) ─────────────────────
+# Read-only, fixed argv: the proxy image prints the data volume's data epoch
+# and the epochs it reads. Runtime recovery puts an earlier image back only
+# when this read and the image's labels prove it can read the data. Without
+# this line nothing is ever put back (fails closed).
+culvert-maint ALL=(root) NOPASSWD: /usr/bin/docker compose -f {compose_path} --profile cli run --rm cli --print-data-epoch
+
 # ─── compose.cli.backup.{encrypted,unencrypted}, compose.cli.restore.{dryrun,
 #     commit}, compose.cli.cleanup.{dryrun,commit} (D1.6b) ──────────────────
 # ONE exact rule, no arguments, no wildcard: the root-owned wrapper is the
