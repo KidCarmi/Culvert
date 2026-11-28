@@ -90,6 +90,8 @@ type eligPair struct {
 func isolateEligGlobals(t *testing.T) {
 	t.Helper()
 	tempHADir(t)
+	resetPublishGateForTest() // a promotion arms the publication gate (ADR-0064)
+	t.Cleanup(resetPublishGateForTest)
 	bindFreshAdmissionOwners(t) // the snapshot apply mutates ipf/rl in place (RISK-030)
 	snapshotPolicyStoreForTest(t)
 	policyStore.ReplaceAll(nil)

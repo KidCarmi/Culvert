@@ -664,9 +664,6 @@ func (h *HAState) StartAsStandbyWithUndo(ctx context.Context, leaderAddr, token 
 		return
 	}
 	h.setTopologyLocked("standby", leaderAddr, haTransitionStandby)
-	if h == haTopologySource() {
-		disarmPublishGate() // the bounds described a leadership that is over
-	}
 	h.token = token
 	h.since = time.Now()
 	h.autoFailover = autoFailover
@@ -690,6 +687,9 @@ func (h *HAState) StartAsStandbyWithUndo(ctx context.Context, leaderAddr, token 
 	// passing the check guarantees this Add happens-before it.
 	h.wg.Add(1)
 	h.mu.Unlock()
+	if h == haTopologySource() {
+		disarmPublishGate() // outside h.mu: the bounds described a leadership that is over
+	}
 	h.republishTopology()
 
 	// Persist HA config so standby restarts know HA is enabled.

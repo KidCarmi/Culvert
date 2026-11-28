@@ -1,7 +1,6 @@
 package main
 
 import (
-	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -2292,17 +2291,4 @@ func (s *ConfigStore) raiseVersionAtLeast(v int64) {
 		s.version = v
 	}
 	s.mu.Unlock()
-}
-
-// snapshotContentFingerprint identifies a snapshot's distributed CONTENT: it
-// ignores the fields a leadership change or a re-commit alone moves (version,
-// fencing epoch, control-plane address list, CA fingerprint label, timestamp).
-func snapshotContentFingerprint(snap ConfigSnapshot) string {
-	snap.Version, snap.Epoch, snap.CPAddresses, snap.CAFingerprint, snap.UpdatedAt = 0, 0, nil, "", ""
-	b, err := json.Marshal(snap)
-	if err != nil {
-		return ""
-	}
-	sum := sha256.Sum256(b)
-	return hex.EncodeToString(sum[:])
 }

@@ -52,8 +52,6 @@ import (
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
-
-	"github.com/KidCarmi/Culvert/internal/alerts"
 )
 
 const haPublishGateFile = "ha_publish_gate.json"
@@ -92,7 +90,6 @@ type publishGateState struct {
 	ReleasedBy string                `json:"released_by,omitempty"`
 	ReleasedAt string                `json:"released_at,omitempty"`
 	Reconciled int64                 `json:"reconciled_through,omitempty"` // last version adopted from the previous leader
-	ContentFP  string                `json:"content_fp,omitempty"`         // this node's distributed content at arming
 	Evidence   []publishGateEvidence `json:"evidence,omitempty"`
 }
 
@@ -124,10 +121,13 @@ func takeInheritedPublishGate() *publishGateState {
 }
 
 var publishGate struct {
-	mu      sync.Mutex
-	st      publishGateState
-	loaded  bool
-	alerted bool // fire-once per hold
+	mu sync.Mutex
+	st publishGateState
+	// loadedFrom is the gate file the in-memory state was read from ("": not
+	// loaded). The state follows the file: a different data directory is a
+	// different node's gate.
+	loadedFrom string
+	alerted    bool // fire-once per hold
 }
 
 func haPublishGatePath() string {
@@ -139,11 +139,14 @@ func haPublishGatePath() string {
 // logged and treated as not armed — the gate is a safety net above the
 // existing behaviour, never a reason to stop serving.
 func loadPublishGateLocked() {
-	if publishGate.loaded {
+	path := haPublishGatePath()
+	if publishGate.loadedFrom == path {
 		return
 	}
-	publishGate.loaded = true
-	data, err := os.ReadFile(haPublishGatePath())
+	publishGate.loadedFrom = path
+	publishGate.st = publishGateState{}
+	publishGate.alerted = false
+	data, err := os.ReadFile(path)
 	if err != nil {
 		return
 	}
@@ -170,7 +173,7 @@ func savePublishGateLocked() {
 func resetPublishGateForTest() {
 	publishGate.mu.Lock()
 	publishGate.st = publishGateState{}
-	publishGate.loaded = false
+	publishGate.loadedFrom = ""
 	publishGate.alerted = false
 	publishGate.mu.Unlock()
 	setInheritedPublishGate(nil)
@@ -188,7 +191,7 @@ func armPublishGate(watermark, firstOwn int64, term uint64, epoch int64) {
 	}
 	next := publishGateState{
 		Armed: true, Watermark: watermark, FirstOwn: firstOwn, Term: term, Epoch: epoch,
-		ArmedAt: time.Now().UTC().Format(time.RFC3339), ContentFP: publishedContentFingerprint(),
+		ArmedAt: time.Now().UTC().Format(time.RFC3339),
 	}
 	// Start from the previous leader's gate: its open gaps, and its hold with
 	// the evidence, are still true of the fleet.
@@ -249,6 +252,9 @@ func (st *publishGateState) consistent(k, current int64) bool {
 // publishGateDecide classifies one data-plane report. node identifies the
 // reporter for the diff; k is the version it holds (0: not stated).
 func publishGateDecide(node, source string, k, epoch int64, fp string) publishGateVerdict {
+	if !publishGateApplies() {
+		return gateServe
+	}
 	publishGate.mu.Lock()
 	defer publishGate.mu.Unlock()
 	loadPublishGateLocked()
@@ -312,9 +318,7 @@ func recordGateEvidenceLocked(ev publishGateEvidence) {
 	}
 	if !publishGate.alerted {
 		publishGate.alerted = true
-		detail := st.HoldReason
-		go alerts.Fire("ha_resume_unfenced", alerts.Payload{Event: "ha_resume_unfenced", Source: "ha",
-			Detail: "publication held on the promoted control plane: " + detail})
+		pagePublishHold(st.HoldReason)
 	}
 }
 
@@ -333,11 +337,14 @@ func publishHoldReasonLocked() string {
 
 // haPublishAuthorized is the ONE publishing-authorization predicate (ADR-0064):
 // leadership is haLeadershipHeld; this is whether a leader may distribute new
-// content and accept configuration changes. ADR-0063's declared-emptying check
+// content and accept configuration changes. The state-authority contract's declared-emptying check
 // is to be consulted here as well, not in a second gate.
 func haPublishAuthorized() (ok bool, reason string) {
 	if reason, refused := haDistributionRefused(); refused {
 		return false, reason
+	}
+	if !publishGateApplies() {
+		return true, ""
 	}
 	publishGate.mu.Lock()
 	defer publishGate.mu.Unlock()
@@ -362,7 +369,7 @@ func publishGateSnapshot() publishGateState {
 // addPublishGateStatus adds the actionable diff to an HA status response.
 func addPublishGateStatus(resp map[string]any) {
 	st := publishGateSnapshot()
-	if !st.Armed {
+	if !st.Armed || !publishGateApplies() {
 		return
 	}
 	gate := map[string]any{
@@ -451,14 +458,6 @@ func releasePublishHold(actor string) (released bool, st publishGateState, err e
 	publishGate.alerted = false
 	savePublishGateLocked()
 	return true, *g, nil
-}
-
-// publishedContentFingerprint identifies the distributed CONTENT of the
-// committed snapshot, ignoring the fields a leadership change alone moves
-// (version, fencing epoch, control-plane address list).
-func publishedContentFingerprint() string {
-	snap := globalConfigStore.Get()
-	return snapshotContentFingerprint(snap)
 }
 
 // publishGateArming carries a promotion's bounds from its start to its end.
@@ -619,4 +618,33 @@ func refuseDistributionIfUnauthorized(method string) error {
 		return status.Errorf(codes.Unavailable, "%s: %s; %s is not served", haPublishNotAuthorizedMark, reason, method)
 	}
 	return nil
+}
+
+// pagePublishHold pages a publication hold once. A promotion (and so a hold)
+// can precede the load of the persisted webhooks at start-up, so before the
+// startup flush the page queues and is delivered only while the hold is still
+// in force; afterwards it is dispatched off the caller's goroutine.
+func pagePublishHold(reason string) {
+	payload := AlertPayload{Event: "ha_resume_unfenced", Source: "ha",
+		Detail: "publication held on the promoted control plane: " + reason}
+	if !startupAlertsFlushed() {
+		deferStartupAlertWhile("ha_resume_unfenced", payload, publishHoldInForce)
+		return
+	}
+	go fireAlert("ha_resume_unfenced", payload)
+}
+
+// publishHoldInForce reports whether a gate hold is active. It must not take
+// the gate lock's caller path: it is called by the startup alert flush.
+func publishHoldInForce() bool {
+	st := publishGateSnapshot()
+	return st.Armed && st.Held
+}
+
+// publishGateApplies reports whether the gate is in force: only while this
+// node is an HA LEADER. A gate file left by an earlier leadership does nothing
+// on a node that is now standalone or a standby. Read before, never under, the
+// gate lock (lock order: the gate lock is a leaf).
+func publishGateApplies() bool {
+	return haTopologySource().Status().Role == "leader"
 }

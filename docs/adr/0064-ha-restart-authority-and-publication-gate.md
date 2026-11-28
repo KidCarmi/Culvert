@@ -133,6 +133,12 @@ Part D: the gate (`ha_publish_gate.go`, contract `CLU-006`) with these refinemen
   publishes above every reported version (a data plane ignores a version not above its own), and is refused
   with `ha_reconciliation_possible` while the previous leader is reachable unless `force` is set.
 
+- The gate is in force only while the node is an HA leader; a gate file left by an earlier leadership does
+  nothing on a node that is now standalone or a standby, and the in-memory state follows the file.
+- **A leader without the lease distributes nothing** (`haDistributionRefused`): `GetConfig`,
+  `GetConfigDelta` and `HASync` answer `Unavailable CULVERT_PUBLISH_NOT_AUTHORIZED`. That predicate, not
+  `haPublishAuthorized`, is what a blanket listener refusal must key on.
+
 **Limit of detection.** A gap exists only when the promotion's first version is more than one above the
 watermark, which the wall-clock seed normally guarantees. A promoted node whose clock is behind the old
 leader's version counter numbers its first version `watermark+1` and cannot tell an ahead data plane from

@@ -211,7 +211,7 @@ func TestPublishGate_HoldSurvivesRestart(t *testing.T) {
 
 	// The restart: process memory is gone, the gate file is not.
 	publishGate.mu.Lock()
-	publishGate.st, publishGate.loaded, publishGate.alerted = publishGateState{}, false, false
+	publishGate.st, publishGate.loadedFrom, publishGate.alerted = publishGateState{}, "", false
 	publishGate.mu.Unlock()
 
 	after := publishGateSnapshot()

@@ -33,6 +33,7 @@ dp_enrollment.json
 # HA runtime files
 cp-leader.lock
 ha_config.json
+ha_publish_gate.json
 
 # Sensitive runtime state (these live in /data volume, not in git)
 data/
