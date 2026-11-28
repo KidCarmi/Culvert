@@ -33,6 +33,7 @@ import (
 	"culvert-maint/internal/journal"
 	"culvert-maint/internal/ops"
 	"culvert-maint/internal/runner"
+	"culvert-maint/internal/runtimehealth"
 	"culvert-maint/internal/server"
 	"culvert-maint/internal/status"
 )
@@ -147,7 +148,7 @@ func run(configPath string) error {
 	mgr := ops.NewManagerWithTTL(nil, idempTTL)
 	initIdempotency(cfg.StateDir, mgr, idempTTL)
 
-	jnl, err := initJournal(cfg.StateDir, mgr, al, cfg.ProxyRepo)
+	jnl, diedIn, err := initJournal(cfg.StateDir, mgr, al, cfg.ProxyRepo)
 	if err != nil {
 		return err
 	}
@@ -161,15 +162,15 @@ func run(configPath string) error {
 	if err != nil {
 		return fmt.Errorf("status: %w", err)
 	}
-	stp.WithJournal(jnl)
+	stp.WithJournal(jnl).WithDiedInCommand(diedIn)
 
-	srv, err := newServer(cfg, pol, al, mgr, stp, r, auditPath, jnl, instLock)
+	srv, err := newServer(cfg, pol, al, mgr, stp, r, auditPath, jnl, instLock, openRuntimeHealth(cfg, stp))
 	if err != nil {
 		return fmt.Errorf("server: %w", err)
 	}
 	defer func() { _ = srv.Close() }()
 
-	armStartupReconcile(cfg, stp, srv)
+	armStartupReconcile(cfg, stp, srv, diedIn)
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
@@ -277,14 +278,25 @@ func lockInstance(stateDir string) (*journal.ReconcileLock, error) {
 // interrupted upgrade, and its stack is not started. Acting on a record at boot
 // is the separate, opt-in reconcile (reconcile_on_startup = "converge",
 // server/startup_reconcile.go), which runs only after this report is complete.
-func initJournal(stateDir string, mgr *ops.Manager, al *audit.Logger, proxyRepo string) (*journal.Journal, error) {
-	jnl, err := journal.New(stateDir)
+//
+// diedIn is what this start, and only this start, may conclude about command
+// attribution (journal/intent.go): op id → the docker command the previous
+// agent process died inside. It lives in this process's memory and nowhere
+// else.
+func initJournal(stateDir string, mgr *ops.Manager, al *audit.Logger, proxyRepo string) (jnl *journal.Journal, diedIn map[string]string, err error) {
+	jnl, err = journal.New(stateDir)
 	if err != nil {
-		return nil, fmt.Errorf("journal: %w", err)
+		return nil, nil, fmt.Errorf("journal: %w", err)
 	}
 	recs, err := jnl.List()
 	if err != nil {
-		return nil, fmt.Errorf("journal: refusing to serve — %w", err)
+		return nil, nil, fmt.Errorf("journal: refusing to serve — %w", err)
+	}
+	// First, and before anything is audited, reported or counted: take every
+	// open command intent, durably.
+	diedIn, err = takeCommandIntents(jnl, al.Path(), recs)
+	if err != nil {
+		return nil, nil, fmt.Errorf("journal: refusing to serve — %w", err)
 	}
 	now := time.Now().UTC()
 	orphans := make([]ops.InterruptedOp, 0, len(recs))
@@ -298,7 +310,81 @@ func initJournal(stateDir string, mgr *ops.Manager, al *audit.Logger, proxyRepo 
 			"or the operation's own reason when it ended with a state it could not prove safe); "+
 			"Docker was NOT changed. See GET /v1/status interrupted_operations.", n)
 	}
-	return jnl, nil
+	return jnl, diedIn, nil
+}
+
+// takeCommandIntents removes every open command intent from the journal and
+// returns the ones that are evidence of a death inside the command.
+//
+// This is the one startup write that is NOT best-effort. "A start has looked"
+// has to be on disk before this start says anything: otherwise it would
+// report the interruption, an operator could react to the report (stop the
+// stack, say), and the next start would find the same intent and take it for
+// new. So a start that cannot remove an intent does not happen: nothing has
+// been audited, counted or reported yet, and the agent exits. systemd starts
+// it again; the first start that can write is the first start. With a state
+// directory that cannot be written the agent could have run no operation
+// anyway, only reported.
+//
+// All intents are taken before the first is acted on in any way, so a refusal
+// leaves no audit entry behind for some other record.
+//
+// An intent is not evidence of a death when the operation is known to have
+// ENDED: its record carries a terminal outcome, or the audit log holds its
+// terminal entry (which is written only after every stage returned). The
+// intent is then one whose close could not be written; it is removed like any
+// other and attributed to nothing.
+func takeCommandIntents(jnl *journal.Journal, auditPath string, recs []journal.Record) (map[string]string, error) {
+	diedIn := map[string]string{}
+	// A record a newer agent wrote cannot be rewritten by this build. Refuse
+	// before taking anything, so that no other record has had its intent
+	// removed by a start that then does not serve.
+	for i := range recs {
+		if recs[i].Intent != nil && recs[i].FromNewerAgent() {
+			return nil, fmt.Errorf("op %s holds an open command intent (%q): the agent was killed inside a docker compose command, and the journal record was written by a newer agent version that this version may not change; start that version (or a later one) again: %w",
+				recs[i].OpID, recs[i].Intent.Command, journal.ErrNewerSchema)
+		}
+	}
+	for i := range recs {
+		rec := &recs[i]
+		if rec.Intent == nil {
+			continue
+		}
+		ended := operationEnded(auditPath, rec)
+		command, attributed, _ := rec.TakeIntent()
+		if ended {
+			attributed, rec.Cut.Attributed = false, false
+		}
+		if werr := jnl.Write(*rec); werr != nil {
+			// command is content of a file; quoted, never interpreted. Records
+			// before this one have already had their intent removed: their
+			// attribution is lost with this start (a recovery, never a wrong one).
+			return nil, fmt.Errorf("op %s holds an open command intent (%q): the agent was killed inside a docker compose command, and that cannot be recorded in its journal record (is %s writable, and is there space?): %w",
+				rec.OpID, command, jnl.Dir(), werr)
+		}
+		if attributed {
+			diedIn[rec.OpID] = command
+		}
+	}
+	// Every intent has been taken: the fence that kept older agent versions
+	// from starting on one can go.
+	jnl.ReleaseIntentFence()
+	return diedIn, nil
+}
+
+// operationEnded reports whether rec's operation reached its end in the
+// process that ran it. It does not change rec. When the audit log cannot be
+// read the answer is "ended": attributing nothing is the safe side.
+func operationEnded(auditPath string, rec *journal.Record) bool {
+	if rec.TerminalOutcome != "" {
+		return true
+	}
+	if _, err := audit.FindTerminal(auditPath, rec.OpID, rec.Kind); err != nil {
+		return true
+	}
+	probe := *rec
+	server.AdoptAuditedTerminal(auditPath, &probe)
+	return probe.TerminalOutcome != ""
 }
 
 // startupRecord is the per-record startup work. A record whose operation ENDED
@@ -329,10 +415,14 @@ func startupRecord(jnl *journal.Journal, al *audit.Logger, rec *journal.Record, 
 // interrupted op; the reconcile is a separate op that takes the instance lock
 // and the maintenance lock here and starts its work once Serve has bound the
 // socket.
-func armStartupReconcile(cfg *config.Config, stp *status.Provider, srv *server.Server) {
+//
+// diedIn is what this start concluded about command attribution; only the
+// reconcile acts on it (status shows its own copy).
+func armStartupReconcile(cfg *config.Config, stp *status.Provider, srv *server.Server, diedIn map[string]string) {
 	if cfg.ReconcileOnStartup != config.ReconcileConverge {
 		return
 	}
+	srv.SetCommandAttribution(diedIn)
 	rt := server.NewReconcileTracker()
 	stp.WithReconcile(rt)
 	srv.PrepareStartupReconcile(rt)
@@ -396,18 +486,19 @@ func reportInterrupted(jnl *journal.Journal, al *audit.Logger, rec *journal.Reco
 // newServer wires the agent HTTP server from its already-constructed
 // dependencies. Extracted from run() to keep that function within the funlen
 // budget; no behavior change.
-func newServer(cfg *config.Config, pol *auth.Policy, al *audit.Logger, mgr *ops.Manager, stp server.StatusProvider, r *runner.Runner, auditPath string, jnl *journal.Journal, lock *journal.ReconcileLock) (*server.Server, error) {
+func newServer(cfg *config.Config, pol *auth.Policy, al *audit.Logger, mgr *ops.Manager, stp server.StatusProvider, r *runner.Runner, auditPath string, jnl *journal.Journal, lock *journal.ReconcileLock, rh *runtimehealth.Store) (*server.Server, error) {
 	return server.New(server.Options{
-		InstanceLock: lock,
-		Cfg:          cfg,
-		Auth:         pol,
-		Audit:        al,
-		Ops:          mgr,
-		Status:       stp,
-		StateDir:     cfg.StateDir,
-		AuditPath:    auditPath,
-		Journal:      jnl,
-		Runner:       r,
+		RuntimeHealth: rh,
+		InstanceLock:  lock,
+		Cfg:           cfg,
+		Auth:          pol,
+		Audit:         al,
+		Ops:           mgr,
+		Status:        stp,
+		StateDir:      cfg.StateDir,
+		AuditPath:     auditPath,
+		Journal:       jnl,
+		Runner:        r,
 		HealthProbeFactory: func() health.Probe {
 			return health.Probe{
 				BaseURL:    cfg.HealthBaseURL,
@@ -417,6 +508,25 @@ func newServer(cfg *config.Config, pol *auth.Policy, al *audit.Logger, mgr *ops.
 			}
 		},
 	})
+}
+
+// openRuntimeHealth opens the runtime health evidence store when
+// runtime_health_interval is on (ADR-0062 slice 5) and has the status report
+// it. Like the idempotency store, a store that cannot be opened does not stop
+// the agent: the observer then does not run, and status says nothing about
+// runtime health, exactly as when it is off.
+func openRuntimeHealth(cfg *config.Config, stp *status.Provider) *runtimehealth.Store {
+	if cfg.RuntimeHealthInterval <= 0 {
+		return nil
+	}
+	st, err := runtimehealth.Open(cfg.StateDir)
+	if err != nil {
+		log.Printf("culvert-maint: WARN: the runtime health store could not be opened, so the observer does not run: %q", err.Error())
+		return nil
+	}
+	stp.WithRuntimeHealth(st, cfg.RuntimeHealthInterval)
+	log.Printf("culvert-maint: runtime health observer on, every %s", cfg.RuntimeHealthInterval)
+	return st
 }
 
 // opLogRetentionInterval is how often the per-op transcript sweep runs after the

@@ -84,13 +84,17 @@ type ApplyVector struct {
 
 // CrashExpectation is the model's view of the world at a crash point.
 type CrashExpectation struct {
-	Phase           string   `json:"phase"`
-	Tag             string   `json:"tag"`
-	Running         string   `json:"running"`
-	Record          Record   `json:"record"`
-	ReconcileAction string   `json:"reconcile_action"`
-	ReconcileReason string   `json:"reconcile_reason"`
-	CmdsBeforeBlock []string `json:"cmds_before_block"`
+	Phase           string `json:"phase"`
+	Tag             string `json:"tag"`
+	Running         string `json:"running"`
+	Record          Record `json:"record"`
+	ReconcileAction string `json:"reconcile_action"`
+	ReconcileReason string `json:"reconcile_reason"`
+	// The converge (V2) decision a start with reconcile_on_startup = "converge" makes at
+	// this crash point (converge.go ReconcileV2Spec, first start: no attempt yet).
+	ReconcileV2Action string   `json:"reconcile_v2_action"`
+	ReconcileV2Reason string   `json:"reconcile_v2_reason"`
+	CmdsBeforeBlock   []string `json:"cmds_before_block"`
 }
 
 // CrashVector is one executable crash point.
@@ -336,9 +340,11 @@ func (w *walker) crashPoint(s State, e string, script []ScriptStep, cmds []strin
 	}
 	t := (Model{}).Step(s, e)
 	act, why := ReconcileSpec(ReconcileInputsForState(t))
+	act2, why2 := reconcileV2ForState(t, 0)
 	v := CrashVector{Params: paramsOf(s), Script: script, Plan: extend(plan), Block: bp,
 		Expect: CrashExpectation{Phase: t.JR, Tag: t.Tag, Running: t.Running, Record: RecordForState(t),
-			ReconcileAction: act, ReconcileReason: why, CmdsBeforeBlock: collapse(extend(cmds, extra...))}}
+			ReconcileAction: act, ReconcileReason: why, ReconcileV2Action: act2, ReconcileV2Reason: why2,
+			CmdsBeforeBlock: collapse(extend(cmds, extra...))}}
 	if key := dedupKey(v.Params, v.Script, v.Plan, v.Block, v.Expect); !w.seenCrash[key] {
 		w.seenCrash[key] = true
 		w.crash = append(w.crash, v)

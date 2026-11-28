@@ -1,0 +1,172 @@
+package main
+
+// command_intent_crash_test.go — command attribution (ADR-0062 slice 3) on the
+// REAL agent binary, SIGKILLed at chosen points of a real upgrade flow against
+// the process-level Docker model of startup_crash_recovery_test.go.
+//
+// What is asserted is what an agent start can conclude from the operation's
+// own record: `died_in_command` in GET /v1/status. The action that will use
+// it (restore_prior, slice 4) is not in this change; these are its
+// preconditions, and the sequences are the ones on which three reviews of the
+// earlier, marker-based design (#2093) found a wrong recovery.
+
+import (
+	"context"
+	"encoding/json"
+	"net/http"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+)
+
+type intentStatus struct {
+	Interrupted []struct {
+		OpID          string `json:"op_id"`
+		DiedInCommand string `json:"died_in_command"`
+		Starts        int    `json:"agent_starts_seen"`
+	} `json:"interrupted_operations"`
+}
+
+// diedIn returns what status says about opID after an agent start.
+func (r *crashRig) diedIn(opID string) (command string, starts int) {
+	r.t.Helper()
+	var st intentStatus
+	if code := r.get("/v1/status", &st); code != http.StatusOK {
+		r.t.Fatalf("status: HTTP %d", code)
+	}
+	for _, o := range st.Interrupted {
+		if o.OpID == opID {
+			return o.DiedInCommand, o.Starts
+		}
+	}
+	r.t.Fatalf("op %s is not listed as interrupted: %+v", opID, st.Interrupted)
+	return "", 0
+}
+
+type intentRecordFile struct {
+	Schema int `json:"schema"`
+	Intent *struct {
+		Command string `json:"command"`
+		Epoch   int    `json:"epoch"`
+	} `json:"intent"`
+	Cut *struct {
+		Command    string `json:"command"`
+		Attributed bool   `json:"attributed"`
+	} `json:"cut"`
+}
+
+func (r *crashRig) recordFile(opID string) intentRecordFile {
+	r.t.Helper()
+	raw, err := os.ReadFile(filepath.Join(r.state, "reconcile", opID+".json")) // #nosec G304 -- rig-owned temp dir
+	if err != nil {
+		r.t.Fatalf("journal record of %s: %v", opID, err)
+	}
+	var f intentRecordFile
+	if err := json.Unmarshal(raw, &f); err != nil {
+		r.t.Fatalf("journal record of %s: %v\n%s", opID, err, raw)
+	}
+	return f
+}
+
+// TestCommandIntent_DiedInsideUp: the agent is killed inside the upgrade's
+// `compose up`. The record on disk says so (an open intent, no schema change),
+// and the intent fence keeps older agent versions from starting on it. The first start after it, with reconcile_on_startup at
+// its default "off", reports it, and has removed the intent from disk; the
+// start after that does not (cases A and E: a start has looked, whatever its
+// mode; nothing that happens to the stack afterwards is that command's doing).
+func TestCommandIntent_DiedInsideUp(t *testing.T) {
+	r := newCrashRig(t)
+	r.start()
+	opID := r.crashAt("up_before:1")
+	if f := r.recordFile(opID); f.Intent == nil || f.Intent.Command != "compose up" || f.Intent.Epoch != 0 || f.Schema != 0 {
+		t.Fatalf("record after the kill = %+v, want an open compose up intent at epoch 0 and no schema key", f)
+	}
+	fence := filepath.Join(r.state, "reconcile", intentFenceFile)
+	if _, err := os.Stat(fence); err != nil {
+		t.Errorf("no intent fence beside a record with an open intent (an older agent version could start here): %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(r.state, "reconcile", "00000000000000000000000000.json")); !os.IsNotExist(err) {
+		t.Errorf("the first-generation fence is up (err=%v); an intent must not raise the record schema", err)
+	}
+	r.start()
+	if cmd, starts := r.diedIn(opID); cmd != "compose up" || starts != 1 {
+		t.Errorf("first start: died_in_command=%q agent_starts_seen=%d, want compose up / 1", cmd, starts)
+	}
+	if f := r.recordFile(opID); f.Intent != nil || f.Cut == nil || !f.Cut.Attributed {
+		t.Errorf("record after the first start = %+v, want the intent removed and an attributed cut", f)
+	}
+	if _, err := os.Stat(fence); !os.IsNotExist(err) {
+		t.Errorf("the intent fence is still there after a start took the intent (err=%v)", err)
+	}
+	r.kill()
+	r.start()
+	if cmd, starts := r.diedIn(opID); cmd != "" || starts != 2 {
+		t.Errorf("second start: died_in_command=%q agent_starts_seen=%d, want none / 2", cmd, starts)
+	}
+}
+
+// TestCommandIntent_KilledAfterTheCommandReturned (case C in its forward
+// form): `compose up` returned, and the agent is killed later, in the health
+// gate. No start may conclude that the agent died inside `compose up`.
+func TestCommandIntent_KilledAfterTheCommandReturned(t *testing.T) {
+	r := newCrashRig(t)
+	r.start()
+	opID := r.crashAt("health")
+	if f := r.recordFile(opID); f.Intent != nil {
+		t.Fatalf("record after the kill = %+v, want no open intent (the command had returned)", f)
+	}
+	r.start()
+	if cmd, _ := r.diedIn(opID); cmd != "" {
+		t.Errorf("died_in_command = %q for an agent killed in the health gate, want none", cmd)
+	}
+}
+
+// TestCommandIntent_ASecondAgentDoesNotTakeALiveIntent: a second agent process
+// is started on the same state directory while the first is inside `compose
+// up`. It must not serve, and must not touch the record: taking the intent of
+// an operation that is still running would report a death that did not happen
+// and, later, let a recovery start the prior image under the operation's own
+// `up`. The instance lock (taken before the journal is read) is what stops it.
+func TestCommandIntent_ASecondAgentDoesNotTakeALiveIntent(t *testing.T) {
+	r := newCrashRig(t)
+	r.start()
+	r.put("block_on", "up_before:1")
+	opID := r.applyUpgrade()
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		if _, err := os.Stat(filepath.Join(r.model, "blocked")); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the upgrade never reached its `compose up`; agent output:\n%s", r.logs.String())
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Cleanup(r.kill)
+	before := r.recordFile(opID)
+	if before.Intent == nil {
+		t.Fatalf("test setup: no open intent while the first agent is inside `compose up`: %+v", before)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	second := exec.CommandContext(ctx, agentBinary(t), "--config", r.cfgPath) // #nosec G204 -- test-built binary, test-owned config
+	second.Env = append(os.Environ(), "PATH="+r.shimDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	out, err := second.CombinedOutput()
+	if err == nil || ctx.Err() != nil {
+		t.Fatalf("the second agent did not refuse to start (err=%v, timed out=%v); output:\n%s", err, ctx.Err() != nil, out)
+	}
+	if !strings.Contains(string(out), "holds the instance lock") {
+		t.Errorf("the second agent failed for another reason than the instance lock; output:\n%s", out)
+	}
+	after := r.recordFile(opID)
+	if after.Intent == nil || after.Cut != nil {
+		t.Errorf("record after the second agent's attempt = %+v, want the live intent untouched and no cut\nsecond agent output:\n%s", after, out)
+	}
+	if code := r.get("/v1/health", nil); code != http.StatusOK {
+		t.Errorf("the first agent no longer answers after the second one's attempt: HTTP %d", code)
+	}
+}

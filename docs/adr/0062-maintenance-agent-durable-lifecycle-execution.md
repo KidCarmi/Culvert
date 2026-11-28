@@ -162,17 +162,48 @@ gaps and make the #2051 executor the single path every recovery takes.
 - This is the precondition for every later field.
 
 **Slice 3 — step checkpoints, starting with the gate (gaps 3, 6).**
-- Add an optional `checkpoint` object: `{step, intent_at, budget,
-  result, result_at, image_id}`. It is written fail-closed **before** a
-  gate starts (`gate:target`, `gate:prior`) and best-effort after it ends
-  (`passed` / `failed:<detail>`).
+- Add an optional `checkpoint` object: `{step, intent_at, attempts,
+  epoch, result, result_at, image_id}` (amended: `budget` was ambiguous
+  between "left" and "used"; `attempts` counts the gate runs begun for
+  `step`, written ahead and only ever raised, like `ReconcileAttempts`.
+  `epoch` is the record's `interrupted_seen` at `intent_at`, for the reason
+  rule 5 gives command intents: a start that counted in between makes the
+  checkpoint history, not an interruption to resume). It is written **before** a gate starts
+  (`gate:target`, `gate:prior`) and best-effort after it ends (`passed` /
+  `failed:<detail>`). Which write may refuse what is decided per write,
+  by rule 1's test (amended; the first text made every intent
+  fail-closed):
+  - **`gate:target` intent: fail-closed.** A write that fails is treated
+    as a failed gate, so the inline rollback runs; refusing can only lead
+    to the conservative branch. `image_id` is the target's id as the
+    restart captured and digest-verified it (empty when that capture
+    failed; slice 7 then has nothing to resume on). The cost is
+    availability, not safety: on a state directory that cannot be written
+    a healthy target is rolled back. It is reported under its own
+    `failure_reason` (`checkpoint_unwritable`), never as a plain gate
+    failure, so an operator can tell the two apart.
+  - **`gate:prior` intent: best-effort.** Fail-closed would refuse the
+    inline rollback's own gate on a full disk and leave the failed target
+    serving (rule 1). A missing `gate:prior` intent only withholds a later
+    resumption of that gate.
+  - **`gate:target` result `failed`: attempted before `rollback_pull`,
+    never blocking.** Blocking would keep a target that failed its gate
+    serving. If it cannot be written the record says "gate begun, no
+    result" although the gate failed. Slice 7 must not read that as
+    "interrupted": see its exclusions.
+  - `passed` is best-effort: `verified` already records it, and a lost
+    `passed` only withholds a resumption that is not needed.
 - Standalone image rollback records its prior (ref, image id) at capture
   and a barrier phase before its tag move, reusing `writeBarrier`.
 - The inline rollback's gate failure becomes durable in `checkpoint`
   before `rollback_pull` (today it is only an audit line until the
-  best-effort arm).
+  best-effort arm), under the rule above.
 - Decisions gain facts, not new actions: `restarted` + `checkpoint
-  gate:target failed` is no longer confused with "pending".
+  gate:target failed` is no longer confused with "pending". **Moved to
+  slice 7** (amended): the checkpoint lands first as record-and-report,
+  with no decision change, so it does not collide with slice 4's work on
+  the decision table, and its only consumer arrives with the rules that
+  constrain it.
 - **Command attribution is first-class** (rules from three independent
   reviews of #2093; its third review found it not merge-safe and it is
   parked):
@@ -273,6 +304,69 @@ gaps and make the #2051 executor the single path every recovery takes.
      and a state directory restored from a backup taken while an intent
      was open (its epoch still matches, the death is long past). Rule 2
      above is what keeps the second from causing a wrong restore.
+  5. The recorded command names a compose command of this operation. With
+     the journal unwritable across two commands of one operation (the
+     close of the first and the intent of the second both lost) a death in
+     the second is reported under the first's name. No flow runs `down`
+     after `up` under one operation today; the consumer decides on Docker's
+     state, the record's kind and phase, never on the name alone.
+- **As built (`restore_prior`, slice 4):** a new verdict, decided only when
+  no proxy container runs, the record is an upgrade at `restarting` or
+  `restarted` (armed or not; refused at `verified`, as #2051 refuses an armed
+  record there), the attribution says `compose up`, the recorded prior is
+  local and identical, and the fixed tag is on the prior or the target. Its
+  plan on #2051's executor is `[tag:prior, up, up_again, gate]`; every step
+  that changes Docker is preceded by a fresh read that must still decide
+  `restore_prior`, and `up_again` runs `up` only if a fresh read shows nothing
+  running (Compose's tidy-only pass after an interrupted recreate). Then
+  verification by image id and retirement through the usual readiness check.
+  How the obligations are met: (1) the reconcile takes the attribution
+  (`takeCommandAttribution`) when it builds a record's inputs, whatever that
+  record then decides; (2) the attribution is one input among the Docker
+  facts and only turns a `stack_down` report into `restore_prior` or a more
+  specific report (property RV18); (3) the verdict is reached only through
+  the upgrade branch, never for a restore-class or standalone record; (4)
+  stated residual: a state directory restored from such a backup, with the
+  stack down and the tag still on that operation's prior or target, is
+  restored to that operation's recorded prior image, gated and verified; (5)
+  only `compose up` counts. The reconcile's own `up` runs under the record's
+  operation, so a restore that dies in its own `up` is attributable once
+  more; the attempt cap (2) ends it. A start that defers (Docker unreadable)
+  has taken the attribution: the record is then reported, not restored.
+- **Docker's evidence (`restore_prior`, slice 4, after review B1).** The
+  attribution cannot tell a death inside `compose up` from a `compose up`
+  that returned while the state directory could not record it (disk full,
+  read-only, until the process ended): the open intent then outlives the
+  command, and an operator's later `compose down` would have been undone
+  (reproduced). A restore therefore also requires Docker to list, with a
+  read-only `compose ps -a` (its own sudoers rule), a proxy service
+  container in state `created`: on real Docker every death inside `up` that
+  left no proxy running left one (kill points 9, 10 and the held 9), a
+  `compose down` removes it, and a `docker stop` never makes one. A one-off
+  container (`com.docker.compose.oneoff=True`) is never evidence: a
+  `compose run` without `--rm` whose start fails stays `created`, and
+  `compose down` does not remove one-offs (measured, Compose v5.7.1; found by
+  the second review). A `created` proxy whose one-off label cannot be read is
+  treated as unreadable. A Compose whose `ps --format json` carries no
+  per-container labels therefore never restores (fail-closed; not verified on
+  older Compose versions, verified on v5.7.1). It is read only when the
+  attribution is set and no proxy container is listed, again before every
+  Docker change up to the reconcile's own first `up`, and not after it (that
+  `up` removes the container itself in Compose's tidy-only pass). Unreadable
+  or not understood (a sudoers file without the rule included) is never
+  evidence: `up_evidence_unreadable`; absent: `stack_down_no_up_evidence`.
+  Residuals that remain: an operator who changes nothing of the crashed stack,
+  or only stops containers, before the next start is still indistinguishable
+  from the crash, and is restored; so is one who, after the crash, runs
+  `compose create` or `compose up --no-start`, or a `compose up` that fails
+  at start (a port conflict, a bad mount), each of which leaves a `created`
+  service container; an operator `compose down` and later `up`
+  between the reconcile's own `up` and its second `up` is the same TOCTOU
+  class as every other step. Liveness lost, all in the safe direction (the
+  record is reported): a start whose settle wait is cut short, a start that
+  dies after its write-ahead or its retag but before its own `up`, and one
+  that dies between its `up` and its second `up`, have each taken the
+  attribution.
 
 **Slice 5 — runtime observation (non-mutating).**
 - One loop, started like the op-log retention loop but tracked by
@@ -298,6 +392,29 @@ gaps and make the #2051 executor the single path every recovery takes.
 - This closes the visible half of `operator_retag_unarmed` and
   `up_done_unrecorded`: an image that has not passed the gate is reported
   as `ungated`, and a late gate that passes makes it `gated`.
+
+- Implementation (2026-11-27, agent half; contract AGT-007):
+  - Off by default (`runtime_health_interval`, `1m`–`24h`): it is new
+    Docker and proxy traffic on every install, and an agent upgrade should
+    not start it unasked. Qualified on real Docker in its own PR before any
+    default changes.
+  - Identity is container id, its image id, running state and the fixed
+    tag's image id; the lock and the settle window are checked again after
+    the probe, so an operation that began during it discards the sample.
+  - `ungated` and `stale` are derived when status is read (the running
+    image from the status capture; three intervals without a reading); the
+    files hold only `gated`, `unhealthy` and `unknown`.
+  - An image is last-known-good only with a reference that passes the same
+    repo-bound exact-digest check and allowlist as an upgrade target. A
+    gated image without one is reported `gated`
+    (`gate_passed_no_validated_ref`) and recorded nowhere else.
+  - Status never carries the container id, as for `running_image`.
+  - The main app's `/api/maintenance-agent` passes `runtime_health` through
+    (closed state set; anything else is shown as unknown; strings bounded)
+    and the legacy Support panel shows it (2026-11-27).
+  - Not yet: latched alerts on it, which need a main-app poll of the agent
+    that does not exist today; the data-compatibility evidence in
+    `last_good.json` arrives with slice 6, which defines it.
 
 **Slice 6 — policy-driven runtime recovery (default off).**
 - A runtime finding becomes a **synthetic record** in the same journal
@@ -326,6 +443,85 @@ gaps and make the #2051 executor the single path every recovery takes.
 - AGT-900 extension, recorded explicitly: "converge may restore the last
   image this agent gated, at runtime, when policy allows" — new contract
   text, its own tests, model property and real-Docker cases.
+- **Scope (owner decision 2026-11-28): only images this agent installed.**
+  The agent acts only when it put the unhealthy image there itself: a later
+  failure of an upgrade (or image rollback) that passed, or an interrupted
+  upgrade whose target is now unhealthy. It restores the image that was gated
+  before that change. A hand retag or a hand `compose up` is reported, never
+  acted on: a manual change is evidence of state, not authorization.
+- **Design (2026-11-28), in four PRs, each production change separate from
+  its real-Docker qualification:**
+  1. *Provenance and gated history (data only).* When an upgrade or image
+     rollback this agent ran passes its gate and verify, it writes
+     `<state_dir>/health/installed.json`: the op id, the image it installed
+     (id, validated ref, digest) and the image it replaced (id, ref). The
+     observer keeps the last two distinct gated images in
+     `<state_dir>/health/gated.json` (newest first); `last_good.json` is
+     unchanged. Both are best-effort and nothing acts on them yet; a file that
+     is absent or unreadable means "no provenance" and blocks every action.
+  2. *Decision (pure) and lifecycle model.* A new journal kind
+     `runtime.recover` (schema 2, so an agent before slice 2 is fenced off).
+     Its record names the restore target as the prior (`PriorRef`,
+     `PriorDigest`, `PriorImageID`), the unhealthy image as the target, and
+     is written with `RollbackArmed` set before anything moves. The decision
+     for it is the armed-rollback branch the startup reconcile already runs
+     (`finish_rollback_retag`: tag the prior, `up`, gate, verify by id,
+     audit-first retire), entered only when every condition below holds on
+     fresh facts. The lifecycle model and its properties gain the kind before
+     the executor relies on it.
+  3. *Executor, trigger, policy and status.* `runtime_recovery = "off"`
+     (default) or `"restore_last_gated"`, startup-only, valid only with
+     `runtime_health_interval` on. A separate loop (the observer stays
+     non-mutating, AGT-007) acts after **3 consecutive kept `not_ready`
+     samples** of the same running container and image (in memory; a
+     restart starts the count again). It begins the operation under the
+     maintenance lock (operators get 409), writes the record fail-closed, and
+     runs the plan through the startup executor's steps. Status reports it.
+  4. *Real-Docker qualification* in all four cells, with negative controls.
+- **Admission: checked once, on fresh facts, before the record is written.**
+  - The policy is on, the lock is free and the settle window is over.
+  - The container runs, and container and fixed tag are on the same image X.
+  - X is the image `installed.json` names, or the target of a kept interrupted
+    upgrade record of this agent.
+  - The restore target R is the image that change replaced (`installed.json`
+    `replaced_*`, or the record's prior). R is in `gated.json`. X may be the
+    newest gated entry: an upgrade A→B that passed, was gated, and later fails
+    restores A, which is the main case this slice exists for.
+  - R's reference passes the repo-bound exact-digest check and the image
+    allowlist, and R is local.
+  - `dataCompat` (slice 6a) is compatible for R's labels and the data epoch.
+  - Fewer than 2 runtime recoveries were begun for X (write-ahead counter).
+  - Anything else is reported (`recovery_required/<reason>`), never acted on.
+    A stack that is down, an unknown or no-container sample, or no provenance
+    is reported only.
+- **Each step then expects the state its predecessor leaves, as
+  `reconcilePlan` already does.** Before the retag: tag and container on X.
+  Before `up`: the tag on R and the container still on X (the state the
+  retag leaves, decided as `verdictFinishRollback`). After `up`: a fresh gate
+  of R, then container, tag and R's local image verified by id. The
+  compatibility check is repeated before `up`, the step that starts R on the
+  data. A state no step of this recovery explains stops it with nothing more
+  changed.
+- **After a crash** the record is an armed image-change record: with
+  `reconcile_on_startup = "converge"` the startup reconcile decides it with
+  the same branch, which already decides the post-retag state (tag on R,
+  container on X) as `finish_rollback`, and with the same compatibility
+  check before `up`; with `"off"` it is reported (AGT-004). A runtime recovery retires only its own record; a kept
+  interrupted-upgrade record stays until an existing rule retires it.
+- **Audit:** `runtime.recover:started` before the first mutation and
+  `runtime.recover:succeeded|failed` at the end, audit before retire, as
+  every other recovery.
+
+- **Slice 6a (owner decision 2026-11-28): the compatibility contract comes
+  first.** Culvert had no data-schema marker and no image label, so nothing
+  could prove an earlier image reads the data. The owner chose to add the
+  contract before slice 6 (contract UPG-003, docs/engineering/data-epoch.md):
+  a data epoch marker under `/data` that only rises (absent = epoch 1), image
+  labels `io.culvert.data-epoch.min/max`, and a read-only
+  `culvert --print-data-epoch` the agent runs through the `cli` service. An
+  image without the labels is never put back. Every build so far is epoch 1,
+  so nothing is written yet; raising the epoch carries backup and restore
+  obligations that a tripwire test enforces.
 
 **Slice 7 — forward resumption of an interrupted health gate
 (approved as its own, independently qualified slice).**
@@ -336,9 +532,26 @@ gaps and make the #2051 executor the single path every recovery takes.
   container and pinned tag both resolve to the checkpoint's immutable image
   id, freshly read; no conflicting external change (no other open intent, no
   marker command of another op, identity unchanged across the gate); the
-  settle window is over; the persistent resume budget is not exhausted
-  (written ahead, like `ReconcileAttempts`); and a **fresh production health
-  gate** passes.
+  settle window is over; the checkpoint's `attempts` is below the resume
+  cap, raised and written ahead of the resumed gate (like
+  `ReconcileAttempts`); the checkpoint's `epoch` is the record's current
+  `interrupted_seen`; and a **fresh production health gate** passes.
+- Never resume (amended, from slice 3's write rules and slice 4's review):
+  - when `rollback_armed` is set, or container or tag is not on the
+    checkpoint's `image_id`: the inline rollback was already under way;
+  - when the checkpoint has no `image_id`: identity is unknown;
+  - when this start's command attribution says the agent died inside that
+    operation's `compose up`: the restart itself is in doubt, and a proxy
+    that is down is slice 4's `restore_prior`. Amended by the owner decision
+    of 2026-11-26 below: not when Compose is shown to have finished;
+  - when `attempts` has reached the cap. `attempts` counts the original
+    gate as one, so "gate begun, `failed` lost" (slice 3's residual) is
+    resumed at most `cap - 1` times. That residual is the
+    one case where a resumption can adopt a target that failed a gate
+    once: the state directory could not be written when it failed, the
+    agent then died before the rollback moved the tag, and the target now
+    passes a fresh production gate. It is stated, not closed: closing it
+    means refusing the rollback on a full disk, which rule 1 forbids.
 - Then the op's remaining non-mutating steps run (verify by id and digest);
   the target is adopted and the record retired exactly once. Gate fails →
   the existing armed-rollback path (#2051) with its own gate, never a
@@ -347,6 +560,96 @@ gaps and make the #2051 executor the single path every recovery takes.
   `failed(agent_restart_interrupted)`; the resumption is its own audited
   `:resumed` event with its own outcome.
 - AGT-900 extension text, model property and real-Docker cases ship with it.
+- **Owner decision (2026-11-25): slice 7 also covers a gate that never
+  began** (`up_done_unrecorded`): the agent died after the target's `up`
+  returned and before `gate:target` was written, so there is no checkpoint.
+  With no checkpoint there is no epoch or attempt count, so the rules below
+  take them from the record instead, and are stricter.
+- **As designed (amended):**
+  - **Switch.** `resume_interrupted_gate`, default `false`, effective only
+    with `reconcile_on_startup = "converge"`. Converge users are qualified
+    without resumption; turning it on for them silently would change what
+    their appliance does after a crash. It is independently qualified, as
+    owner decision 4 asks.
+  - **Epoch, precisely.** The start counts `interrupted_seen` before the
+    reconcile decides. "No start but this one has seen the record since the
+    gate began" is therefore `checkpoint.epoch == interrupted_seen - 1`; for a
+    gate that never began, `interrupted_seen == 1`. At the counter's cap the
+    count stops, the equality cannot hold, and nothing is resumed.
+  - **Decided as `resume_gate`** (reasons `target_gate_interrupted`,
+    `target_gate_not_begun`) only for an `upgrades.apply` record at
+    `restarted` whose target id was digest-verified by the restart, with
+    container and tag freshly read on that id, and none of the never-resume
+    rules above. Every other record decides exactly as before.
+  - **Its plan changes nothing in Docker until the gate has failed:**
+    (1) write the checkpoint ahead, FAIL-CLOSED: `gate:target`, attempts
+    raised (1 for a gate that never began), epoch = the current
+    `interrupted_seen`; (2) a fresh production gate; (3) verify container and
+    tag by image id and the running digest against the record's target
+    digest. Each step is preceded by a fresh read that must still decide
+    `resume_gate`.
+  - **Gate or verify passes:** the target is adopted and the record retired
+    with one `upgrades.apply:resumed` audit entry (outcome succeeded). The
+    original operation stays `failed(agent_restart_interrupted)`.
+  - **Gate or verify fails:** the result (`failed:<detail>`) and
+    `rollback_armed` are written FAIL-CLOSED, and the reconcile decides
+    again in the same start. Converge runs only at startup, so leaving the
+    rollback for "the next start" would leave a target that failed its gate
+    serving until some later restart. The new decision is #2051's T/T-armed
+    finish, run on the same executor within the persisted attempt cap; it
+    is never a replay of the original `tag`/`up`. If those writes fail, the
+    record keeps its open checkpoint with an attempt spent and is reported.
+  - **Attempts cap: 2 gate runs begun** per record (an interrupted original
+    plus one resumption; a gate that never began gets two resumptions,
+    since none had begun).
+- **Correction (2026-11-25, found by the real-Docker qualification).** The
+  owner decision above describes `up_done_unrecorded` correctly, but the
+  design restricted `resume_gate` to records at `restarted`. In that case
+  the agent died after `compose up` returned and *before* it recorded the
+  restart, so the record is still at `restarting` and holds no target id:
+  the restart captures the id in that same lost write. As designed, slice 7
+  covered only the moment between the `restarted` write and the checkpoint
+  write, not the owner's case. Amended:
+  - **Identity is established on fresh facts** (`resumeIdentity`):
+    container, fixed tag and the validated `TargetRef` resolve to one local
+    image id, not the prior's, whose RepoDigests list the record's pinned
+    digest. That is the check the restart itself makes before it records
+    the id (F1), made now instead of read from the record. At `restarted`
+    the recorded id must also be that id; at `restarting` none may be
+    recorded yet (a recorded id there contradicts the write order).
+  - The checkpoint is written ahead on that id, so "the checkpoint has no
+    `image_id`" still never resumes. The record's phase and `TargetImageID`
+    are not rewritten.
+  - The digest condition is now checked before any gate, at both phases:
+    an image that does not carry the pinned digest is reported
+    (`target_live_ungated`) instead of being gated and then rolled back on
+    the verify. The verify repeats the same identity check on the gate's id.
+  - Everything else is unchanged: `interrupted_seen == 1` for a gate that
+    never began, the epoch rule, the cap, a death inside `compose up`, an
+    armed record.
+- **Second finding, and owner decision (2026-11-26).** That correction was
+  still not the owner's case. On real Docker, `up_done_unrecorded` is the
+  agent killed while its own `compose up` had not returned *to it*, although
+  Docker had finished the recreate: the start attributes a death inside
+  `compose up`, and the never-resume rule above refused it. Asked whether to
+  keep that rule (the case stays an operator's) or resume with proof that
+  Compose finished, the owner chose the second:
+  - after a death inside the operation's `compose up`, the gate is resumed
+    only when the proxy container **runs** the identified target (as for
+    any resume) **and** `compose ps -a` lists **no** never-started proxy
+    container (slice 4's evidence, `UpEvidence` absent). A container left in
+    `created`, a listing that cannot be read or is not allowed (a sudoers
+    file older than slice 4), or a listing not read, resumes nothing;
+  - the settle window is over before anything is read (as for every
+    reconcile), so a `compose up` the dead agent left running has had the
+    window to finish or to leave its evidence;
+  - the listing is read only where it can decide this: with
+    `resume_interrupted_gate` on and the proxy running. With the switch off
+    nothing more is read than before;
+  - why: the target is already serving, unchecked. Checking it, and rolling
+    back if it fails, is strictly better than leaving it; the evidence is
+    what keeps a recreate still in progress from being mistaken for one
+    that finished.
 
 ### Not doing
 

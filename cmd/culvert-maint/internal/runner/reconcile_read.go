@@ -2,7 +2,9 @@
 //
 // Everything here goes through templates and sudoers lines that already exist:
 // `compose ps --format json`, the compose-cli `inspect-image` container inspect,
-// and `docker image inspect <ref>`. Nothing pulls, tags or restarts.
+// and `docker image inspect <ref>`, plus one read-only template of its own,
+// `compose ps -a --format json` (ProxyCreatedLeftover). Nothing pulls, tags or
+// restarts.
 //
 // The one thing CaptureRunningProxyImage cannot say is WHY there is no proxy:
 // it reports "daemon down" and "no container" as the same error. A reconciler
@@ -26,6 +28,8 @@ type ProxyContainer struct {
 	Present bool
 	// Running is true when the container's State is "running".
 	Running bool
+	// ContainerID is the container's id as `compose ps` lists it.
+	ContainerID string
 	// ImageID is the container's image id (`sha256:<64hex>`).
 	ImageID string
 	// RepoDigests are the image's `repo@sha256:…` references; best-effort, may
@@ -71,7 +75,7 @@ func (r *Runner) ReadProxyContainer(ctx context.Context) (*ProxyContainer, error
 	if err != nil {
 		return nil, fmt.Errorf("container inspect: %w", err)
 	}
-	pc := &ProxyContainer{Present: true, Running: strings.EqualFold(proxies[0].State, "running"), ImageID: id}
+	pc := &ProxyContainer{Present: true, Running: strings.EqualFold(proxies[0].State, "running"), ContainerID: proxies[0].ID, ImageID: id}
 	if img, ierr := r.ComposeImageInspect(ctx, id); ierr == nil && img != nil {
 		pc.RepoDigests = repoDigestsFromImageInspect(img.Stdout)
 	}
@@ -108,16 +112,98 @@ func (r *Runner) ProxyContainerListed(ctx context.Context) (bool, error) {
 	if err != nil {
 		return false, fmt.Errorf("compose ps: %w", err)
 	}
+	entries, err := strictPSEntries(ps)
+	if err != nil {
+		return false, fmt.Errorf("compose ps: %w", err)
+	}
+	for i := range entries {
+		if entries[i].Service == proxyServiceName {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// ProxyCreatedLeftover reports whether `compose ps -a` lists a proxy service
+// container (not a `compose run` one-off) in state "created": what Compose leaves behind when the process running a
+// recreate dies between creating the new container and starting it (measured
+// on real Docker at every kill point that leaves no proxy running). A
+// deliberate `compose down` removes it and a `docker stop` leaves only an
+// "exited" one, so it is the Docker-side evidence that an outage follows a
+// death inside `compose up` (ADR-0062 slice 4, B1). One read-only docker call.
+//
+// true lets the startup reconcile start a container, so it is returned only
+// for output understood completely (strictPSEntries); anything else is an
+// error, and an error is never evidence.
+func (r *Runner) ProxyCreatedLeftover(ctx context.Context) (bool, error) {
+	tmpl := templateByID(TemplateComposeStatusAll)
+	if tmpl == nil {
+		return false, errors.New("runner: TemplateComposeStatusAll not registered")
+	}
+	ps, err := r.run(ctx, r.buildArgv(tmpl))
+	if err != nil {
+		return false, fmt.Errorf("compose ps -a: %w", err)
+	}
+	entries, err := strictPSEntries(ps)
+	if err != nil {
+		return false, fmt.Errorf("compose ps -a: %w", err)
+	}
+	for i := range entries {
+		e := &entries[i]
+		if e.Service != proxyServiceName || !strings.EqualFold(e.State, "created") {
+			continue
+		}
+		oneOff, known := oneOffLabel(e.Labels)
+		if !known {
+			// Whether this is a service container or a one-off cannot be
+			// told, so it is not evidence either way.
+			return false, errors.New("compose ps -a: a created proxy container without a readable com.docker.compose.oneoff label")
+		}
+		if !oneOff {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// oneOffLabel reads com.docker.compose.oneoff from Compose's Labels string.
+// A one-off container (`compose run`) whose start failed stays "created", and
+// `compose down` does not remove one-offs (measured, Compose v5.7.1), so only
+// a service container (oneoff=False) is evidence. Labels is "k=v,k=v,..."; a
+// value may itself contain commas (config_files with an override), so the
+// label is matched as a whole item. Anything but exactly one "True" or one
+// "False" is unknown.
+func oneOffLabel(labels string) (oneOff, known bool) {
+	seen := 0
+	for _, item := range strings.Split(labels, ",") {
+		switch item {
+		case "com.docker.compose.oneoff=True":
+			oneOff, seen = true, seen+1
+		case "com.docker.compose.oneoff=False":
+			oneOff, seen = false, seen+1
+		}
+	}
+	return oneOff, seen == 1
+}
+
+// strictPSEntries decodes `compose ps` output that must be understood
+// completely: empty, or entries that every one decoded and named their
+// service. Truncated output, a line that does not decode, or an entry without
+// a service name is an error.
+func strictPSEntries(ps *Result) ([]psEntry, error) {
+	if ps == nil {
+		return nil, errors.New("no result")
+	}
 	if ps.Truncated {
-		return false, errors.New("compose ps: output truncated")
+		return nil, errors.New("output truncated")
 	}
 	out := bytes.TrimSpace(ps.Stdout)
 	if len(out) == 0 {
-		return false, nil
+		return nil, nil
 	}
 	entries, err := parsePSEntries(out)
 	if err != nil {
-		return false, fmt.Errorf("compose ps: %w", err)
+		return nil, err
 	}
 	if out[0] != '[' {
 		lines := 0
@@ -127,17 +213,13 @@ func (r *Runner) ProxyContainerListed(ctx context.Context) (bool, error) {
 			}
 		}
 		if lines != len(entries) {
-			return false, fmt.Errorf("compose ps: %d of %d lines understood", len(entries), lines)
+			return nil, fmt.Errorf("%d of %d lines understood", len(entries), lines)
 		}
 	}
-	listed := false
 	for i := range entries {
 		if entries[i].Service == "" {
-			return false, errors.New("compose ps: an entry names no service")
-		}
-		if entries[i].Service == proxyServiceName {
-			listed = true
+			return nil, errors.New("an entry names no service")
 		}
 	}
-	return listed, nil
+	return entries, nil
 }

@@ -29,6 +29,7 @@ import (
 	"culvert-maint/internal/journal"
 	"culvert-maint/internal/ops"
 	"culvert-maint/internal/runner"
+	"culvert-maint/internal/runtimehealth"
 )
 
 const (
@@ -42,10 +43,12 @@ const (
 // applyRig is a wired test server whose fake runner emits canned stdout
 // per docker command and flips its "running image" view once a pull runs.
 type applyRig struct {
-	sockPath  string
-	stateDir  string
-	auditPath string
-	journal   *journal.Journal // crash-recovery journal wired into the server (RISK-022)
+	// runtimeHealth, when set, is wired as Options.RuntimeHealth (ADR-0062 slice 6 provenance).
+	runtimeHealth *runtimehealth.Store
+	sockPath      string
+	stateDir      string
+	auditPath     string
+	journal       *journal.Journal // crash-recovery journal wired into the server (RISK-022)
 
 	mu       sync.Mutex
 	captured [][]string
@@ -96,6 +99,9 @@ type applyRig struct {
 	localTagRepoDigest bool
 	// onCommand, when set, observes every command at exec time.
 	onCommand func(argv []string)
+	// onProbe, when set, observes every health probe request, with the bare
+	// digest the world is running at that moment.
+	onProbe func(running string)
 
 	stop func()
 }
@@ -252,7 +258,7 @@ func (r *applyRig) countCommand(token string) int {
 }
 
 //nolint:funlen // test rig setup; splitting hides the wiring sequence
-func startApplyRig(t *testing.T) *applyRig {
+func startApplyRig(t *testing.T, opts ...func(*applyRig)) *applyRig {
 	t.Helper()
 	tmp := t.TempDir()
 	sockPath := filepath.Join(tmp, "agent.sock")
@@ -285,6 +291,9 @@ func startApplyRig(t *testing.T) *applyRig {
 		targetDigest: digNew,
 		digBefore:    digOld,
 		digAfter:     digNew,
+	}
+	for _, o := range opts {
+		o(rig)
 	}
 
 	rn, err := runner.New(runner.Options{
@@ -345,15 +354,16 @@ func startApplyRig(t *testing.T) *applyRig {
 	}
 	rig.journal = jnl
 	srv, err := New(Options{
-		Cfg:       cfg,
-		Auth:      pol,
-		Audit:     al,
-		Ops:       mgr,
-		Status:    &fakeStatus{},
-		StateDir:  tmp,
-		AuditPath: auditPath,
-		Runner:    rn,
-		Journal:   jnl,
+		Cfg:           cfg,
+		Auth:          pol,
+		Audit:         al,
+		Ops:           mgr,
+		Status:        &fakeStatus{},
+		StateDir:      tmp,
+		AuditPath:     auditPath,
+		Runner:        rn,
+		Journal:       jnl,
+		RuntimeHealth: rig.runtimeHealth,
 		HealthProbeFactory: func() health.Probe {
 			baseURL, _ := url.Parse("http://127.0.0.1:8080")
 			return health.Probe{
@@ -389,6 +399,9 @@ func startApplyRig(t *testing.T) *applyRig {
 func applyHealthClient(rig *applyRig) *http.Client {
 	return &http.Client{
 		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			if rig.onProbe != nil {
+				rig.onProbe(rig.currentRunning())
+			}
 			status := 200
 			if rig.healthFail.Load() || rig.isContainerDown() || rig.unhealthyDigests[rig.currentRunning()] {
 				status = 503

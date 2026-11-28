@@ -264,7 +264,7 @@ func Run(ctx context.Context, deps OrchestratorDeps, opID, kind, actor string, p
 		_ = deps.OpLog.StageStart(s.Name)
 		curStage = s.Name // so the panic barrier can name the culprit stage
 
-		stdout, stderr, runErr := s.Run(ctx)
+		stdout, stderr, runErr := s.Run(WithOpID(ctx, opID))
 		if len(stdout) > 0 {
 			_ = deps.OpLog.Capture(s.Name, "out", stdout, 64*1024)
 		}

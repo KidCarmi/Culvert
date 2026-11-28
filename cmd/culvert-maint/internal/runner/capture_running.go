@@ -123,6 +123,9 @@ type psEntry struct {
 	State   string `json:"State"`
 	Status  string `json:"Status"`
 	ID      string `json:"ID"`
+	// Labels is Compose's comma-separated "key=value,..." string; read only
+	// by ProxyCreatedLeftover (oneOffLabel).
+	Labels string `json:"Labels"`
 }
 
 func (e psEntry) name() string {

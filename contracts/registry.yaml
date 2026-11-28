@@ -30,6 +30,14 @@ protected:
   - .github/workflows/product-contracts.yml
 
 amended:
+  - id: AGT-900
+    reason: "Owner decision of 2026-11-26 (ADR-0062 slice 7): resume an interrupted health gate after a death inside the operation's own compose up when Compose is shown to have finished. Real-Docker qualification showed up_done_unrecorded, the case the owner chose on 2026-11-25, is attributed as a death inside compose up (the agent was killed before its compose up returned to it, though Docker had finished the recreate), which the slice 7 rule 'never resume after a death inside compose up' refused. Asked, the owner chose to allow it with proof: the proxy container runs the identified target and compose ps -a (slice 4's read-only evidence) lists no never-started proxy container; a leftover, unreadable or unread listing resumes nothing. The permitted and forbidden transitions are narrowed to that. The listing is read only with resume_interrupted_gate on and the proxy running, so nothing more is read with the switch off (pinned by the new TestResume_OffDoesNotReadTheComposeListingWithTheStackUp). No registered test is edited; the invariant text is unchanged; owner_approved stays false."
+  - id: AGT-900
+    reason: "ADR-0062 slice 7 correction (owner decision of 2026-11-25 to cover up_done_unrecorded). The real-Docker qualification showed that case is at phase restarting with no recorded target id (the restart records it in the write the death skipped), which the first slice 7 wording refused, so the owner's case was not covered. The permitted resume now also applies at restarting, with the image identified on fresh facts (container, tag and validated target reference on one id, not the prior's, carrying the pinned digest: the restart's own check, made now); at restarted the recorded id must still agree. The digest condition is now a precondition at both phases (an image without the pinned digest is reported, no longer gated then rolled back). Two registered tests are edited on purpose: TestResume_RefusedWithoutFreshEvidence no longer lists 'the record is at restarting' as a refusal (it now lists a restarting record WITH a recorded id, a second start at restarting, and a recorded id of another image), and TestResume_VerifyMismatchRollsBack now changes the digest after the gate, since a mismatch before it is no longer gated (pinned by the new TestResume_RefusedWhenTheImageLacksThePinnedDigest). The invariant text is unchanged; owner_approved stays false."
+  - id: AGT-900
+    reason: "ADR-0062 slice 7 (owner decision 4 of 2026-11-24: safe forward resumption of interrupted health gates as a separately qualified slice; owner decision of 2026-11-25: it also covers a gate that never began). With the new resume_interrupted_gate = true (default false, accepted only with converge), the startup reconcile may now ADOPT a target whose interrupted health gate it runs again at this start and that passes it and its digest verify, where it reported recovery_required/target_live_ungated before. The invariant is widened by that one clause; 'never starts an image that has not passed the health gate' and 'adopting or restarting a target that never passed the health gate' are unchanged (the target is adopted only after a passed gate, and nothing is started). A failed resumed gate goes, in the same start, through the unchanged armed-rollback finish. New permitted and forbidden transitions and tests are added; no registered test was edited. With the switch off nothing changes, pinned by TestResume_OffLeavesTheTargetReported and RV19's 'the switch changes no other verdict'. owner_approved stays false: the owner approved the direction, not this wording."
+  - id: AGT-900
+    reason: "Owner decision of 2026-11-24 (restore_prior), built as ADR-0062 slice 4 on #2051's plan executor and #2103's command attribution. With reconcile_on_startup = \"converge\", a start that finds no proxy container running for an upgrade at restarting or restarted, and that found the previous agent process died inside a `compose up` of that record's own operation, retags to the validated prior reference, runs `compose up` (once more if a fresh read shows nothing running), gates and verifies by image id before retiring the record. Until now that state was always recovery_required (stack_down): an outage until an operator acted (measured on real Docker at kill points 9-12). The invariant's 'or reports recovery_required and changes nothing' is reworded because a restore, like an armed rollback, that fails its gate has changed Docker and then reports. The earlier marker-based design (#2093) was parked after three independent reviews found wrong restores; the attribution it now rests on is per operation, taken once, never decisive on its own (ADR-0062 slice 4 obligations). An independent review found the attribution can outlive a `compose up` that returned while the state directory could not be written, so an operator's later `compose down` would have been undone (B1, reproduced). By the owner's decision of 2026-11-25 a restore also requires Docker's evidence of that death: a proxy service container (not a `compose run` one-off) in state created, listed through a new read-only `compose ps -a` sudoers rule. Without it, or without the rule, nothing is started and the record is reported. Default stays off; owner_approved stays false."
   - id: AGT-004
     reason: "Owner decision 1 on AGT-900 approved an opt-in startup reconcile (reconcile_on_startup = \"converge\", default \"off\"). \"Changes nothing in Docker\" and \"removes no journal record at startup\" now hold for the default \"off\" mode, which is unchanged and still pinned by the same tests; with \"converge\" the startup may retag to the recorded prior image, finish an armed rollback, and retire a record it verified converged, as AGT-900 states. Pulling at startup, and reporting an interrupted operation as succeeded, stay forbidden in both modes."
   - id: AGT-005
@@ -38,6 +46,8 @@ amended:
     reason: "restore.commit is now journaled and an interrupted restore is reported at every start (ADR-0061 addendum, 2026-11-24). Without a way to clear it, the entry of an interrupted restore would stay until the next image change, which on an appliance that is restored but not upgraded is indefinitely. The set of retiring operations is therefore WIDENED by one case: a later restore.commit or rollbacks mode=data that succeeds (its commit command returned success and its health check passed) retires the interrupted records of the restore-class kinds only (restore.commit, rollbacks mode=data), audit entry first, by the same interrupted_superseded mechanism. It never retires an upgrade or image-rollback record, because a restore does not re-pin the image tag; that is a new forbidden transition with its own tests. The existing rules are unchanged and no registered test was edited: a successful upgrade or image rollback still retires every other record, and the converge reconcile still retires only after verified convergence. Not owner-approved; the wording is the implementer's."
   - id: AGT-900
     reason: "Owner decision 1 resolved the open question for an opt-in, conservative converge mode: default off; no adoption of an unverified target; recovery_required when evidence is insufficient; Docker unavailable defers. The invariant is restated for that mode, with its tests; the entry stays open until a real-Docker e2e verifies it (owner, 2026-11-23). owner_approved stays false."
+  - id: AGT-900
+    reason: "Owner decision 1 (2026-11-23): finish an already-armed rollback. Real-Docker e2e finding 2 (PR #2043): when the journal proves the inline rollback was armed but the agent was killed before the rollback's own `docker tag` (container and tag still on the target that failed its gate), converge reported recovery_required and left the failed image running. It now retags to the record's validated prior reference, rechecks Docker immediately before each mutation (any change its own steps do not explain stops it), runs `compose up`, gates the prior image afresh and verifies container, tag and prior reference by image id, within the persisted attempt cap. No armed record is retired without a fresh ready probe of the prior image: one found with container and tag on the prior, and one realigned by retag alone (container already on the prior), are kept recovery_required until the prior answers ready; an armed record at phase verified contradicts the journal and is reported. The entry stays open and owner_approved stays false."
   - id: POL-004
     reason: "Owner decision of 2026-11-24 (POL-005 widening). The invariant is unchanged. The control at the end of TestPOL004_RollbackKeepsARetainedUnknownActionRule asserted that a restore SKIPS a Redirect rule with no location; a restore no longer skips any stored rule, so the control now asserts that rule is restored beside the unknown-action rule."
   - id: POL-005
@@ -48,6 +58,8 @@ amended:
     reason: "ADR-0062, owner decision 2: a second agent process on the same state_dir no longer starts and skips its reconcile; it refuses to start (non-zero exit, no socket, no Docker change, record kept) while the first keeps serving. TestConvergeRecovery_SecondInstanceSkips is replaced by TestConvergeRecovery_SecondInstanceRefusesToStart. The reconcile still takes the lock itself when a server is built without it (tests), so its skipped_second_instance state remains reachable there. Not owner-approved wording."
   - id: POL-005
     reason: "Owner decision of 2026-11-24 (unknown JSON fields: unify the contract across all entry points, prefer explicit rejection, preserve compatibility through an explicit strategy). The invariant is widened again, in the same direction: a rule object carrying a JSON key this build has no field for (a misspelt condition, or one added by a newer release), or the same key twice (the last value won), is a rule it cannot enforce as written, because a condition present in the document is not enforced and the rule matches more than was written. Measured before the change: the policy file, a stored config version, a pending draft and a control-plane snapshot each installed an Allow narrowed only by an unknown key as an Allow for every source. The operator doors already refused an unknown key (400 'invalid JSON') and accepted a duplicate; they now refuse both and name the rule and the keys. The gate, its doors, its Diagnostics code and every registered test are unchanged; tests are added. Compatibility strategy, now part of the contract: every rule key other than the reserved 'annotations' container is an enforcement condition, 'annotations' is carried in canonical form (on which it is bounded) and never interpreted, and a test pins today's key set. A rule list given twice in one document is refused likewise. Key matching stays case-insensitive, documents around rules (ConfigSnapshot sections) stay tolerant, and no legacy key is allowlisted because the available history holds none on a rule. Record: docs/engineering/security-reviews/2026-11-24-unknown-rule-fields-refused.md."
+  - id: AGT-004
+    reason: "ADR-0062 slice 3 (command attribution). The invariant is unchanged for every start that serves. One start is now refused: when a journal record says the agent died inside a docker compose command (an open command intent) and that start cannot remove the intent from the record, the agent exits before serving, and before any journal record is audited, counted or reported (the idempotency store has already been opened by then, and has marked its own in-flight requests interrupted, as at every start). If several records hold intents and a later one cannot be rewritten, the earlier ones have already had theirs removed, and what they showed is lost with that start; a record a newer agent wrote is detected before any is touched. Until now an unwritable journal never stopped startup. Reason: such a start would report the interruption with the intent still on disk; an operator could react to the report (stop the stack), and the next start would find the same intent, take it for new, and a later recovery could act on it. The first start that can write is then the first to report. A journal that holds no open intent is reported from memory as before (TestInitJournal_ReadOnlyJournalStillReports stands). With an unwritable state directory the agent could not have run any operation, only reported; systemd restarts it. A record written by a newer agent that carries an open intent is refused the same way with its own message, since this build may not rewrite it. This narrowing was agreed between the two engineering sessions working on ADR-0062 and is written into its rule 2; owner_approved stays false and the owner has been told."
   - id: AGT-004
     reason: "ADR-0062 slice 2 (journal schema version). A journal record written by a NEWER agent (schema above this build's) is listed in status like any interrupted record, but this build never rewrites or removes it, so a later successful image change does not clear it: its fields may say the state is unsafe in a way this build cannot read. This narrows 'lists it until a later image change succeeds' for that one case; records this build or an older agent wrote are unchanged, and no registered test was edited (new tests: TestRetire_NewerRecordIsNeverSuperseded, TestNewerSchema_IsNeverRewrittenOrRemoved). Not owner-approved; the wording is the implementer's."
   - id: AGT-005
@@ -480,6 +492,37 @@ contracts:
     validation: unit
     compatibility: "The floor file is persisted state on deployed appliances."
 
+  - id: UPG-003
+    area: upgrade
+    status: enforced
+    owner_approved: false
+    invariant: "The data epoch marker <dataDir>/.data-epoch only ever rises: a proxy boot raises it to the build's epoch before any store loads and never lowers it, and a build at the implicit epoch 1 writes nothing (an absent marker in an existing data directory is epoch 1). The final image carries io.culvert.data-epoch.min and .max equal to the build's oldest readable and current epoch. culvert --print-data-epoch reports the marker read-only, and an unreadable marker or a missing data directory is an error, never epoch 1."
+    authority: "Data-compatibility contract (internal/dataepoch, data_epoch.go, Dockerfile). Design: docs/adr/0062-maintenance-agent-durable-lifecycle-execution.md slice 6a; owner decision 2026-11-28 (add the contract before runtime recovery); docs/engineering/data-epoch.md."
+    code:
+      - "internal/dataepoch/*.go"
+      - "data_epoch.go"
+    configs: []
+    transitions:
+      permitted:
+        - "raising the marker to the build's epoch at boot"
+        - "booting on data a newer build wrote, with a warning"
+      forbidden:
+        - "lowering the data epoch marker"
+        - "writing a marker at the implicit epoch"
+        - "reporting an unreadable marker or a missing data directory as epoch 1"
+        - "an image whose data-epoch labels differ from the build's range"
+        - "raising dataepoch.Current before backup carries the marker and restore can never lower it"
+    tests:
+      - {file: "internal/dataepoch/dataepoch_test.go", name: TestRaiseTo_NeverLowersAndWritesOnlyToRaise}
+      - {file: "internal/dataepoch/dataepoch_test.go", name: TestRead_RefusesWhatIsNotAMarker}
+      - {file: "internal/dataepoch/dataepoch_test.go", name: TestRead_AMissingDataDirectoryIsNotTheImplicitEpoch}
+      - {file: "data_epoch_test.go", name: TestDockerfile_DataEpochLabelsMatchTheBuild}
+      - {file: "data_epoch_test.go", name: TestDataEpoch_BumpObligationsTripwire}
+      - {file: "data_epoch_test.go", name: TestCheckDataEpochAtBoot_NeverLowersOrInvents}
+      - {file: "data_epoch_test.go", name: TestPrintDataEpoch}
+    validation: unit
+    compatibility: "New and inert at epoch 1: no build writes the marker, so existing data directories are unchanged, and an image from before this change has no labels (the maintenance agent never puts such an image back on data). The one-shot is additive."
+
   - id: BKP-001
     area: backup-restore
     status: enforced
@@ -671,6 +714,98 @@ contracts:
       - {file: "cmd/culvert-maint/internal/server/pinned_tag_consistency_test.go", name: TestApply_PinnedTag_UpFailsAfterRecreate_RollbackDisabled_TagNotMoved}
     validation: integration
     compatibility: "Additive result keys final_running_state and final_running_image_id. final_running_digest keeps its key and type; its value changes from an inferred digest to the captured registry digest, or empty when unverified. Consumers must read final_running_state before treating an empty digest as meaningful."
+
+  - id: AGT-007
+    area: agent-lifecycle
+    status: enforced
+    owner_approved: false
+    invariant: "The runtime health observer (runtime_health_interval, default off) never begins an operation, never changes Docker, and never writes a journal record or an audit entry; it writes only state_dir/health. It keeps a sample only when the proxy container, its image and the fixed tag were the same before and after the probe and neither the maintenance lock nor the settle window was in the way on either side. last_good.json is written only when the production health gate passed on such a sample and the image has a repo-bound, allow-listed digest reference; no unhealthy, unknown, stale or discarded observation overwrites or clears it."
+    authority: "Maintenance agent (cmd/culvert-maint, separate module). Design: docs/adr/0062-maintenance-agent-durable-lifecycle-execution.md slice 5; owner decision 5 (2026-11-24): last-known-good evidence preserved across unhealthy observations."
+    code:
+      - "cmd/culvert-maint/internal/server/runtime_observer.go"
+      - "cmd/culvert-maint/internal/runtimehealth/*.go"
+    configs: []
+    transitions:
+      permitted:
+        - "recording an unhealthy or unknown observation over a gated one in latest.json"
+        - "replacing last_good with a later image that passes the gate the same way"
+        - "skipping a sample while the maintenance lock is held or the settle window is open"
+      forbidden:
+        - "the observer beginning an operation, running a state-changing Docker command, or writing a journal record or audit entry"
+        - "keeping a sample whose container, image, running state or fixed tag changed across the probe"
+        - "gating, or writing last_good, while the fixed tag could not be inspected"
+        - "writing or clearing last_good from an unhealthy, unknown, stale or discarded observation"
+        - "recording as last_good an image without a repo-bound, allow-listed digest reference"
+        - "reporting a container id in GET /v1/status runtime_health"
+    tests:
+      - {file: "cmd/culvert-maint/internal/server/runtime_observer_test.go", name: TestObserver_GatedRecordsLastGood}
+      - {file: "cmd/culvert-maint/internal/server/runtime_observer_test.go", name: TestObserver_BadObservationsKeepLastGood}
+      - {file: "cmd/culvert-maint/internal/server/runtime_observer_test.go", name: TestObserver_IdentityChangeAcrossTheProbeDiscards}
+      - {file: "cmd/culvert-maint/internal/server/runtime_observer_test.go", name: TestObserver_UnreadableTagNeverGates}
+      - {file: "cmd/culvert-maint/internal/server/runtime_observer_test.go", name: TestObserver_SkipsWhileTheLockIsHeldOrTheWindowIsOpen}
+      - {file: "cmd/culvert-maint/internal/server/runtime_observer_test.go", name: TestObserver_WritesOnlyTheHealthDirectory}
+      - {file: "cmd/culvert-maint/internal/server/runtime_observer_test.go", name: TestObserver_GatedWithoutValidatedRefIsNotLastGood}
+      - {file: "cmd/culvert-maint/internal/server/runtime_observer_test.go", name: TestObserver_LastGoodIsRepoBoundWhateverTheAllowlist}
+      - {file: "cmd/culvert-maint/internal/server/runtime_observer_test.go", name: TestObserver_LastGoodHonoursANarrowAllowlist}
+      - {file: "cmd/culvert-maint/internal/runtimehealth/runtimehealth_test.go", name: TestStore_LatestNeverTouchesLastGood}
+      - {file: "cmd/culvert-maint/internal/status/status_runtime_health_test.go", name: TestRuntimeHealth_NoContainerID}
+      - {file: "cmd/culvert-maint/internal/status/status_runtime_health_test.go", name: TestRuntimeHealth_AbsentWhenOff}
+    validation: unit
+    compatibility: "New, off by default: with runtime_health_interval unset nothing runs, nothing is written and the GET /v1/status payload is unchanged. When on, it adds state_dir/health/{latest,last_good}.json (schema 1; a reader refuses any other schema, an unknown field or a file over 16 KiB) and the additive status key runtime_health. An older agent ignores the directory; a downgrade leaves it in place unread."
+
+  - id: AGT-008
+    area: agent-lifecycle
+    status: enforced
+    owner_approved: false
+    invariant: "The maintenance agent treats an image as able to run on the current data only when the data epoch read through `cli --print-data-epoch` succeeded and lies within the image's io.culvert.data-epoch.min..max labels. An unreadable or absent report, an unlabelled image, one label without the other, or a malformed label is unknown, never compatible; a data epoch outside the range is incompatible."
+    authority: "Maintenance agent (cmd/culvert-maint, separate module). Design: docs/adr/0062-maintenance-agent-durable-lifecycle-execution.md slice 6a; owner decision 5 (image and data compatibility before restoring an earlier image) and owner decision 2026-11-28; the proxy side is UPG-003."
+    code:
+      - "cmd/culvert-maint/internal/server/data_compat.go"
+      - "cmd/culvert-maint/internal/runner/data_epoch.go"
+    configs: []
+    transitions:
+      permitted:
+        - "reading the data epoch through the profile-gated cli service"
+      forbidden:
+        - "treating an unlabelled image, or an unreadable data epoch, as compatible"
+        - "treating a data epoch outside the image's labelled range as compatible"
+        - "accepting a data-epoch report with an unknown field, a missing field or more than one line"
+    tests:
+      - {file: "cmd/culvert-maint/internal/server/data_compat_test.go", name: TestDataCompat}
+      - {file: "cmd/culvert-maint/internal/runner/data_epoch_test.go", name: TestParseDataEpoch}
+      - {file: "cmd/culvert-maint/internal/runner/data_epoch_test.go", name: TestParseEpochLabels}
+      - {file: "cmd/culvert-maint/internal/runner/data_epoch_test.go", name: TestDataEpochTemplate}
+    validation: unit
+    compatibility: "Additive: a new read-only template and its fixed-argv sudoers line. An install whose sudoers file predates the line cannot read the data epoch, so every check is unknown and nothing is ever restored (fails closed). No caller acts on it until slice 6."
+
+  - id: AGT-009
+    area: agent-lifecycle
+    status: enforced
+    owner_approved: false
+    invariant: "<state_dir>/health/installed.json is written only by an upgrade this agent ran, after its health gate and digest verify passed, and names the image it installed and the image it replaced; an upgrade that failed its gate or was already current writes nothing. <state_dir>/health/gated.json holds at most two distinct images, newest first, and is changed only by a passed runtime gate on an image with a repo-bound, allow-listed digest reference. Both are written only when the runtime health store is on, and nothing in this build acts on them."
+    authority: "Maintenance agent (cmd/culvert-maint, separate module). Design: docs/adr/0062-maintenance-agent-durable-lifecycle-execution.md slice 6 (PR 1); owner decision 2026-11-28 (runtime recovery acts only on images this agent installed)."
+    code:
+      - "cmd/culvert-maint/internal/runtimehealth/provenance.go"
+      - "cmd/culvert-maint/internal/server/runtime_provenance.go"
+    configs: []
+    transitions:
+      permitted:
+        - "replacing installed.json with a later verified upgrade"
+        - "moving an image already in gated.json to the front when it is gated again"
+      forbidden:
+        - "writing installed.json for an upgrade that failed, was already current, or did not pass its digest verify"
+        - "writing installed.json for an image rollback"
+        - "changing gated.json from an unhealthy, unknown, stale or discarded observation"
+        - "keeping more than two images, or the same image twice, in gated.json"
+    tests:
+      - {file: "cmd/culvert-maint/internal/server/runtime_provenance_test.go", name: TestProvenance_VerifiedUpgradeRecordsInstalled}
+      - {file: "cmd/culvert-maint/internal/server/runtime_provenance_test.go", name: TestProvenance_OnlyAVerifiedUpgradeWithTheStoreOn}
+      - {file: "cmd/culvert-maint/internal/server/runtime_provenance_test.go", name: TestObserver_KeepsTheGatedHistory}
+      - {file: "cmd/culvert-maint/internal/runtimehealth/provenance_test.go", name: TestNoteGated_KeepsTwoDistinctNewestFirst}
+      - {file: "cmd/culvert-maint/internal/runtimehealth/provenance_test.go", name: TestInstalled_Refusals}
+      - {file: "cmd/culvert-maint/internal/runtimehealth/provenance_test.go", name: TestReadGated_Refusals}
+    validation: unit
+    compatibility: "Additive files under <state_dir>/health (schema 1), written only with runtime_health_interval on. An older agent ignores them; nothing reads them until slice 6's executor."
 
   - id: CFG-001
     area: config-compatibility
@@ -967,6 +1102,12 @@ contracts:
         - "returning an image reference from a journal record that failed the repo-bound digest check"
     tests:
       - {file: "cmd/culvert-maint/startup_crash_recovery_test.go", name: TestCrashRecovery_EveryKillPoint}
+      - {file: "cmd/culvert-maint/command_intent_crash_test.go", name: TestCommandIntent_DiedInsideUp}
+      - {file: "cmd/culvert-maint/command_intent_crash_test.go", name: TestCommandIntent_KilledAfterTheCommandReturned}
+      - {file: "cmd/culvert-maint/startup_intent_consume_test.go", name: TestInitJournal_TakesTheIntentOnceAndInEveryMode}
+      - {file: "cmd/culvert-maint/startup_intent_consume_test.go", name: TestTakeCommandIntents_AnIntentThatCannotBeRemovedStopsTheStart}
+      - {file: "cmd/culvert-maint/startup_intent_consume_test.go", name: TestInitJournal_ARefusedStartLeavesNothingBehind}
+      - {file: "cmd/culvert-maint/command_intent_crash_test.go", name: TestCommandIntent_ASecondAgentDoesNotTakeALiveIntent}
       - {file: "cmd/culvert-maint/startup_crash_recovery_test.go", name: TestCrashRecovery_RepeatedRestartsAreIdempotent}
       - {file: "cmd/culvert-maint/startup_crash_recovery_test.go", name: TestCrashRecovery_DockerUnavailableAtStartup}
       - {file: "cmd/culvert-maint/startup_crash_recovery_test.go", name: TestCrashRecovery_ForgedRecordRefsAreNotRepeated}
@@ -1046,13 +1187,16 @@ contracts:
     area: agent-lifecycle
     status: open
     owner_approved: false
-    invariant: "With reconcile_on_startup = \"converge\", after a crash during an image change, or after an image change that failed without proving its end state safe (its record kept, ADR-0062 slice 1), the next start either leaves the fixed tag and the proxy container on the same image, identified by image id as the pre-change image or as a target the journal proves passed its health gate and digest verify (and that answers ready now), or reports recovery_required and changes nothing. It never starts an image that has not passed the health gate. With the default \"off\" it changes nothing (AGT-004)."
+    invariant: "With reconcile_on_startup = \"converge\", after a crash during an image change, or after an image change that failed without proving its end state safe (its record kept, ADR-0062 slice 1), the next start either leaves the fixed tag and the proxy container on the same image, identified by image id as the pre-change image or as a target the journal proves passed its health gate and digest verify (and that answers ready now), or, with resume_interrupted_gate = true, as a target whose interrupted health gate it ran again at this start and that passed it and its digest verify, or reports recovery_required. It changes Docker only to bring back the pre-change image (finishing an armed rollback, or restoring it when no proxy container runs, this agent start found the previous process died inside a `compose up` of that record's own operation, and Docker still lists the never-started proxy service container such a death leaves), and a change that fails its gate or verification is kept and reported. It never starts an image that has not passed the health gate. With the default \"off\" it changes nothing (AGT-004)."
     authority: "Maintenance agent (cmd/culvert-maint). Owner decision 1 on the AGT-900 recovery proposal; lifecycle docs/adr/0061-maintenance-agent-crash-journal-lifecycle.md."
     code:
       - "cmd/culvert-maint/main.go"
       - "cmd/culvert-maint/internal/server/startup_reconcile.go"
       - "cmd/culvert-maint/internal/server/reconcile_decision_v2.go"
+      - "cmd/culvert-maint/internal/server/reconcile_resume.go"
       - "cmd/culvert-maint/internal/runner/reconcile_read.go"
+      - "cmd/culvert-maint/internal/runner/runner.go"
+      - "packaging/sudoers/culvert-maint"
       - "cmd/culvert-maint/internal/journal/*.go"
     configs:
       - "cmd/culvert-maint/internal/config/config.go"
@@ -1060,15 +1204,28 @@ contracts:
       permitted:
         - "retagging to the recorded, validated prior reference while the container provably runs that image"
         - "`compose up` with the fixed tag already on the prior image when the journal records an armed inline rollback, then gating and verifying it"
+        - "when the journal records an armed inline rollback whose own retag never ran (container and tag on the target), retagging to the validated prior reference, re-reading Docker, then `compose up`, a fresh health gate and verification by image id"
+        - "retiring, without any Docker change, an armed record whose container and tag are on the prior image once it answers ready"
         - "adopting, without any Docker change, a target recorded at phase verified that runs under the tag and answers ready"
         - "deferring, with no action and no attempt counted, while Docker cannot be read"
+        - "with resume_interrupted_gate = true (accepted only with converge), for an upgrade at restarted or restarting whose container, fixed tag and validated target reference are freshly read on one image id other than the prior's whose RepoDigests list the pinned digest (at restarted the id the restart recorded, at restarting none recorded yet), no armed rollback, no death inside the operation's `compose up` found by this start unless the proxy container runs and `compose ps -a` lists no never-started proxy container (Compose finished that recreate), and no agent start but this one since the gate began (an open gate:target checkpoint on that id with epoch = interrupted_seen - 1 below two gate runs begun, or no checkpoint at interrupted_seen 1): writing the gate checkpoint ahead fail-closed, a fresh health gate, then verifying container and tag by image id and the running digest, and adopting the target without any Docker change (one `:resumed` audit entry); when that gate or verify fails, writing the result and rollback_armed fail-closed and, in the same start, finishing the rollback exactly as for an armed record whose own retag never ran"
         - "retiring a record after verified convergence and an audit entry"
+        - "when no proxy container runs, the record is an upgrade at restarting or restarted (armed or not), this agent start found that the previous process died inside a `compose up` of that record's own operation (taken once per process), and `compose ps -a` lists a proxy service container (not a `compose run` one-off) in state created, what that death leaves (read again before every Docker change up to the reconcile's own first `up`), retagging to the validated prior reference whose local image is the recorded prior, `compose up` (once more if a fresh read shows nothing running), each after a fresh Docker read that still decides it, then a fresh health gate and verification by image id"
       forbidden:
         - "adopting or restarting a target that never passed the health gate"
         - "pulling an image, `compose down`, or moving the tag to the target at startup"
         - "acting on a record whose references failed validation, or after the attempt cap"
         - "acting without a durable write-ahead attempt, or on a decision Docker no longer supports"
+        - "a tag or `compose up` without a fresh Docker read immediately before it that supports it"
+        - "`compose up` while the fixed tag is not on the validated prior image, or a second `up` after the gate failed"
+        - "finishing a rollback the journal does not prove armed, or an armed record at phase verified"
+        - "retiring an armed record found on the prior image without a fresh ready probe"
+        - "retiring an armed record after a realign (retag only) without a fresh ready probe of the prior"
+        - "starting any container when no proxy container runs unless this start found the agent died inside a `compose up` of that record's own operation and Docker lists a created proxy service container; restoring on the journal's attribution alone, on a `compose run` one-off, or when `compose ps -a` cannot be read or understood (for one, a sudoers file without its rule); restoring over an upgrade at phase verified; restoring a prior that is not local and identical to the recorded one; restoring when the fixed tag is on an image other than the prior or the target"
+        - "acting on the command attribution more than once per process, or on the attribution alone without Docker's live state matching the record"
         - "flipping the interrupted operation to succeeded"
+        - "resuming a health gate with resume_interrupted_gate off; at phase verified; for an image that does not carry the pinned digest, or whose id disagrees with the one the restart recorded (or, at restarting, with any id recorded); for an armed record; after this start found a death inside the operation's `compose up` while `compose ps -a` lists a never-started proxy container, cannot be read, or was not read; on a checkpoint naming another image, already ended, or seen by another agent start since it began; beyond two gate runs begun; or without the gate checkpoint durably written ahead"
+        - "rolling back after a failed resumed gate without rollback_armed durably written, and replaying the interrupted operation's own `docker tag` or `compose up`"
         - "reconciling while another agent process holds the instance lock"
     tests:
       - {file: "cmd/culvert-maint/startup_reconcile_converge_test.go", name: TestConvergeRecovery_EveryKillPoint}
@@ -1079,13 +1236,62 @@ contracts:
       - {file: "cmd/culvert-maint/startup_reconcile_converge_test.go", name: TestConvergeRecovery_SecondInstanceRefusesToStart}
       - {file: "cmd/culvert-maint/internal/server/reconcile_decision_v2_test.go", name: TestReconcileDecisionV2_ExhaustiveProperties}
       - {file: "cmd/culvert-maint/internal/server/reconcile_decision_v2_test.go", name: TestReconcileDecisionV2_NegativeControls}
+      - {file: "cmd/culvert-maint/internal/server/reconcile_decision_v2_test.go", name: TestReconcileDecisionV2_FailureMatrix}
+      - {file: "cmd/culvert-maint/internal/server/reconcile_decision_v2_test.go", name: TestReconcilePlan_NegativeControls}
+      - {file: "cmd/culvert-maint/internal/server/reconcile_resume_test.go", name: TestReconcileResume_ExhaustiveProperties}
+      - {file: "cmd/culvert-maint/internal/server/reconcile_resume_test.go", name: TestReconcileResume_NegativeControls}
+      - {file: "cmd/culvert-maint/internal/server/startup_reconcile_resume_test.go", name: TestResume_OffLeavesTheTargetReported}
+      - {file: "cmd/culvert-maint/internal/server/startup_reconcile_resume_test.go", name: TestResume_PassedGateAdoptsAndRetires}
+      - {file: "cmd/culvert-maint/internal/server/startup_reconcile_resume_test.go", name: TestResume_RefusedWithoutFreshEvidence}
+      - {file: "cmd/culvert-maint/internal/server/startup_reconcile_resume_test.go", name: TestResume_RefusedWhenTheImageLacksThePinnedDigest}
+      - {file: "cmd/culvert-maint/internal/server/startup_reconcile_resume_test.go", name: TestResume_AfterADeathInsideItsOwnUp}
+      - {file: "cmd/culvert-maint/internal/server/startup_reconcile_resume_test.go", name: TestResume_OffDoesNotReadTheComposeListingWithTheStackUp}
+      - {file: "cmd/culvert-maint/internal/server/startup_reconcile_resume_test.go", name: TestResume_FailedGateFinishesTheRollbackInTheSameStart}
+      - {file: "cmd/culvert-maint/internal/server/startup_reconcile_resume_test.go", name: TestResume_VerifyMismatchRollsBack}
+      - {file: "cmd/culvert-maint/internal/server/startup_reconcile_resume_test.go", name: TestResume_UnwritableCheckpointRunsNoGate}
+      - {file: "cmd/culvert-maint/internal/server/startup_reconcile_resume_test.go", name: TestResume_UnwritableArmAfterAFailedGateIsReported}
+      - {file: "cmd/culvert-maint/internal/server/startup_reconcile_resume_test.go", name: TestResume_AuditedButNotRemovedIsOnlyRemoved}
+      - {file: "cmd/culvert-maint/internal/server/startup_reconcile_resume_test.go", name: TestResume_CheckpointWrittenAheadForTheNextStart}
+      - {file: "cmd/culvert-maint/internal/config/config_reconcile_test.go", name: TestLoad_ResumeInterruptedGate}
+      - {file: "cmd/culvert-maint/internal/server/startup_reconcile_restore_prior_test.go", name: TestStartupReconcile_RestoresPriorAfterADeathInsideItsOwnUp}
+      - {file: "cmd/culvert-maint/internal/server/startup_reconcile_restore_prior_test.go", name: TestStartupReconcile_StackDownWithoutAttributionIsOnlyReported}
+      - {file: "cmd/culvert-maint/internal/server/startup_reconcile_restore_prior_test.go", name: TestStartupReconcile_AttributionIsForThatOperationAndTakenOnce}
+      - {file: "cmd/culvert-maint/internal/server/startup_reconcile_restore_prior_test.go", name: TestStartupReconcile_RestoreRechecksDockerBeforeItsUp}
+      - {file: "cmd/culvert-maint/internal/server/startup_reconcile_restore_prior_test.go", name: TestStartupReconcile_RestoreRechecksDockerBeforeItsSecondUp}
+      - {file: "cmd/culvert-maint/internal/server/startup_reconcile_restore_prior_test.go", name: TestStartupReconcile_RestoreKindAndPhaseGuards}
+      - {file: "cmd/culvert-maint/internal/server/startup_reconcile_restore_prior_test.go", name: TestStartupReconcile_RestoreIsBoundedByTheAttemptCap}
+      - {file: "cmd/culvert-maint/restore_prior_converge_test.go", name: TestRestorePrior_TheAgentDiedInsideItsOwnUp}
+      - {file: "cmd/culvert-maint/restore_prior_converge_test.go", name: TestRestorePrior_NoIntentNoRestore}
+      - {file: "cmd/culvert-maint/restore_prior_converge_test.go", name: TestRestorePrior_CaseA_AStartHasLooked}
+      - {file: "cmd/culvert-maint/restore_prior_converge_test.go", name: TestRestorePrior_CaseE_TheFirstStartWasInModeOff}
+      - {file: "cmd/culvert-maint/restore_prior_converge_test.go", name: TestRestorePrior_CaseC_ARestoreWhoseUpReturnedIsNotACrash}
+      - {file: "cmd/culvert-maint/restore_prior_converge_test.go", name: TestRestorePrior_ARestoreThatDiesInItsOwnUpIsRetriedOnce}
+      - {file: "cmd/culvert-maint/restore_prior_converge_test.go", name: TestRestorePrior_TheOperatorsComposeDownIsNotUndone}
+      - {file: "cmd/culvert-maint/restore_prior_converge_test.go", name: TestRestorePrior_WithoutTheSudoersRuleNothingIsRestored}
+      - {file: "cmd/culvert-maint/restore_prior_converge_test.go", name: TestRestorePrior_CaseB_TwoRecordsTheOlderDoesNothing}
+      - {file: "cmd/culvert-maint/restore_prior_converge_test.go", name: TestRestorePrior_CaseD_ClockBehindBeganChangesNothing}
+      - {file: "cmd/culvert-maint/internal/server/startup_reconcile_up_evidence_test.go", name: TestStartupReconcile_NoLeftoverNoRestore}
+      - {file: "cmd/culvert-maint/internal/server/startup_reconcile_up_evidence_test.go", name: TestStartupReconcile_UnreadableEvidenceNoRestore}
+      - {file: "cmd/culvert-maint/internal/server/startup_reconcile_up_evidence_test.go", name: TestStartupReconcile_EvidenceIsRecheckedBeforeTheFirstChange}
+      - {file: "cmd/culvert-maint/internal/server/startup_reconcile_up_evidence_test.go", name: TestStartupReconcile_EvidenceIsRecheckedBeforeTheFirstUp}
+      - {file: "cmd/culvert-maint/internal/server/startup_reconcile_up_evidence_test.go", name: TestStartupReconcile_StaleCloseThenOperatorDownIsNotRestored}
+      - {file: "cmd/culvert-maint/internal/server/startup_reconcile_up_evidence_test.go", name: TestStartupReconcile_AStaleOneOffIsNotEvidence}
+      - {file: "cmd/culvert-maint/internal/runner/proxy_leftover_test.go", name: TestProxyCreatedLeftover_OnlyACreatedProxyIsEvidence}
+      - {file: "cmd/culvert-maint/internal/runner/proxy_leftover_test.go", name: TestComposeStatusAll_IsReadOnly}
       - {file: "cmd/culvert-maint/internal/server/startup_reconcile_test.go", name: TestStartupReconcile_WriteAheadFailureMeansNoAction}
       - {file: "cmd/culvert-maint/internal/server/startup_reconcile_test.go", name: TestStartupReconcile_DockerChangedBeforeActionIsNotActedOn}
+      - {file: "cmd/culvert-maint/startup_reconcile_finish_armed_test.go", name: TestConvergeRecovery_ArmedRollbackTagNeverMoved}
+      - {file: "cmd/culvert-maint/startup_reconcile_finish_armed_test.go", name: TestConvergeRecovery_KillDuringArmedFinish}
+      - {file: "cmd/culvert-maint/internal/server/reconcile_decision_v2_test.go", name: TestReconcilePlan_NegativeControls}
+      - {file: "cmd/culvert-maint/internal/server/startup_reconcile_finish_armed_test.go", name: TestStartupReconcile_ArmedTTDockerChangedBeforeEachMutation}
+      - {file: "cmd/culvert-maint/internal/server/startup_reconcile_finish_armed_test.go", name: TestStartupReconcile_ArmedTTGateFailsThenRestarts}
+      - {file: "cmd/culvert-maint/internal/server/startup_reconcile_finish_armed_test.go", name: TestStartupReconcile_ArmedTTVerifyMismatchIsCapped}
+      - {file: "cmd/culvert-maint/internal/server/startup_reconcile_finish_armed_test.go", name: TestStartupReconcile_ArmedRealignRetiresOnlyOnAFreshProbe}
       - {file: "cmd/culvert-maint/internal/server/terminal_record_test.go", name: TestKeptRecord_ConvergeDecidesItLikeAnInterruptedRecord}
       - {file: "cmd/culvert-maint/internal/server/terminal_record_test.go", name: TestKeptRecord_ConvergeWritesAMissingTerminalEntryBeforeRetiring}
     validation: integration
     question: "OPEN until verified on a real Docker daemon (owner, 2026-11-23): does the conservative converge mode hold its safety properties against real Docker (the real-Docker e2e)? If it does, should converge become the default before the first customer release?"
-    compatibility: "Opt-in; the default \"off\" is the AGT-004 behaviour. Proven against a fake Docker exec layer and the shell Docker model only, not yet against a real daemon (the proposal's real-Docker e2e is not built). Enabling it by default, and adopting a live target that never passed its gate, are not decided and are excluded by owner decision 1. A record from an agent that predates rollback_armed is never finished as a rollback; it is reported."
+    compatibility: "Opt-in; the default \"off\" is the AGT-004 behaviour. Proven against a fake Docker exec layer and the shell Docker model only, not yet against a real daemon (the proposal's real-Docker e2e is not built). Enabling it by default, and adopting a live target that never passed its gate, are not decided and are excluded by owner decision 1. A record from an agent that predates rollback_armed is never finished as a rollback; it is reported. Finishing an armed rollback whose retag never ran (real-Docker e2e finding 2) is proven against the same fakes only; the real-Docker e2e must be re-run on it."
 
   - id: CFG-900
     area: config-compatibility

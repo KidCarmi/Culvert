@@ -1,8 +1,9 @@
 //go:build lifecycle_conformance
 
 // Package lifecyclemodel is an explicit-state model of the maintenance agent's
-// `upgrades.apply` flow, its crash journal and the (not wired) startup reconcile
-// decision, together with a small model checker and the conformance vectors derived
+// `upgrades.apply` flow, its crash journal, the PR-E reference reconcile table (V1, never
+// wired) and the opt-in converge reconcile that IS wired (V2 decision and its execution
+// steps across agent kills, converge.go), together with a small model checker and the conformance vectors derived
 // from the model. Source of truth for the modelled behaviour:
 // cmd/culvert-maint/internal/{server,journal,ops}.
 //
@@ -54,6 +55,21 @@ type State struct {
 	// "" nothing captured yet, "fresh" a capture after the last `compose up`, "stale" an `up`
 	// ran after the last capture. A capture succeeds iff a container runs.
 	Ev string
+
+	// Armed is the journal record's durable rollback_armed marker: written by the inline
+	// rollback right before its rollback_restart moves the tag (armRollbackInJournal),
+	// dropped with the record. (rollbackArmed(s) is whether a rollback WILL run.)
+	Armed bool
+	// Converge bookkeeping (converge.go). Attempts and Audits are durable (the journal's
+	// reconcile_attempts; succeeded `:reconciled` audit entries for the record); RcAct (the
+	// verdict being executed, "action/reason") and RcOut (the start's outcome) live in the
+	// agent process. Acts is a ghost counter of the converge starts that acted, saturated
+	// at the cap + 1: it equals Attempts unless an attempt is not counted durably.
+	Attempts int
+	Acts     int
+	Audits   int
+	RcAct    string
+	RcOut    string
 }
 
 const (
@@ -195,9 +211,14 @@ func (Model) Inits() []State {
 func (m Model) Events(s State) []string {
 	switch s.PC {
 	case pcCrashed:
-		return []string{evRestartAgent}
+		return []string{evRestartAgent, evRestartConverge}
+	case pcReconciled:
+		return convergeEvents(s)
 	case pcDone, pcRecovered:
 		return nil
+	}
+	if isConvergePC(s.PC) {
+		return convergeEvents(s)
 	}
 	ev := m.Outcomes(s)
 	if (s.PC == pcRestart || s.PC == pcRbRestart) && !contains(ev, evSkip) {
@@ -284,6 +305,9 @@ func (Model) Step(s State, e string) State {
 		s.PC, s.Op = pcRecovered, "interrupted"
 		return s
 	}
+	if e == evRestartConverge || isConvergePC(pc) {
+		return stepConverge(s, e)
+	}
 	if strings.HasPrefix(e, evCrash) {
 		return stepCrash(s, e)
 	}
@@ -307,6 +331,10 @@ func stepCrash(s State, e string) State {
 	img := imgP
 	if forward {
 		img = imgT
+	}
+	if s.PC == pcRbRestart && e != evCrash {
+		// Killed inside rollback_restart: the armed marker is written before its tag move.
+		s.Armed = true
 	}
 	switch e {
 	case evCrashAfterBar:
@@ -332,9 +360,11 @@ func stepReport(s State) State {
 	// ADR-0062 slice 1 (server/terminal_record.go): the record is removed at
 	// terminal when the op succeeded, failed before the write-ahead barrier, or
 	// its inline rollback passed its gate and verify. Otherwise it is KEPT at
-	// the phase the op last wrote, for an operator or a later success.
+	// the phase the op last wrote, rollback_armed included (stampTerminal
+	// changes only the terminal fields), for an operator, a later success or
+	// the converge reconcile's armed finish.
 	if !failed || s.RbOK || !dangerJR(s.JR) {
-		s.JR = "removed"
+		s.JR, s.Armed = "removed", false
 	}
 	if s.Ev != evFresh { // option C: one read-only final capture when evidence is stale or missing
 		s.Ev = captureEv(s)
@@ -471,6 +501,7 @@ func stepRollback(s State, e, nxt string) State {
 }
 
 func stepRbRestart(s State, e string) State {
+	s.Armed = true      // armRollbackInJournal, before the tag move, whatever the stage's outcome
 	if e != evTagFail { // the rollback's `up` ran: earlier evidence is stale (no capture follows)
 		s.Ev = evStale
 	}
@@ -499,7 +530,8 @@ func dangerJR(jr string) bool {
 var ObservedFields = []string{"prior", "same", "backup", "rb", "th", "ph", "pc", "running", "tag", "jr",
 	"fail_stage", "reason", "post_fail", "rb_att", "rb_failed", "rb_restarted", "rb_ok", "op", "tid",
 	"terminal", "danger_phase", "rollback_armed", "tag_ahead", "serving_healthy", "jr_rank", "rb_resolved",
-	"stopped", "reconcile"}
+	"stopped", "reconcile",
+	"journal_armed", "converge", "attempts", "acts", "audits", "rc_action", "rc_out", "reconcile_v2"}
 
 // Observe projects a state onto the named fields the properties are written against.
 // Values are string, bool or float64.
@@ -508,12 +540,18 @@ func (Model) Observe(s State) map[string]any {
 	if s.JR == jrRestarting {
 		rank += 0.5
 	}
-	rec := "n/a"
+	rec, rec2 := "n/a", "n/a"
 	if s.PC == pcCrashed || s.PC == pcRecovered {
 		rec, _ = ReconcileSpec(ReconcileInputsForState(s))
 	}
+	if s.PC == pcCrashed {
+		rec2, _ = reconcileV2ForState(s, s.Attempts)
+	}
 	return map[string]any{
-		"prior": s.Prior, "same": s.Same, "backup": s.Backup, "rb": s.RB, "th": s.TH, "ph": s.PH,
+		"journal_armed": s.Armed, "converge": isConvergePC(s.PC), "attempts": float64(s.Attempts),
+		"acts": float64(s.Acts), "audits": float64(s.Audits), "rc_action": actionOf(s.RcAct), "rc_out": s.RcOut,
+		"reconcile_v2": rec2,
+		"prior":        s.Prior, "same": s.Same, "backup": s.Backup, "rb": s.RB, "th": s.TH, "ph": s.PH,
 		"pc": s.PC, "running": s.Running, "tag": s.Tag, "jr": s.JR, "fail_stage": s.FailStage,
 		"reason": s.Reason, "post_fail": s.PostFail, "rb_att": s.RbAtt, "rb_failed": s.RbFailed,
 		"rb_restarted": s.RbRestarted, "rb_ok": s.RbOK, "op": s.Op, "tid": s.TID,
@@ -524,7 +562,7 @@ func (Model) Observe(s State) map[string]any {
 		"serving_healthy": healthy(s, s.Running),
 		"jr_rank":         rank,
 		"rb_resolved":     s.RbOK || s.RbFailed || s.PC == pcCrashed,
-		"stopped":         s.PC == pcDone || s.PC == pcCrashed || s.PC == pcRecovered,
+		"stopped":         s.PC == pcDone || s.PC == pcCrashed || s.PC == pcRecovered || s.PC == pcReconciled,
 		"reconcile":       rec,
 	}
 }
