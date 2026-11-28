@@ -644,7 +644,7 @@ func TestClusterHalves_ControlPlane_IdentityEarly_ServesOnlyLoadedConfig(t *test
 		t.Error("the early half started the control-plane listener")
 	}
 	if _, err := suPoll(t, addr); !isCPStartingStatus(err) {
-		t.Errorf("before the activation a poller must be answered %s by the early listener, got: %v", cpStartingStatusToken, err)
+		t.Errorf("before the activation a poller must be answered %s by the early listener, got: %v", cpStartingStatusMarker, err)
 	}
 
 	env.loadStores(t, "allow")

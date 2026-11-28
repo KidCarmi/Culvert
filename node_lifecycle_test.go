@@ -104,9 +104,9 @@ func TestNodeLifecycle_WireStatusesAreDistinct(t *testing.T) {
 		"a transport failure":       status.Error(codes.Unavailable, "connection refused"),
 		"the non-leader refusal":    status.Errorf(codes.Unavailable, "HASync refused: this node is not the HA leader"),
 		"no valid config":           status.Errorf(codes.Unavailable, "control plane has no valid config to distribute: x"),
-		"the token with other code": status.Error(codes.Internal, cpStartingStatusToken+": x"),
-		"the token mid-message":     status.Error(codes.Unavailable, "x "+cpStartingStatusToken+": y"),
-		"a plain error":             errors.New(cpStartingStatusToken + ": x"),
+		"the token with other code": status.Error(codes.Internal, cpStartingStatusMarker+": x"),
+		"the token mid-message":     status.Error(codes.Unavailable, "x "+cpStartingStatusMarker+": y"),
+		"a plain error":             errors.New(cpStartingStatusMarker + ": x"),
 	} {
 		if isCPStartingStatus(other) || isCPPublishNotAuthorizedStatus(other) {
 			t.Errorf("%s was classified as a lifecycle status", name)
@@ -128,7 +128,7 @@ func TestCPStartingListener_EveryMethodAnswersStartingAndNothingElse(t *testing.
 	if l == nil {
 		t.Fatal("the early listener did not bind")
 	}
-	t.Cleanup(l.stop)
+	t.Cleanup(l.stopEarlyListener)
 
 	methods := cpStartingMethods()
 	if len(methods) != len(cpRPCPolicies) || len(methods) < 9 {
@@ -137,7 +137,7 @@ func TestCPStartingListener_EveryMethodAnswersStartingAndNothingElse(t *testing.
 	for _, m := range methods {
 		raw, err := nlCall(t, addr, m)
 		if !isCPStartingStatus(err) || len(raw) != 0 {
-			t.Errorf("%s on the early listener answered (%q, %v), want only %s", m, raw, err, cpStartingStatusToken)
+			t.Errorf("%s on the early listener answered (%q, %v), want only %s", m, raw, err, cpStartingStatusMarker)
 			continue
 		}
 		if phase, _, ok := cpStartingStatusFields(err); !ok || phase != "loading-stores" {
@@ -171,13 +171,13 @@ func TestCPStartingListener_EveryMethodAnswersStartingAndNothingElse(t *testing.
 		}
 	}
 
-	l.stop()
-	l.stop() // idempotent
+	l.stopEarlyListener()
+	l.stopEarlyListener() // idempotent
 	if _, err := nlCall(t, addr, "GetConfig"); isCPStartingStatus(err) || err == nil {
 		t.Errorf("the early listener still answers after stop: %v", err)
 	}
 	var none *cpStartingListener
-	none.stop() // nil-safe
+	none.stopEarlyListener() // nil-safe
 }
 
 // TestCPStartingListener_UnbindableAddressIsNotFatal: a taken port (or TLS
@@ -188,14 +188,14 @@ func TestCPStartingListener_UnbindableAddressIsNotFatal(t *testing.T) {
 	port, release := occupyPort(t)
 	defer release()
 	if l := startCPStartingListener(cpListenerConfig{addr: fmt.Sprintf("127.0.0.1:%d", port)}); l != nil {
-		l.stop()
+		l.stopEarlyListener()
 		t.Error("an early listener was returned for a port that is taken")
 	}
 	prev := clusterInsecure
 	clusterInsecure = false
 	defer func() { clusterInsecure = prev }()
 	if l := startCPStartingListener(cpListenerConfig{addr: fmt.Sprintf("127.0.0.1:%d", cpFreePort(t))}); l != nil {
-		l.stop()
+		l.stopEarlyListener()
 		t.Error("an early listener was started with no TLS material and no insecure opt-in")
 	}
 }
@@ -203,9 +203,9 @@ func TestCPStartingListener_UnbindableAddressIsNotFatal(t *testing.T) {
 // ── the real server behind the lifecycle gate ───────────────────────────────
 
 // TestNodeLifecycle_RealServerServesNothingUntilReady: the REAL ConfigService
-// (registerConfigService, over a real connection). While the node is not
-// ready every method answers CULVERT_NODE_STARTING — bound or not, published
-// or not. Ready, it serves; with publication not authorized the three
+// (registerConfigService, over a real connection). Until start-up has
+// completed every method answers CULVERT_NODE_STARTING — bound or not,
+// published or not. Once it has, the server serves; with publication not authorized the three
 // snapshot methods answer CULVERT_PUBLISH_NOT_AUTHORIZED and nothing else
 // changes.
 func TestNodeLifecycle_RealServerServesNothingUntilReady(t *testing.T) {
@@ -223,7 +223,7 @@ func TestNodeLifecycle_RealServerServesNothingUntilReady(t *testing.T) {
 	// Bound, published, role claimed — and still not ready.
 	for _, m := range cpStartingMethods() {
 		if raw, err := nlCall(t, addr, m); !isCPStartingStatus(err) || len(raw) != 0 {
-			t.Errorf("%s answered (%q, %v) while the node was activating, want %s", m, raw, err, cpStartingStatusToken)
+			t.Errorf("%s answered (%q, %v) while the node was activating, want %s", m, raw, err, cpStartingStatusMarker)
 		}
 	}
 
@@ -239,11 +239,54 @@ func TestNodeLifecycle_RealServerServesNothingUntilReady(t *testing.T) {
 	t.Cleanup(func() { nodePublishAuthorized = prev })
 	for m := range cpSnapshotServingMethods {
 		if _, err := nlCall(t, addr, m); !isCPPublishNotAuthorizedStatus(err) {
-			t.Errorf("%s with publication not authorized answered %v, want %s", m, err, cpPublishNotAuthorizedToken)
+			t.Errorf("%s with publication not authorized answered %v, want %s", m, err, cpPublishRefusedMarker)
 		}
 	}
 	if _, err := nlCall(t, addr, "PushMetrics"); isCPPublishNotAuthorizedStatus(err) || isCPStartingStatus(err) {
 		t.Errorf("a method that serves no snapshot was refused for publication authority: %v", err)
+	}
+}
+
+// nlAnswer is one poll result of nlPollUntilStopped.
+type nlAnswer struct {
+	ready   bool // observed after readyFlag was closed
+	snap    *ConfigSnapshot
+	err     error
+	started bool // a CULVERT_NODE_STARTING answer
+}
+
+// nlPollUntilStopped polls GetConfig on ONE long-lived connection, as a data
+// plane does, until stop is closed.
+func nlPollUntilStopped(addr string, readyFlag, stop <-chan struct{}, done chan<- struct{}, answers chan<- nlAnswer) {
+	defer close(done)
+	c, err := NewDataPlaneClient("handover-poller", addr, "", "", "")
+	if err != nil {
+		return
+	}
+	defer func() { c.mu.Lock(); _ = c.conn.Close(); c.mu.Unlock() }() //nolint:errcheck // test teardown
+	for {
+		select {
+		case <-stop:
+			return
+		default:
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		raw, err := c.call(ctx, methodGetConfig, json.RawMessage(`{}`))
+		cancel()
+		a := nlAnswer{err: err, started: isCPStartingStatus(err)}
+		select {
+		case <-readyFlag:
+			a.ready = true
+		default:
+		}
+		if err == nil {
+			var s ConfigSnapshot
+			if json.Unmarshal(raw, &s) == nil {
+				a.snap = &s
+			}
+		}
+		answers <- a
+		time.Sleep(5 * time.Millisecond)
 	}
 }
 
@@ -258,48 +301,11 @@ func TestNodeLifecycle_HandOver_PollerNeverSeesConfigBeforeReady(t *testing.T) {
 	addr := fmt.Sprintf("127.0.0.1:%d", cpFreePort(t))
 	act := loadClusterIdentity(clusterStartupConfig{ClusterDBPath: env.clusterDB, CPAddr: addr}, t.Context(), nil)
 
-	type answer struct {
-		ready   bool // observed AFTER markNodeReady returned
-		snap    *ConfigSnapshot
-		err     error
-		started bool
-	}
-	var readyFlag = make(chan struct{})
-	answers := make(chan answer, 1<<16)
+	readyFlag := make(chan struct{})
+	answers := make(chan nlAnswer, 1<<16)
 	stop := make(chan struct{})
 	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		c, err := NewDataPlaneClient("handover-poller", addr, "", "", "")
-		if err != nil {
-			return
-		}
-		defer func() { c.mu.Lock(); _ = c.conn.Close(); c.mu.Unlock() }() //nolint:errcheck // test teardown
-		for {
-			select {
-			case <-stop:
-				return
-			default:
-			}
-			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-			raw, err := c.call(ctx, methodGetConfig, json.RawMessage(`{}`))
-			cancel()
-			a := answer{err: err, started: isCPStartingStatus(err)}
-			select {
-			case <-readyFlag:
-				a.ready = true
-			default:
-			}
-			if err == nil {
-				var s ConfigSnapshot
-				if json.Unmarshal(raw, &s) == nil {
-					a.snap = &s
-				}
-			}
-			answers <- a
-			time.Sleep(5 * time.Millisecond)
-		}
-	}()
+	go nlPollUntilStopped(addr, readyFlag, stop, done, answers)
 
 	time.Sleep(50 * time.Millisecond) // the poller meets the early listener
 	enterStartupStoresPhase()
@@ -317,7 +323,7 @@ func TestNodeLifecycle_HandOver_PollerNeverSeesConfigBeforeReady(t *testing.T) {
 	var starting, startingAfterReady, connErrs, served int
 	deadline := time.After(20 * time.Second)
 	for served < 3 {
-		var a answer
+		var a nlAnswer
 		select {
 		case a = <-answers:
 		case <-deadline:

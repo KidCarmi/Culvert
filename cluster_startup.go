@@ -127,7 +127,7 @@ func (a *clusterActivation) activate() {
 	cfg, ctx := a.cfg, a.ctx
 	// Hand the address over: the early listener stops, then the unchanged
 	// activation publishes and binds the real one.
-	a.starting.stop()
+	a.starting.stopEarlyListener()
 	a.starting = nil
 	switch {
 	case cfg.haJoinMode():

@@ -149,26 +149,26 @@ func currentNodeLifecycleStatus() nodeLifecycleStatus {
 // tell them apart from a transport failure and from each other.
 
 const (
-	// cpStartingStatusToken marks "the node is alive and still starting".
-	cpStartingStatusToken = "CULVERT_NODE_STARTING"
-	// cpPublishNotAuthorizedToken marks "the node is ready but may not
+	// cpStartingStatusMarker marks "the node is alive and still starting".
+	cpStartingStatusMarker = "CULVERT_NODE_STARTING"
+	// cpPublishRefusedMarker marks "the node is ready but may not
 	// distribute a snapshot" (leadership / publication safety gate).
-	cpPublishNotAuthorizedToken = "CULVERT_PUBLISH_NOT_AUTHORIZED"
+	cpPublishRefusedMarker = "CULVERT_PUBLISH_NOT_AUTHORIZED"
 )
 
-// cpStartingStatus is the answer to method while the node is not ready. It
+// cpStartingStatus is the answer to method until start-up has completed. It
 // carries the phase and the seconds since process start, so a standby can log
 // both and bound how long it treats a starting leader as alive.
 func cpStartingStatus(method string) error {
 	return status.Errorf(codes.Unavailable, "%s: control plane is starting (phase=%s elapsed_seconds=%d); %s is not served until the node is ready",
-		cpStartingStatusToken, currentNodePhase(), int64(nodeStartupElapsed().Seconds()), method)
+		cpStartingStatusMarker, currentNodePhase(), int64(nodeStartupElapsed().Seconds()), method)
 }
 
 func cpPublishNotAuthorizedStatus(method, reason string) error {
-	return status.Errorf(codes.Unavailable, "%s: %s; %s is not served", cpPublishNotAuthorizedToken, reason, method)
+	return status.Errorf(codes.Unavailable, "%s: %s; %s is not served", cpPublishRefusedMarker, reason, method)
 }
 
-func cpStatusHasToken(err error, token string) bool {
+func cpStatusHasMarker(err error, token string) bool {
 	if err == nil {
 		return false
 	}
@@ -178,12 +178,12 @@ func cpStatusHasToken(err error, token string) bool {
 
 // isCPStartingStatus reports whether err is a control plane's "alive, still
 // starting" answer: an ANSWERED round, not an unreachable peer.
-func isCPStartingStatus(err error) bool { return cpStatusHasToken(err, cpStartingStatusToken) }
+func isCPStartingStatus(err error) bool { return cpStatusHasMarker(err, cpStartingStatusMarker) }
 
 // isCPPublishNotAuthorizedStatus reports whether err is a ready control
 // plane's refusal to distribute a snapshot.
 func isCPPublishNotAuthorizedStatus(err error) bool {
-	return cpStatusHasToken(err, cpPublishNotAuthorizedToken)
+	return cpStatusHasMarker(err, cpPublishRefusedMarker)
 }
 
 // cpStartingStatusFields extracts the phase and elapsed seconds a starting
@@ -193,8 +193,12 @@ func cpStartingStatusFields(err error) (phase string, elapsedSeconds int64, ok b
 		return "", 0, false
 	}
 	msg := status.Convert(err).Message()
-	if _, scanErr := fmt.Sscanf(msg[strings.Index(msg, "(phase="):], "(phase=%s elapsed_seconds=%d)", &phase, &elapsedSeconds); scanErr != nil {
+	at := strings.Index(msg, "(phase=")
+	if at < 0 {
 		return "", 0, true // a starting answer whose fields this build cannot read
+	}
+	if _, scanErr := fmt.Sscanf(msg[at:], "(phase=%s elapsed_seconds=%d)", &phase, &elapsedSeconds); scanErr != nil {
+		return "", 0, true
 	}
 	return phase, elapsedSeconds, true
 }

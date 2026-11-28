@@ -110,17 +110,17 @@ func startCPStartingListener(cfg cpListenerConfig) *cpStartingListener {
 	l := &cpStartingListener{srv: srv, addr: cfg.addr, done: make(chan struct{})}
 	go func() {
 		defer close(l.done)
-		_ = srv.Serve(ln) //nolint:errcheck // ends on stop(); a serve error only closes the early listener
+		_ = srv.Serve(ln) //nolint:errcheck // ends on stopEarlyListener(); a serve error only closes the early listener
 	}()
 	logger.Printf("Startup: control-plane listener bound in STARTING state on %s (%s, %s after process start) — every request is answered %s until the node is ready",
-		sanitizeLog(cfg.addr), mode, nodeStartupElapsed().Round(time.Millisecond), cpStartingStatusToken)
+		sanitizeLog(cfg.addr), mode, nodeStartupElapsed().Round(time.Millisecond), cpStartingStatusMarker)
 	return l
 }
 
-// stop closes the early listener and waits for its serve loop to end, so the
+// stopEarlyListener closes the early listener and waits for its serve loop to end, so the
 // address is free for the activation's bind. Safe on nil and idempotent. It
 // does not drain: every answer this server gives is an immediate refusal.
-func (l *cpStartingListener) stop() {
+func (l *cpStartingListener) stopEarlyListener() {
 	if l == nil || l.srv == nil {
 		return
 	}

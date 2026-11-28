@@ -363,7 +363,7 @@ func TestBinaryStartup_ControlPlane_PollerOnlyEverSeesLoadedConfig(t *testing.T)
 	// handed to the activation, which published before it bound.
 	startingFirst := poller.startingAnswers()
 	if startingFirst == 0 {
-		t.Error("the poller was never answered " + cpStartingStatusToken + ": the control plane's port was closed while its stores loaded, " +
+		t.Error("the poller was never answered " + cpStartingStatusMarker + ": the control plane's port was closed while its stores loaded, " +
 			"which a standby cannot tell from a dead leader")
 	}
 	n.wantLogOrder("control-plane listener bound in STARTING state", "Blocklist loaded: 1 entries", "Policy: 2 rule(s) loaded",
@@ -383,7 +383,7 @@ func TestBinaryStartup_ControlPlane_PollerOnlyEverSeesLoadedConfig(t *testing.T)
 	}
 	suBinWantLoaded(t, "after restart", after)
 	if poller.startingAnswers() == startingFirst {
-		t.Error("the restarted control plane never answered " + cpStartingStatusToken + " while it loaded its stores")
+		t.Error("the restarted control plane never answered " + cpStartingStatusMarker + " while it loaded its stores")
 	}
 	if after[0].Version <= firstVersion {
 		t.Errorf("the restarted control plane serves v%d, not above the v%d it served before the restart", after[0].Version, firstVersion)

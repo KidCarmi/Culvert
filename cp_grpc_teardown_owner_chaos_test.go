@@ -430,7 +430,12 @@ type cpTeardownScan struct {
 }
 
 var (
-	cpTeardownStopOwners = map[string]bool{"teardownCPGRPCServer": true, "gracefulStopBounded": true, "buildControlPlaneServer": true}
+	// stopEarlyListener (cp_starting_listener.go) stops the start-up "starting"
+	// server it alone built. That server is never adopted by a supervisor and
+	// never serves a real handler, so it is outside the claim protocol this
+	// wall protects; it is named here so the wall keeps rejecting every OTHER
+	// Stop on a *grpc.Server.
+	cpTeardownStopOwners = map[string]bool{"teardownCPGRPCServer": true, "gracefulStopBounded": true, "buildControlPlaneServer": true, "stopEarlyListener": true}
 	cpTeardownCallGraph  = map[string][]string{
 		"gracefulStopBounded":    {"stopControlPlaneServer"},
 		"stopControlPlaneServer": {"teardownCPGRPCServer"},
