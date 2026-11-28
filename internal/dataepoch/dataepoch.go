@@ -109,6 +109,11 @@ func Read(dataDir string) (Reading, error) {
 	if err := dec.Decode(&m); err != nil {
 		return Reading{}, fmt.Errorf("data epoch marker: %w", err)
 	}
+	// Exactly one JSON value: trailing bytes or a second object make the
+	// marker malformed, never the first object's epoch.
+	if err := dec.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		return Reading{}, errors.New("data epoch marker: trailing data after the marker object")
+	}
 	if m.Schema != markerSchema {
 		return Reading{}, fmt.Errorf("data epoch marker has schema %d, this build reads %d", m.Schema, markerSchema)
 	}

@@ -28,6 +28,8 @@ func TestRead_RefusesWhatIsNotAMarker(t *testing.T) {
 		"epoch zero":     `{"schema":1,"epoch":0}`,
 		"negative epoch": `{"schema":1,"epoch":-1}`,
 		"too large":      `{"schema":1,"epoch":2}` + strings.Repeat(" ", maxMarker),
+		"trailing bytes": `{"schema":1,"epoch":1}garbage`,
+		"two objects":    `{"schema":1,"epoch":1}{"schema":1,"epoch":3}`,
 	}
 	for name, body := range cases {
 		dir := t.TempDir()
