@@ -1710,6 +1710,7 @@ func apiHealthz(w http.ResponseWriter, r *http.Request) {
 	// If HA is not enabled, this node is standalone — always healthy.
 	if !status.Enabled {
 		resp := map[string]any{"status": "ok", "role": "standalone", "leader": true, "write_authority": true, "version": version}
+		addLifecycleHealth(resp)
 		addRequestLogHealth(resp)
 		jsonOK(w, resp)
 		return
@@ -1727,6 +1728,7 @@ func apiHealthz(w http.ResponseWriter, r *http.Request) {
 			"version": version,
 		}
 		addLeaseHealth(resp, globalHA)
+		addLifecycleHealth(resp)
 		addRequestLogHealth(resp)
 		jsonOK(w, resp)
 		return
@@ -1739,6 +1741,7 @@ func apiHealthz(w http.ResponseWriter, r *http.Request) {
 		"version": version,
 	}
 	addLeaseHealth(standbyResp, globalHA)
+	addLifecycleHealth(standbyResp)
 	addRequestLogHealth(standbyResp)
 	resp, _ := json.Marshal(standbyResp)
 	_, _ = w.Write(resp)

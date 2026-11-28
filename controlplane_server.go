@@ -1546,13 +1546,23 @@ func haServingAllowed() (ok bool, reason string) {
 // standby by omission.
 func gatedUnary(method string, fn func(context.Context, json.RawMessage) (json.RawMessage, error)) func(any, context.Context, func(any) error, grpc.UnaryServerInterceptor) (any, error) {
 	inner := wrapUnary(fn)
-	if p, ok := cpRPCPolicies[method]; ok && !p.leaderGated {
-		return inner
-	}
+	p, classified := cpRPCPolicies[method]
+	leaderGated := !classified || p.leaderGated
 	if method == "HASync" {
 		return haSyncGatedUnary(fn)
 	}
 	return func(srv any, ctx context.Context, dec func(any) error, ic grpc.UnaryServerInterceptor) (any, error) {
+		// Lifecycle first, for EVERY method: a node that has not finished
+		// starting answers CULVERT_NODE_STARTING and nothing else, and a
+		// snapshot is served only with publication authorization
+		// (node_lifecycle.go). Nothing here infers readiness from the listener
+		// being bound.
+		if refusal := nodeServingRefusal(method); refusal != nil {
+			return nil, refusal
+		}
+		if !leaderGated {
+			return inner(srv, ctx, dec, ic)
+		}
 		if ok, reason := haServingAllowed(); !ok {
 			return nil, status.Errorf(codes.Unavailable, "%s refused: %s", method, reason)
 		}
@@ -1567,6 +1577,11 @@ func gatedUnary(method string, fn func(context.Context, json.RawMessage) (json.R
 // the poll that proves authority is itself answered.
 func haSyncGatedUnary(fn func(context.Context, json.RawMessage) (json.RawMessage, error)) func(any, context.Context, func(any) error, grpc.UnaryServerInterceptor) (any, error) {
 	return func(_ any, ctx context.Context, dec func(any) error, _ grpc.UnaryServerInterceptor) (any, error) {
+		// Lifecycle first, as for every method (gatedUnary): a starting node
+		// answers CULVERT_NODE_STARTING and nothing else.
+		if refusal := nodeServingRefusal("HASync"); refusal != nil {
+			return nil, refusal
+		}
 		var raw json.RawMessage
 		if err := dec(&raw); err != nil {
 			return nil, err

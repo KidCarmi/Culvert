@@ -97,6 +97,16 @@ jobs:
           set -o pipefail
           go test -tags proxybinload -run 'TestBinaryLoad_' -v -timeout 10m . 2>&1 | tee binary-load.log
 
+      # The start-up order on the real binary, per cluster role: a control
+      # plane serves only loaded configuration, a data plane keeps the control
+      # plane's state across a restart (startup_sequence_binary_test.go).
+      - name: Real-binary start-up sequence
+        env:
+          CULVERT_BIN: ${{ github.workspace }}/culvert
+        run: |
+          set -o pipefail
+          go test -tags proxybinload -run 'TestBinaryStartup_' -v -timeout 10m . 2>&1 | tee binary-startup.log
+
       - name: Step summary
         if: always()
         run: |

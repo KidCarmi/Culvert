@@ -120,8 +120,8 @@ reconciled. Operator edits: refused during a hold. Old leader gone for good: ope
 
 ## Implementation record (2026-11-28)
 
-**Implemented.** Part C as designed (`ha_legacy_authority.go`, `ha_write_gate.go`, contract `CLU-005`).
-Part D: the gate (`ha_publish_gate.go`, contract `CLU-006`) with these refinements over the note above:
+**Implemented.** Part C as designed (`ha_legacy_authority.go`, `ha_write_gate.go`, contract `CLU-008`).
+Part D: the gate (`ha_publish_gate.go`, contract `CLU-009`) with these refinements over the note above:
 
 - The unaccounted range is a list of **gaps**, one per promotion, `(watermark, first own version)`. The
   first own version is recorded by the store at the promotion's first commit, not read afterwards, so a

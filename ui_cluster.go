@@ -33,6 +33,9 @@ func apiClusterStatus(w http.ResponseWriter, r *http.Request) {
 		"caFingerprint":          globalClusterCA.CACertFingerprint(),
 		"ha":                     globalHA.Status(),
 		"grpcCompressionEnabled": clusterGRPCCompression,
+		// The start-up lifecycle, with leadership and publication authority
+		// reported as the separate answers they are (node_lifecycle.go).
+		"lifecycle": currentNodeLifecycleStatus(),
 	}
 	if view.role == "control-plane" {
 		result["nodes"] = NodeMetricsList()

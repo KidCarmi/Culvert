@@ -373,12 +373,13 @@ func TestChaos79_SyncPlaneComponentsAreDistinct(t *testing.T) {
 // applySnapshotExtendedState guards the bandwidth and node-group applies on
 // BOTH a non-nil field (the presence contract: an older CP omitting a slice
 // must not clear local state) and a non-nil store. The second condition is a
-// startup-order fact, not a presence one: initCluster → startDataPlane →
-// applyDPLastGoodConfigSnapshot replays a snapshot synchronously BEFORE
-// initPersistentAdminState constructs either store, so on every Data Plane boot
-// the replay drops both slices while the surrounding apply records a complete,
-// version-advancing success. These gates pin the reporting; the ordering fix
-// itself is tracked separately (see the review).
+// startup-order fact, not a presence one: the last-good replay used to run
+// (initCluster → startDataPlane → applyDPLastGoodConfigSnapshot) BEFORE
+// initPersistentAdminState constructed either store, so on every Data Plane
+// boot the replay dropped both slices while the surrounding apply recorded a
+// complete, version-advancing success. The order is fixed — the replay now
+// runs from activateClusterRoles, after the stores (startup_sequence_order_test.go)
+// — and these gates keep pinning the reporting, which remains the backstop.
 
 // TestChaos80_DroppedBandwidthSliceIsReported requires a CP-authoritative slice
 // dropped for a startup-order reason to be reported with its slice and config

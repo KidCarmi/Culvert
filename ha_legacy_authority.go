@@ -38,7 +38,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"strings"
 	"sync"
 	"time"
 
@@ -260,22 +259,6 @@ func haAuthorityStatus() (state, reason string) {
 	return "", ""
 }
 
-// haLeadershipHeld reports whether this node holds HA leadership for
-// leadership-dependent operations: the leader role, and in lease mode the
-// fence. A standalone (HA off) control plane holds it trivially. It is one of
-// the two predicates the node-lifecycle surface reads (ADR-0064); the other is
-// haPublishAuthorized.
-func haLeadershipHeld() bool {
-	if _, gated := globalHA.intentGate(); gated {
-		return false
-	}
-	st := globalHA.Status()
-	if !st.Enabled {
-		return true
-	}
-	return st.Role == "leader" && globalHA.WriteAllowed()
-}
-
 // haLeaderAnswer classifies what a sync round proved about the leader.
 type haLeaderAnswer int
 
@@ -286,14 +269,11 @@ const (
 	haAnsweredHolding                        // "publication not authorized" — a live leader deliberately holding
 )
 
-// The refusal tokens a Control Plane listener puts in its gRPC status (code
-// Unavailable). They are the interface agreed with the early-listener work,
-// which owns the listener and emits them; this file owns how a standby counts
-// them. Once that branch is underneath this one, its isCPStartingStatus /
-// isCPPublishNotAuthorizedStatus helpers replace the two functions below.
+// The refusal tokens are owned by the node lifecycle (node_lifecycle.go), which
+// emits them; this file owns how a standby counts them.
 const (
-	haNodeStartingMarker       = "CULVERT_NODE_STARTING"
-	haPublishNotAuthorizedMark = "CULVERT_PUBLISH_NOT_AUTHORIZED"
+	haNodeStartingMarker       = cpStartingStatusMarker
+	haPublishNotAuthorizedMark = cpPublishRefusedMarker
 )
 
 // haStartingGrace bounds how long an unbroken run of "starting" answers is
@@ -304,14 +284,9 @@ const (
 // revalidates its authority and joins the promoted peer (part C).
 const haStartingGrace = haPromoteFreshnessWindow / 2
 
-func haUnavailableWith(err error, token string) bool {
-	st, ok := status.FromError(err)
-	return ok && st.Code() == codes.Unavailable && strings.Contains(st.Message(), token)
-}
-
 // haLeaderStartingError reports whether err is a leader's "starting, not
 // ready" refusal.
-func haLeaderStartingError(err error) bool { return haUnavailableWith(err, haNodeStartingMarker) }
+func haLeaderStartingError(err error) bool { return isCPStartingStatus(err) }
 
 // haLeaderAnswerOf classifies a FAILED HASync. PermissionDenied counts as a
 // reply: only a serving leader evaluates the HA token. A standby's own refusal
@@ -321,7 +296,7 @@ func haLeaderAnswerOf(err error) haLeaderAnswer {
 	switch {
 	case haLeaderStartingError(err):
 		return haAnsweredStarting
-	case haUnavailableWith(err, haPublishNotAuthorizedMark):
+	case isCPPublishNotAuthorizedStatus(err):
 		return haAnsweredHolding
 	case status.Code(err) == codes.PermissionDenied:
 		return haAnsweredReply

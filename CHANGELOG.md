@@ -89,7 +89,7 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   every hold needs that release; a promoted node whose clock is behind the old
   leader's version counter cannot detect the condition; and a data plane build
   that reports no version gets `Unavailable` during a hold. (ADR-0064;
-  contract `CLU-006`.)
+  contract `CLU-009`.)
 
 - **A restarted HA leader without a fencing lease no longer resumes leadership
   on its saved role alone.** If the standby had promoted while the leader was
@@ -108,8 +108,76 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   operator action: promote it (HA panel or `POST /api/cluster/ha/promote`),
   which is audited with a warning. Lease mode is unchanged. Remaining limit: a
   standby whose polls reach the leader while every reply is lost can still
-  promote (only a fencing lease closes that). (ADR-0064; contract `CLU-005`.)
+  promote (only a fencing lease closes that). (ADR-0064; contract `CLU-008`.)
 
+- **A restarting control plane no longer hands data planes an empty
+  configuration, and a restarting data plane no longer loses the control
+  plane's state.** Cluster start-up ran before the node's configuration stores
+  had loaded. A control plane therefore made its first publish — and, once its
+  listener was bound, served it — from empty stores: data planes and standbys
+  received a snapshot with an **empty blocklist, no policy rules and the
+  default action `deny`**, and kept it until the next administrative change
+  published again. A data plane replayed its last-good snapshot before its own
+  policy file loaded and before the boot default-action derivation, so after a
+  restart the policy file won over a newer last-good snapshot and the default
+  action was re-derived from the rule count instead of being the control
+  plane's (a fleet set to `allow` with rules came back `deny`). Start-up is now
+  one ordered sequence in four phases — identity, configuration stores, role
+  activation, traffic gates and listeners:
+  - Cluster identity stays early: node identity, the cluster DB, the cluster
+    CA and the HA fencing lease are loaded and armed where they were.
+  - A control plane publishes, binds its listener and resumes HA leadership
+    (in that order, unchanged) only after every store has loaded; a standby
+    joins its leader at the same point. **The control-plane gRPC listener
+    therefore binds later in the boot** than before, by the time the stores
+    take to load. Until then data planes get connection refused, keep their
+    last-good configuration and back off (or fail over); the first thing they
+    are then served is the loaded configuration.
+  - A data plane replays its last-good snapshot after its stores have loaded
+    and **before any listener that enforces policy opens**: the SOCKS5
+    listener's pre-posture gate is now released after the replay, followed by
+    the admin UI and the proxy listener. After a restart its rules and default
+    action are the last-good snapshot's, and its policy file is rewritten to
+    match. Bandwidth policies and node groups in the last-good snapshot are no
+    longer skipped at boot. A data plane whose cluster certificate, key or CA
+    cannot be loaded still stops before any of this, as it did.
+  - **On a data plane, node-local admission settings no longer win over the
+    control plane at boot.** The default action, IP-filter mode and list, and
+    rate limit saved in the node's own admin settings used to be applied
+    after the last-good replay, so a local override survived a restart until
+    the control plane next published a new configuration version. The
+    snapshot is now applied last, which is what a live sync has always done.
+    The security settings page still accepts such edits on a managed data
+    plane; they take effect until the next sync or restart and are then
+    overwritten (unchanged; refusing or labelling those edits on a managed
+    data plane is a follow-up). The same holds for the other slices a
+    snapshot carries — blocklist feed, categories, SSL bypass.
+  - A last-good snapshot that is absent, unreadable or refused is not
+    replayed: the node keeps its file-loaded state until it next syncs. A
+    last-good file whose last write failed is older than the node's local
+    files and is replayed over them; the next successful sync corrects it.
+  - **A starting control plane answers instead of being unreachable.** It
+    binds its cluster port right after its identity and cluster CA are
+    established — about 0.1 s after process start, whatever the size of its
+    stores — and answers every request `CULVERT_NODE_STARTING` (gRPC
+    `Unavailable`, carrying the start-up phase and elapsed seconds) until its
+    stores have loaded and its role is active. That early listener is a
+    separate, minimal server: it cannot serve a configuration, enrol a node,
+    publish or lead. Data planes treat the answer as they treat any
+    unavailable control plane (keep last-good, back off). A node's start-up
+    phase, readiness, leadership and publication authority are now reported
+    separately on `/health` (`startup`), `/ready` (a gating `startup` row),
+    `/healthz` and `/api/cluster/status`.
+  - **High availability, upgrade order:** on its own this does not stop a
+    standby from failing over when its leader restarts slowly — a standby on
+    this or an earlier release still counts the starting answer as a failed
+    round, exactly as it counted a closed port. The standby-side change that
+    treats it as "leader alive" ships separately; when it does, upgrade the
+    standby before the leader. In lease mode a starting node holds no lease,
+    so a leader whose store load outlasts the lease TTL comes back as a
+    standby (safe; leadership moves). With a two-million-host blocklist the
+    measured time to ready is about four seconds.
+  No data migration is needed; existing data directories start as they are.
 - **A legacy HA standby no longer promotes itself against a leader that is
   still answering.** With `--ha-auto-failover` and no etcd lease, every sync
   round that did not apply counted toward the three-round "leader unreachable"

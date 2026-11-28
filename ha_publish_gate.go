@@ -335,26 +335,6 @@ func publishHoldReasonLocked() string {
 		len(st.Evidence), maxV, st.Watermark, st.FirstOwn)
 }
 
-// haPublishAuthorized is the ONE publishing-authorization predicate (ADR-0064):
-// leadership is haLeadershipHeld; this is whether a leader may distribute new
-// content and accept configuration changes. The state-authority contract's declared-emptying check
-// is to be consulted here as well, not in a second gate.
-func haPublishAuthorized() (ok bool, reason string) {
-	if reason, refused := haDistributionRefused(); refused {
-		return false, reason
-	}
-	if !publishGateApplies() {
-		return true, ""
-	}
-	publishGate.mu.Lock()
-	defer publishGate.mu.Unlock()
-	loadPublishGateLocked()
-	if publishGate.st.Armed && publishGate.st.Held {
-		return false, publishGate.st.HoldReason
-	}
-	return true, ""
-}
-
 // publishGateSnapshot returns a copy of the gate for status and tests.
 func publishGateSnapshot() publishGateState {
 	publishGate.mu.Lock()
@@ -591,31 +571,11 @@ var haPreviousLeaderReachable = func() bool {
 	return true
 }
 
-// haDistributionRefused reports whether this node must hand out NO
-// configuration at all — to data planes or to a standby. That is narrower than
-// "not publish-authorized": during a publication hold the gate answers each
-// data plane itself (consistent ones are served, ahead ones keep their state)
-// and HASync stays served. Here the node has no authority to distribute
-// anything: it holds the leader ROLE without the fencing lease (a resume the
-// lease denied, with no standby to join — the ADR-0005 S2 stance). The lease
-// is the authority, so a node without it is a stale leader as far as anyone
-// else can tell, and its configuration must not reach the fleet. Data planes
-// keep their last-good configuration, as on any failed poll.
-//
-// The listener's blanket CULVERT_PUBLISH_NOT_AUTHORIZED refusal keys on THIS
-// predicate, not on haPublishAuthorized.
-func haDistributionRefused() (reason string, refused bool) {
-	if globalHA.unfencedLeader() {
-		return "this node holds the HA leader role without the fencing lease, so it is not authorized to distribute configuration", true
-	}
-	return "", false
-}
-
 // refuseDistributionIfUnauthorized is the check GetConfig, GetConfigDelta and
 // HASync make before serving.
 func refuseDistributionIfUnauthorized(method string) error {
 	if reason, refused := haDistributionRefused(); refused {
-		return status.Errorf(codes.Unavailable, "%s: %s; %s is not served", haPublishNotAuthorizedMark, reason, method)
+		return cpPublishNotAuthorizedStatus(method, reason)
 	}
 	return nil
 }

@@ -24,8 +24,11 @@ if err := enableControlPlane(...); err != nil {
 }
 ```
 
-called from `initCluster`, which `main.go` runs **before** `initSOCKS5`,
-`startAdminUI` and `buildAndStartProxyServer`. So any failure of the cluster
+called from `initCluster`, which `main.go` ran **before** `initSOCKS5`,
+`startAdminUI` and `buildAndStartProxyServer`. (The listener is now started
+by `activateClusterRoles`, after every configuration store has loaded — see
+"When the listener binds during start-up" below — but still before the admin
+UI and the proxy listener, so the reasoning here is unchanged.) So any failure of the cluster
 plane's listener meant the proxy, SOCKS5, the admin UI and `/health` never
 started at all.
 
@@ -407,3 +410,37 @@ simply not be bound.
 * **The Data Plane's own boot fatals** (`dp_enrollment.go`). The same class one
   plane over, and a different posture decision: *may a node that cannot reach
   its Control Plane serve traffic at all?* Recorded as register row **CL-23**.
+
+## When the listener binds during start-up
+
+The control-plane listener is bound by the **role activation** step of start-up
+(`main.go` `runStartupSequence` → `activateClusterRoles`), which runs only after
+every configuration store — policy, blocklist, categories, rewrite, admin
+settings — has loaded. Inside the activation the order is unchanged: first
+publish, then bind, then HA leadership resume.
+
+What this means in operation:
+
+- The **serving** listener comes up later in the boot than it used to, by
+  however long the stores take to load (typically well under a second; about
+  four seconds with a two-million-host blocklist). The port itself is not
+  closed meanwhile: an **early listener** is bound right after the node's
+  identity and cluster CA are established and answers every request
+  `CULVERT_NODE_STARTING` (gRPC `Unavailable`, with the start-up phase and the
+  seconds since process start). It can do nothing else — it has no handler
+  that serves a configuration, enrols a node, publishes or leads. Data planes
+  keep their last-good configuration and back off, as for any unavailable
+  control plane. Just before the serving listener binds, the early one is
+  stopped; a peer that connects in that instant sees one connection error.
+- The **first thing a poller is served is the loaded configuration**. A
+  restarting control plane used to publish before its stores loaded, so data
+  planes received a snapshot with an empty blocklist, no rules and the default
+  action `deny` until the next administrative change published again.
+- Identity is still established first: the cluster DB, the cluster CA and the
+  HA fencing lease are loaded/armed at the same early point as before, so the
+  start-up cluster-CA rotation check and a lease that cannot be built (fatal)
+  behave exactly as they did.
+
+On a data plane the same step replays the last-good snapshot, after the node's
+own stores have loaded and before any listener that enforces policy opens (the
+SOCKS5 pre-posture gate, the admin UI, the proxy listener).
