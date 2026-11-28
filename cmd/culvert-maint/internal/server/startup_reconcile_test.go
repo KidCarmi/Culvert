@@ -74,6 +74,9 @@ type reconWorld struct {
 	// 1..priorEpochMax (slice 6a); priorEpochMax 0 means 1.
 	priorEpochLabels bool
 	priorEpochMax    int
+	// targetEpochLabels: cfgNew carries labels 1..1 too (a recovery whose
+	// restore image is cfgNew).
+	targetEpochLabels bool
 	// dataEpoch: what `cli --print-data-epoch` reports (0: the command fails,
 	// as on an image that predates it or an install without its sudoers line).
 	dataEpoch  int
@@ -132,7 +135,7 @@ func (w *reconWorld) answerImageInspect(cmd *exec.Cmd, ref string) {
 		return
 	}
 	labels := `null`
-	if w.priorEpochLabels && id == cfgOld {
+	if (w.priorEpochLabels && id == cfgOld) || (w.targetEpochLabels && id == cfgNew) {
 		hi := w.priorEpochMax
 		if hi == 0 {
 			hi = 1

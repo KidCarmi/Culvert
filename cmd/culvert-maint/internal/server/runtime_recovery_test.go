@@ -182,8 +182,8 @@ func TestRuntimeRecovery_RefusesWithoutEveryCondition(t *testing.T) {
 			r.world.down = true
 		}, reason: rrDockerUnreadable},
 		"cap reached": {mod: func(t *testing.T, r *recoveryRig) {
-			if err := r.st.WriteRecoverAttempts(runtimehealth.RecoverAttempts{SourceOpID: "01JINSTALLEDOP000000000000",
-				ImageID: "sha256:" + cfgNew, Begun: runtimehealth.MaxRecoverAttempts}); err != nil {
+			if err := r.st.WriteRecoverAttempts(runtimehealth.RecoverAttempts{Entries: []runtimehealth.RecoverAttempt{{
+				SourceOpID: "01JINSTALLEDOP000000000000", ImageID: "sha256:" + cfgNew, Begun: runtimehealth.MaxRecoverAttempts}}}); err != nil {
 				t.Fatal(err)
 			}
 		}, reason: rrAttemptsExhausted},
@@ -422,5 +422,42 @@ func TestRuntimeRecovery_WorkerRunsATriggerAndStops(t *testing.T) {
 	off.opts.Cfg.RuntimeRecovery = config.RecoveryOff
 	if off.srv.runtimeRecoveryEnabled() {
 		t.Fatal("enabled with runtime_recovery off")
+	}
+}
+
+// Codex review on #2140: two sources that each authorize the other direction
+// (installed.json: B replaced A; a kept upgrade record: A replaced B) with both
+// images unhealthy. Each recovery changes the running image, so the trigger
+// fires the other way. The cap must hold for every source still in force, or
+// the agent alternates the images forever.
+func TestRuntimeRecovery_NoPingPongBetweenTwoSources(t *testing.T) {
+	r := newRecoveryRig(t)
+	r.ready.Store(false) // neither image answers ready
+	r.world.targetEpochLabels = true
+	if err := r.st.NoteGated(runtimehealth.GatedEntry{ImageID: "sha256:" + cfgNew, Ref: repo + "@sha256:" + digNew,
+		Digest: "sha256:" + digNew, GatedAt: time.Now().UTC()}); err != nil {
+		t.Fatal(err)
+	}
+	r.seed(t, journal.PhaseRestarted, func(rec *journal.Record) { // a failed upgrade B -> A, kept
+		rec.TargetRef, rec.TargetDigest, rec.TargetImageID = repo+"@sha256:"+digOld, digOld, "sha256:"+cfgOld
+		rec.PriorRef, rec.PriorDigest, rec.PriorImageID = repo+"@sha256:"+digNew, digNew, "sha256:"+cfgNew
+	})
+	begun := 0
+	for i := 0; i < 10; i++ {
+		trig := runtimeTrigger{containerID: rtContainerID, imageID: "sha256:" + r.world.running}
+		att := r.srv.runtimeRecoverOnce(trig)
+		if att.Outcome == RecoveryRefused {
+			if att.Reason != rrAttemptsExhausted {
+				t.Fatalf("trigger %d refused for %s", i, att.Reason)
+			}
+			break
+		}
+		begun++
+	}
+	if limit := 2 * runtimehealth.MaxRecoverAttempts; begun > limit {
+		t.Fatalf("%d recoveries begun across two sources, want at most %d", begun, limit)
+	}
+	if begun == 0 {
+		t.Fatal("vacuous: no recovery was begun")
 	}
 }

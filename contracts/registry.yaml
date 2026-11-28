@@ -821,7 +821,7 @@ contracts:
     area: agent-lifecycle
     status: open
     owner_approved: false
-    invariant: "With runtime_recovery = \"restore_last_gated\" (default off; accepted only with runtime_health_interval on), the agent changes Docker at runtime only as a runtime.recover operation holding the maintenance lock, begun after 3 consecutive kept not_ready samples of one proxy container and image X, and only when, read fresh under the lock: the settle window is over; that container runs with the fixed tag on X; X is the image installed.json names or the target of a kept upgrade record of this agent; the image R that change replaced is in gated.json, its gated reference passes the repo-bound exact-digest gate and the image allowlist, and it is local as R; R's data-epoch labels admit the data's epoch; and fewer than 2 recoveries were begun for X from that source. It counts the attempt and writes the armed runtime.recover record (prior R, target X) before anything moves, both fail-closed, then runs the startup reconcile's armed-rollback plan (AGT-900). Anything else is reported and changes nothing."
+    invariant: "With runtime_recovery = \"restore_last_gated\" (default off; accepted only with runtime_health_interval on), the agent changes Docker at runtime only as a runtime.recover operation holding the maintenance lock, begun after 3 consecutive kept not_ready samples of one proxy container and image X, and only when, read fresh under the lock: the settle window is over; that container runs with the fixed tag on X; X is the image installed.json names or the target of a kept upgrade record of this agent; the image R that change replaced is in gated.json, its gated reference passes the repo-bound exact-digest gate and the image allowlist, and it is local as R; R's data-epoch labels admit the data's epoch; and fewer than 2 recoveries were begun for X from that source, counted per (source, image) for every source still in force (installed.json's or a record still in the journal), so two sources authorizing opposite directions cannot alternate past the cap. It counts the attempt and writes the armed runtime.recover record (prior R, target X) before anything moves, both fail-closed, then runs the startup reconcile's armed-rollback plan (AGT-900). Anything else is reported and changes nothing."
     authority: "Maintenance agent (cmd/culvert-maint, separate module). Design: docs/adr/0062-maintenance-agent-durable-lifecycle-execution.md slice 6 (PR 3); owner decision 2026-11-28 (runtime recovery acts only on images this agent installed). Open until the real-Docker qualification (slice 6, PR 4)."
     question: "OPEN until verified on a real Docker daemon (slice 6, PR 4): does the runtime recovery restore the replaced image, refuse every unproven case, and survive a kill at each step, against real Docker in all four cells? If it does, is 3 consecutive not_ready samples the trigger the owner wants?"
     code:
@@ -841,6 +841,7 @@ contracts:
         - "restoring an image not in gated.json, without a repo-bound allow-listed reference, not local as that image, or not proven compatible with the data"
         - "acting while the settle window is open or another operation holds the lock, or when the fixed tag is not on the running image"
         - "moving anything before the attempt is counted and the armed record written, or beyond 2 recoveries begun for one install"
+        - "forgetting the count of a source still in force when another is counted, or trimming the counter instead of refusing at its bound"
         - "retiring any record but its own"
     tests:
       - {file: "cmd/culvert-maint/internal/server/runtime_recovery_test.go", name: TestRuntimeRecovery_RestoresTheReplacedImage}
@@ -848,6 +849,8 @@ contracts:
       - {file: "cmd/culvert-maint/internal/server/runtime_recovery_test.go", name: TestRuntimeRecovery_AdmissionRepeatedUnderTheLock}
       - {file: "cmd/culvert-maint/internal/server/runtime_recovery_test.go", name: TestRuntimeRecovery_TheCapIsDurable}
       - {file: "cmd/culvert-maint/internal/server/runtime_recovery_test.go", name: TestRuntimeRecovery_FromAKeptUpgradeRecord}
+      - {file: "cmd/culvert-maint/internal/server/runtime_recovery_test.go", name: TestRuntimeRecovery_NoPingPongBetweenTwoSources}
+      - {file: "cmd/culvert-maint/internal/runtimehealth/recover_attempts_test.go", name: TestRecoverAttempts_KeepsEverySourceInForce}
       - {file: "cmd/culvert-maint/internal/server/runtime_recovery_test.go", name: TestRuntimeRecovery_TriggerCountsConsecutiveNotReady}
       - {file: "cmd/culvert-maint/internal/server/runtime_recovery_test.go", name: TestRuntimeRecovery_ObserverTicksTrigger}
       - {file: "cmd/culvert-maint/internal/server/runtime_recovery_test.go", name: TestRuntimeRecovery_WorkerRunsATriggerAndStops}

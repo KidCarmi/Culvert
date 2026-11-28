@@ -196,6 +196,7 @@ type runtimeAdmission struct {
 	x, xRef, xDigest string
 	r                runtimehealth.GatedEntry
 	begun            int
+	attempts         *runtimehealth.RecoverAttempts // as read by admission
 }
 
 // runtimeRecoverOnce evaluates one trigger and, when admitted, recovers.
@@ -228,8 +229,11 @@ func (s *Server) recoverUnderLock(ctx context.Context, opID string, trig runtime
 		return att
 	}
 	att.RestoreImageID = adm.r.ImageID
-	if err := s.opts.RuntimeHealth.WriteRecoverAttempts(runtimehealth.RecoverAttempts{
-		SourceOpID: adm.sourceOpID, ImageID: adm.x, Begun: adm.begun + 1}); err != nil {
+	counted, err := adm.attempts.Counted(adm.sourceOpID, adm.x, adm.begun+1, s.recoverySourceInForce)
+	if err == nil {
+		err = s.opts.RuntimeHealth.WriteRecoverAttempts(counted)
+	}
+	if err != nil {
 		att.Outcome, att.Reason = RecoveryRefused, "attempts_unwritable"
 		return att
 	}

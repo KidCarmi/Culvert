@@ -62,10 +62,23 @@ func (s *Server) admitRuntimeRecovery(ctx context.Context, trig runtimeTrigger, 
 	if err != nil {
 		return nil, rrAttemptsUnread
 	}
+	adm.attempts = a
 	if adm.begun = a.For(adm.sourceOpID, adm.x); adm.begun >= runtimehealth.MaxRecoverAttempts {
 		return nil, rrAttemptsExhausted
 	}
 	return adm, ""
+}
+
+// recoverySourceInForce reports whether sourceOpID can still authorize a
+// recovery: it is the install installed.json names or a record still in the
+// journal. Anything that cannot be read counts as in force, so a count is
+// kept rather than forgotten.
+func (s *Server) recoverySourceInForce(sourceOpID string) bool {
+	if in, err := s.opts.RuntimeHealth.ReadInstalled(); err != nil || (in != nil && in.OpID == sourceOpID) {
+		return true
+	}
+	_, found, err := s.opts.Journal.Read(sourceOpID)
+	return err != nil || found
 }
 
 // admitIdentity: the proxy container the samples were of runs, and the fixed

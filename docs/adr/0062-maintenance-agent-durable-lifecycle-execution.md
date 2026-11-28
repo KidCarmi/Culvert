@@ -494,9 +494,14 @@ gaps and make the #2051 executor the single path every recovery takes.
      once without the lock, so a steady refusal costs no operation and no
      audit entry, then begins `runtime.recover` and checks it again under
      the lock. The attempt counter is
-     `<state_dir>/health/recover_attempts.json`, keyed by (source op, X) and
-     written before the record, so the cap of 2 outlives a retired record
-     and a new install of the same image starts from zero. R's reference is
+     `<state_dir>/health/recover_attempts.json`, one count per (source op, X)
+     for every source still in force (installed.json's, or a record still in
+     the journal), written before the record: the cap of 2 outlives a
+     retired record, a new install of the same image starts from zero, and
+     two sources that authorize opposite directions (B replaced A; a kept
+     record of A replacing B) cannot alternate the images past it. A single
+     slot let them alternate forever (Codex review on #2140, reproduced by
+     `TestRuntimeRecovery_NoPingPongBetweenTwoSources`). R's reference is
      its `gated.json` entry's, validated again (repo-bound exact digest,
      allowlist) and required local as R. The plan is the startup reconcile's
      `act`: the decision on fresh facts must be `finish_rollback_retag`.
