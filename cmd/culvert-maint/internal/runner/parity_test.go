@@ -78,6 +78,7 @@ func TestParity_D16bRegistryShape(t *testing.T) {
 		TemplateComposeCLIBackupEncrypted:   {},
 		TemplateComposeCLIBackupUnencrypted: {},
 		TemplateComposeCLIBackupList:        {},
+		TemplateComposeCLIDataEpoch:         {}, // ADR-0062 slice 6a: read-only, fixed argv
 		TemplateComposeCLIRestoreDryRun:     {},
 		TemplateComposeCLIRestoreCommit:     {},
 		TemplateComposeDown:                 {},

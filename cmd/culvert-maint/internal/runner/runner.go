@@ -67,6 +67,10 @@ const (
 	// TemplateComposeCLIBackupList runs `cli --list-backups` and
 	// emits a JSON array on stdout. Read-only.
 	TemplateComposeCLIBackupList TemplateID = "compose.cli.backup.list"
+	// TemplateComposeCLIDataEpoch runs `cli --print-data-epoch`: the proxy
+	// image, on the data volume, prints the data directory's epoch and its
+	// own readable range (ADR-0062 slice 6a). Read-only, fixed argv.
+	TemplateComposeCLIDataEpoch TemplateID = "compose.cli.data_epoch"
 	// TemplateComposeCLIRestoreDryRun validates a backup and prints
 	// the restore plan without mutating state. Read-only; no --confirm.
 	TemplateComposeCLIRestoreDryRun TemplateID = "compose.cli.restore.dryrun"
