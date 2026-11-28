@@ -48,6 +48,65 @@ type agentStatusDoc struct {
 	// slice 5). Absent when the agent's runtime_health_interval is off or the
 	// agent predates it.
 	RuntimeHealth *agentRuntimeHealth `json:"runtime_health,omitempty"`
+	// RuntimeRecovery is the agent's runtime recovery state (ADR-0062 slice
+	// 6). Absent when the agent's runtime_recovery is off or the agent
+	// predates it.
+	RuntimeRecovery *agentRuntimeRecovery `json:"runtime_recovery,omitempty"`
+}
+
+// agentRuntimeRecovery is the agent's runtime recovery as surfaced to an
+// admin: its policy, how close the trigger is, whether a recovery is running,
+// and the last attempt. Image ids only, never a container id.
+type agentRuntimeRecovery struct {
+	Policy         string                `json:"policy"`
+	Threshold      int                   `json:"threshold"`
+	NotReadyStreak int                   `json:"not_ready_streak"`
+	Running        bool                  `json:"running"`
+	Last           *agentRecoveryAttempt `json:"last,omitempty"`
+}
+
+type agentRecoveryAttempt struct {
+	At             time.Time `json:"at"`
+	OpID           string    `json:"op_id,omitempty"`
+	Outcome        string    `json:"outcome"`
+	Reason         string    `json:"reason"`
+	ImageID        string    `json:"image_id,omitempty"`
+	RestoreImageID string    `json:"restore_image_id,omitempty"`
+}
+
+// The closed sets the agent reports for runtime_recovery. Anything else is
+// surfaced as unknown, as for runtime_health's state.
+var (
+	agentRecoveryPolicies = map[string]bool{"off": true, "restore_last_gated": true}
+	agentRecoveryOutcomes = map[string]bool{"refused": true, "recovered": true, "failed": true}
+)
+
+func closedOrUnknown(set map[string]bool, v string) string {
+	if set[v] {
+		return v
+	}
+	return "unknown"
+}
+
+// runtimeRecoveryPayload shapes runtime_recovery for the admin API.
+func runtimeRecoveryPayload(rr *agentRuntimeRecovery) map[string]any {
+	out := map[string]any{
+		"policy":           closedOrUnknown(agentRecoveryPolicies, rr.Policy),
+		"threshold":        rr.Threshold,
+		"not_ready_streak": rr.NotReadyStreak,
+		"running":          rr.Running,
+	}
+	if l := rr.Last; l != nil {
+		last := map[string]any{"at": l.At.UTC(), "outcome": closedOrUnknown(agentRecoveryOutcomes, l.Outcome),
+			"reason": boundAgentField(l.Reason)}
+		for k, v := range map[string]string{"op_id": l.OpID, "image_id": l.ImageID, "restore_image_id": l.RestoreImageID} {
+			if v != "" {
+				last[k] = boundAgentField(v)
+			}
+		}
+		out["last"] = last
+	}
+	return out
 }
 
 // agentRuntimeHealth is the part of the agent's runtime_health surfaced to an
@@ -227,6 +286,9 @@ func buildMaintAgentStatusPayload(ctx context.Context) map[string]any {
 	}
 	if doc.RuntimeHealth != nil {
 		out["runtime_health"] = runtimeHealthPayload(doc.RuntimeHealth)
+	}
+	if doc.RuntimeRecovery != nil {
+		out["runtime_recovery"] = runtimeRecoveryPayload(doc.RuntimeRecovery)
 	}
 	return out
 }
