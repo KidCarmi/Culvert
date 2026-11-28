@@ -40,7 +40,7 @@ func TestIsStateChanging_ProductionAndFutureKinds(t *testing.T) {
 
 	// State-changing production kinds (D1.6b + D1.6c upgrade apply +
 	// image rollback).
-	for _, k := range []string{KindBackupCreate, KindRestoreCommit, KindCleanupCommit, KindUpgradeApply, KindRollbackCreate, KindReconcileStartup} {
+	for _, k := range []string{KindBackupCreate, KindRestoreCommit, KindCleanupCommit, KindUpgradeApply, KindRollbackCreate, KindReconcileStartup, KindRuntimeRecover} {
 		if !IsStateChanging(k) {
 			t.Errorf("production kind %q must be state-changing", k)
 		}

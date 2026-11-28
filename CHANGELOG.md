@@ -129,6 +129,64 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
     standby (safe; leadership moves). With a two-million-host blocklist the
     measured time to ready is about four seconds.
   No data migration is needed; existing data directories start as they are.
+- **A legacy HA standby no longer promotes itself against a leader that is
+  still answering.** With `--ha-auto-failover` and no etcd lease, every sync
+  round that did not apply counted toward the three-round "leader unreachable"
+  threshold — including a round in which the leader answered and the standby
+  refused its bundle (for example a ruleset this build cannot enforce). A
+  standby that had synced seconds earlier therefore promoted about 15 seconds
+  after such a ruleset was saved, while the leader kept serving: two leaders,
+  both publishing. A round the leader answered is now never counted and
+  restarts the streak. **Operator-visible effect:** the standby stays a
+  standby; it logs `HA: the leader … answered but its state bundle was NOT
+  applied`, fires the `ha_sync_panic` ("HA standby sync fault") alert once,
+  reports `sync_refused` on `GET /api/cluster/ha` and the HA panel, and the
+  cluster diagnosis turns unhealthy. Replication stays stalled until the
+  refusal is fixed. Lease mode is unchanged. Limit: a leader that answers with
+  an RPC error (for example a rejected HA token) is still treated as
+  unreachable.
+- **A demoted HA leader no longer re-promotes itself on state it synced before
+  it led (lease mode).** A node that synced as a standby, was promoted, then
+  lost the fencing lease and re-entered standby against the new leader kept
+  its old "last successful sync" time. If the new leader died before the node
+  had synced from it — after the 30-second re-promotion cooldown and within 10
+  minutes of that old sync — the node promoted itself again and published its
+  pre-demotion state, without the changes the new leader had accepted.
+  Entering standby now clears the record. **Operator-visible effect (a
+  lease-mode behaviour change in this one case):** such a node shows
+  `auto_promote_blocked` until its first successful sync from the new leader,
+  and if that leader is lost first, failover needs a manual promotion.
+- **Automatic HA failover without a fencing lease no longer promotes a standby
+  that has not synced the leader's configuration.** With `--ha-auto-failover`
+  and no etcd lease, a standby promoted itself after three failed sync rounds
+  whatever it held. A standby that had never completed a sync, or whose every
+  sync had been refused, became leader on its own empty state and published it
+  to every data plane as the current configuration: no policy rules, an empty
+  blocklist. The lease-based path already refused this; both paths now decide
+  through one check — the standby must have applied a bundle from the leader
+  within the last 10 minutes. **Operator-visible effect:** a legacy pair whose
+  standby has not synced (never, not within 10 minutes, or not since the
+  standby's last restart — the record is kept in memory only) does **not** fail
+  over by itself. The standby stays read-only and keeps retrying. It serves no
+  configuration (a standby that was never promoted runs no Control Plane
+  listener, so data-plane polls to it fail to connect), and data planes keep
+  enforcing the configuration they last applied; the log says `HA:
+  auto-promotion refused — …`, the `ha_manual_failover_required` alert fires
+  once, and `GET /api/cluster/ha` and the HA panel show `auto_promote_blocked`
+  with the reason (shown as soon as the standby is not failover-ready, before
+  any outage, in both modes). To recover, restore the leader, or promote the
+  standby manually if the leader is gone and you accept serving the standby's
+  state. Manual promotion is unchanged and still never refused; when the
+  standby is unsynchronized its response now carries a `warning`, and the log
+  and the `cluster.ha-promote` audit entry record it. **Remaining limits:** the record of a
+  successful sync is not persisted, so a standby restart makes it ineligible
+  until its next sync; staleness is measured when the three-round threshold is
+  reached, and with very large configurations (sync deadline up to 300 seconds
+  per round) a leader that accepts connections but never answers can keep a
+  synced standby waiting past the 10-minute window, after which promotion is
+  manual; and a promoted standby still serves whatever it last applied — up to
+  10 minutes behind the old leader. (ADR-0005 addendum 2026-11-24; contract
+  `CLU-004`.)
 
 - **A policy edit on a control plane now reaches data planes when it is
   committed.** Creating, updating, deleting, disabling, reordering or moving a

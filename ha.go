@@ -177,6 +177,13 @@ type HAState struct {
 	syncPanics       int
 	syncPanicAlerted bool
 
+	// syncRefused counts CONSECUTIVE standby sync rounds in which the leader
+	// answered but its bundle was not applied (refused or failed in the apply
+	// path). Like a contained panic, such a round is this node's fault, not
+	// evidence that the leader is gone; in legacy mode it is kept out of the
+	// failure streak (noteRefusedRound). Reset by the next successful sync.
+	syncRefused int
+
 	// testResumeUnreachableWait / testResumeRetryBackoff shorten THIS
 	// instance's resume-acquire budget for an unreachable fencing backend
 	// (0 = the production haResumeUnreachableWait / haLeaseResumeRetryBackoff).
@@ -214,6 +221,14 @@ type HAStatus struct {
 	SyncFailCount int    `json:"sync_fail_count,omitempty"` // standby-side: consecutive HASync failures since last success
 	LastSyncOK    string `json:"last_sync_ok,omitempty"`    // standby-side: RFC3339 of the last successful HASync apply
 	SyncPanics    int    `json:"sync_panics,omitempty"`     // standby-side: sync rounds contained by the panic guard (CHAOS-25)
+	// SyncRefused is the standby-side count of consecutive sync rounds in which
+	// the leader answered but its bundle was not applied; 0 after a success.
+	SyncRefused int `json:"sync_refused,omitempty"`
+	// AutoPromoteBlocked is the standby-side reason an AUTOMATIC promotion
+	// would be refused right now on synchronization grounds (never synced, or
+	// last sync beyond the freshness window); "" when it would not be, or when
+	// the node has no automatic failover path. See haSyncIneligibility.
+	AutoPromoteBlocked string `json:"auto_promote_blocked,omitempty"`
 }
 
 func (h *HAState) Status() HAStatus {
@@ -238,6 +253,8 @@ func (h *HAState) Status() HAStatus {
 	if h.role == "standby" {
 		s.SyncFailCount = h.syncFailCount
 		s.SyncPanics = h.syncPanics
+		s.SyncRefused = h.syncRefused
+		s.AutoPromoteBlocked = h.autoPromoteBlockedLocked()
 		if !h.lastSyncOK.IsZero() {
 			s.LastSyncOK = h.lastSyncOK.Format(time.RFC3339)
 		}
@@ -644,6 +661,14 @@ func (h *HAState) StartAsStandbyWithUndo(ctx context.Context, leaderAddr, token 
 	h.since = time.Now()
 	h.autoFailover = autoFailover
 	h.syncFailCount = 0 // fresh loop — don't carry over a stale streak from a prior standby stint
+	// Sync evidence belongs to ONE standby stint: it says "this node applied a
+	// bundle from the leader it is standing by for". A node that re-enters
+	// standby after a demotion (enterStandbyResync) stands by for a DIFFERENT
+	// leader; carrying lastSyncOK over would keep it eligible for automatic
+	// promotion (haSyncIneligibility) on state it synced from the previous
+	// lineage, before it has applied anything from the new leader.
+	h.lastSyncOK = time.Time{}
+	h.syncRefused = 0
 	h.pc = promoteContext{grpcAddr: grpcAddr, certFile: certFile, keyFile: keyFile, caFile: caFile,
 		onPromote: onPromote, undoPromote: undoPromote, set: true}
 	h.promoted.Store(false)
@@ -688,6 +713,10 @@ type standbyLoopState struct {
 	client                    *DataPlaneClient
 	failCount                 int
 	manualWarned              bool // warn-once latch for the auto-failover-disabled path
+	// leaderAnswered is set by the production sync path when the LAST round's
+	// HASync RPC returned a bundle, whatever happened to it afterwards. An
+	// injected syncFn leaves it false.
+	leaderAnswered bool
 
 	// syncFn overrides the leader-sync call. nil ⇒ the production path
 	// (h.syncFromLeader). It exists so the CHAOS-25 fault-injection tests can
@@ -699,9 +728,12 @@ type standbyLoopState struct {
 // sync performs one leader-sync attempt through the (optionally injected) seam.
 func (s *standbyLoopState) sync() bool {
 	if s.syncFn != nil {
+		s.leaderAnswered = false
 		return s.syncFn()
 	}
-	return s.h.syncFromLeader(s.ctx, s.client, s.token)
+	applied, answered := s.h.syncFromLeader(s.ctx, s.client, s.token)
+	s.leaderAnswered = answered
+	return applied
 }
 
 // haStandbySyncComponent labels contained standby-sync panics in the crash
@@ -790,7 +822,69 @@ func (h *HAState) notePanicRound(leaderAddr string) {
 func (h *HAState) clearSyncPanicAlert() {
 	h.mu.Lock()
 	h.syncPanicAlerted = false
+	h.syncRefused = 0
 	h.mu.Unlock()
+}
+
+// noteRefusedRound records a standby sync round in which the leader ANSWERED
+// but its bundle was not applied. It is notePanicRound's sibling and makes the
+// same decision for the same reason: the round is not evidence that the leader
+// is unreachable, so it must not move this node toward promotion — and because
+// it does not, the stall is reported here instead (counter, log, and the same
+// fire-once ha_sync_panic "standby sync fault" alert, re-armed by the next
+// successful sync).
+func (h *HAState) noteRefusedRound(leaderAddr string) {
+	h.mu.Lock()
+	h.syncRefused++
+	n := h.syncRefused
+	first := !h.syncPanicAlerted
+	h.syncPanicAlerted = true
+	h.mu.Unlock()
+
+	logger.Printf("HA: the leader %q answered but its state bundle was NOT applied (consecutive_rounds=%d) — "+
+		"state replication is stalled although the leader is reachable. This round does not count toward "+
+		"the leader-unreachable threshold, so this node will not auto-promote against a live leader. See the "+
+		"preceding line for the refusal; fix it on the leader (or upgrade this standby) to resume replication.",
+		sanitizeLog(leaderAddr), n)
+
+	if first {
+		go alerts.Fire("ha_sync_panic", alerts.Payload{
+			Event:  "ha_sync_panic",
+			Host:   leaderAddr,
+			Detail: "the leader answered but this standby did not apply its state bundle (refused or failed to apply); replication is stalled and automatic failover is suppressed for this node while the leader keeps answering",
+			Source: "ha",
+		})
+	}
+}
+
+// countSyncFailure accounts for a sync round that did not apply and reports
+// whether it counted toward the leader-unreachable threshold.
+//
+// Legacy mode (no fencing lease): a round the leader ANSWERED is not counted
+// and RESETS the streak — the streak means "consecutive rounds without contact",
+// and nothing else stops a promotion against a live leader there (unfenced
+// split brain). Lease mode is deliberately unchanged and counts every failed
+// round: a leader that answers but has lost the fence (verifyBundleEpoch) is
+// exactly the leader a standby must be able to replace, and Acquire arbitrates.
+func (s *standbyLoopState) countSyncFailure() bool {
+	if s.leaderAnswered && !s.h.leaseConfigured() {
+		s.leaderAnswered = false
+		s.setFail(0)
+		s.h.noteRefusedRound(s.leaderAddr)
+		return false
+	}
+	s.setFail(s.failCount + 1)
+	return true
+}
+
+// onSyncFailed is tick's tail for a round that did not apply: count it, and at
+// the threshold take the leader-unreachable path.
+func (s *standbyLoopState) onSyncFailed() bool {
+	if !s.countSyncFailure() {
+		return false
+	}
+	logger.Printf("HA: sync failed (%d/%d)", s.failCount, haStandbyMaxFail)
+	return s.failCount >= haStandbyMaxFail && s.onMaxFail()
 }
 
 // standbyLoop receives ITS OWN stop channel from StartAsStandby rather than
@@ -855,24 +949,16 @@ func (h *HAState) standbyLoop(ctx context.Context, stopCh chan struct{}, leaderA
 // split-brain that made the flag opt-in cannot happen; freshness + hysteresis
 // additionally gate the automatic path (see leaseAutoPromote).
 //
-// Legacy mode (ADR-0004, unchanged): auto-failover only when opted in;
-// otherwise warn once and stay read-only until an operator acts.
+// Legacy mode (ADR-0004): auto-failover only when opted in, and then only for
+// a standby that passes the same synchronization eligibility as lease mode
+// (legacyAutoPromote); otherwise warn once and stay read-only until an
+// operator acts.
 func (s *standbyLoopState) onMaxFail() bool {
 	if s.h.leaseConfigured() {
 		return s.h.leaseAutoPromote()
 	}
 	if s.h.autoFailoverEnabled() {
-		s.h.promote("leader unreachable")
-		// Report whether promotion ACTUALLY happened, mirroring the lease path
-		// above. promote() is not infallible: onPromote can return an error, or
-		// (CHAOS-25) panic and be contained — both reset the once-guard and
-		// leave this node a standby. Returning an unconditional true there told
-		// standbyLoop to exit, permanently ending BOTH replication and leader
-		// monitoring on a node that never became a leader — the silent-stall
-		// outcome the per-round guard exists to prevent, reached one level up.
-		// Returning IsLeader() keeps the loop ticking so the next round retries
-		// the promotion, exactly as lease mode already does.
-		return s.h.IsLeader()
+		return s.legacyAutoPromote()
 	}
 	if !s.manualWarned {
 		s.h.warnManualFailoverRequired(s.leaderAddr)
@@ -900,7 +986,7 @@ func (s *standbyLoopState) syncOnce() {
 		s.manualWarned = false
 		s.h.clearSyncPanicAlert()
 	} else {
-		s.setFail(s.failCount + 1)
+		s.countSyncFailure()
 	}
 }
 
@@ -940,9 +1026,7 @@ func (s *standbyLoopState) tick() bool {
 		// promotion (role flip + lease grab) on a node that is going away.
 		return true
 	}
-	s.setFail(s.failCount + 1)
-	logger.Printf("HA: sync failed (%d/%d)", s.failCount, haStandbyMaxFail)
-	return s.failCount >= haStandbyMaxFail && s.onMaxFail()
+	return s.onSyncFailed()
 }
 
 // warnManualFailoverRequired logs and alerts that the leader is unreachable
@@ -962,14 +1046,18 @@ func (h *HAState) warnManualFailoverRequired(leaderAddr string) {
 }
 
 // syncFromLeader calls HASync on the leader and applies the state bundle.
-func (h *HAState) syncFromLeader(ctx context.Context, client *DataPlaneClient, token string) bool {
+// applied reports a fully applied bundle. leaderAnswered reports that the RPC
+// returned a reply at all — true for a bundle that was then unparseable,
+// rejected by the epoch check or refused in the apply path; false only when the
+// call itself failed (transport error or a gRPC status).
+func (h *HAState) syncFromLeader(ctx context.Context, client *DataPlaneClient, token string) (applied, leaderAnswered bool) {
 	// ADR-0005 S0: advertise this standby's own address so the leader can record
 	// it as the failback target (the topology otherwise never tells the leader).
 	reqBytes, _ := json.Marshal(map[string]string{"token": token, "standby_addr": h.advertiseAddr()})
 	raw, err := client.call(ctx, methodHASync, json.RawMessage(reqBytes))
 	if err != nil {
 		logger.Printf("HA: HASync RPC error: %v", err)
-		return false
+		return false, false
 	}
 	// Record the HA bundle size so the NEXT HASync poll's deadline scales with
 	// it. An HA-only standby never runs fetchAndApply (the GetConfig path), so
@@ -981,13 +1069,13 @@ func (h *HAState) syncFromLeader(ctx context.Context, client *DataPlaneClient, t
 	var bundle HAStateBundle
 	if err := json.Unmarshal(raw, &bundle); err != nil {
 		logger.Printf("HA: parse state bundle error: %v", err)
-		return false
+		return false, true
 	}
 	// ADR-0005 S3 (Finding 7): PULLER-side fence — verify the bundle's
 	// epoch against our own lease backend BEFORE any import. A zombie
 	// leader serving stale state must not reach ImportFullState.
 	if !h.verifyBundleEpoch(bundle.Epoch) {
-		return false
+		return false, true
 	}
 	ok := applyHABundle(&bundle, token)
 	if ok {
@@ -1009,7 +1097,7 @@ func (h *HAState) syncFromLeader(ctx context.Context, client *DataPlaneClient, t
 		logger.Printf("HA: leader requested a planned promotion — performing coordinated handoff")
 		h.promote("planned handoff requested by leader")
 	}
-	return ok
+	return ok, true
 }
 
 // seedTermFromLeader raises this standby's epoch to the leader's term (never
@@ -1295,6 +1383,7 @@ func (h *HAState) PromoteManually() error {
 	if !ctxSet {
 		return fmt.Errorf("cannot promote: no promote context (node was not started as a standby)")
 	}
+	h.logManualPromoteSyncOverride()
 	h.promote("manual promotion")
 	if !h.IsLeader() {
 		return fmt.Errorf("promotion did not complete (see logs)")
@@ -1657,6 +1746,11 @@ func apiClusterHA(w http.ResponseWriter, r *http.Request) {
 			// haStandbyMaxFail and self-fenced/failed-over (ADR-0004/RISK-001).
 			resp["sync_fail_count"] = status.SyncFailCount
 			resp["sync_max_fail"] = haStandbyMaxFail
+			// "" = an automatic promotion would not be refused on sync grounds.
+			resp["auto_promote_blocked"] = status.AutoPromoteBlocked
+			// Consecutive rounds whose bundle the leader served and this node
+			// did not apply: replication is stalled although the leader is up.
+			resp["sync_refused"] = status.SyncRefused
 			if status.LastSyncOK != "" {
 				resp["last_sync_ok"] = status.LastSyncOK
 			}
@@ -1756,14 +1850,17 @@ func apiClusterHAPromote(w http.ResponseWriter, r *http.Request) {
 	if !requireRole(w, r, RoleAdmin) {
 		return
 	}
+	// Read BEFORE promoting: once this node is leader the sync state it was
+	// promoted on is no longer reported.
+	syncWarning := globalHA.manualPromoteSyncWarning()
 	if err := globalHA.PromoteManually(); err != nil {
 		// Inline-sanitize the engine error (CWE-117) before it reaches the log
 		// via the response path; the message names only role/context, no input.
 		http.Error(w, "promote failed: "+err.Error(), http.StatusConflict)
 		return
 	}
-	status := globalHA.Status()
-	jsonOK(w, map[string]any{"ok": true, "role": status.Role, "term": status.Term})
+	resp, detail := manualPromoteOutcome(globalHA.Status(), syncWarning)
+	jsonOK(w, resp)
 
 	auditAdd(AuditEntry{
 		TS:     time.Now().UnixMilli(),
@@ -1771,7 +1868,7 @@ func apiClusterHAPromote(w http.ResponseWriter, r *http.Request) {
 		Actor:  sessionAdmin(r),
 		Action: "cluster.ha-promote",
 		Object: "self",
-		Detail: fmt.Sprintf("manual standby→leader promotion (term=%d)", status.Term),
+		Detail: detail,
 	})
 }
 

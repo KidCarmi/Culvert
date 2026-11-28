@@ -23,7 +23,10 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"time"
+
+	"github.com/KidCarmi/Culvert/internal/alerts"
 )
 
 const (
@@ -77,7 +80,6 @@ func (h *HAState) markSyncOK() {
 func (h *HAState) leaseAutoPromote() bool {
 	h.mu.RLock()
 	lastFence := h.lastSelfFence
-	lastSync := h.lastSyncOK
 	h.mu.RUnlock()
 
 	// Hysteresis: a recent self-fence means our connectivity (or etcd's view
@@ -99,15 +101,9 @@ func (h *HAState) leaseAutoPromote() bool {
 	}
 	// Freshness (Finding 8): never auto-promote on long-stale (or never
 	// synced) state. An operator can still PromoteManually — that is the
-	// break-glass, and it logs the staleness instead.
-	if lastSync.IsZero() {
-		logger.Printf("HA: auto-promotion refused — no successful state sync yet (manual promotion available)")
-		return false
-	}
-	if stale := time.Since(lastSync); stale > haPromoteFreshnessWindow {
-		logger.Printf("HA: auto-promotion refused — last state sync %s ago exceeds the %s freshness window "+
-			"(promoting would serve stale config; use manual promotion to override)",
-			stale.Round(time.Second), haPromoteFreshnessWindow)
+	// break-glass, and it logs the staleness instead. The predicate is SHARED
+	// with the legacy path (legacyAutoPromote): see haSyncIneligibility.
+	if h.refuseAutoPromoteUnsynced() {
 		return false
 	}
 
@@ -116,6 +112,169 @@ func (h *HAState) leaseAutoPromote() bool {
 	// timeout, arbitrates.
 	h.promote("leader unreachable (lease-arbitrated auto-failover)")
 	return h.IsLeader()
+}
+
+// haSyncIneligibility is the ONE synchronization-eligibility predicate for
+// AUTOMATIC promotion. Lease-arbitrated failover (leaseAutoPromote) and legacy
+// flag-gated failover (legacyAutoPromote) both decide through it, so the two
+// paths give the same guarantee by construction rather than by two checks that
+// happen to agree:
+//
+//	a standby is promoted automatically only if it has successfully APPLIED a
+//	leader state bundle (lastSync non-zero) no longer than
+//	haPromoteFreshnessWindow ago.
+//
+// lastSync is HAState.lastSyncOK, written ONLY by markSyncOK, which
+// syncFromLeader calls after applyHABundle returned true — the bundle passed
+// the puller-side epoch fence and its CA, cluster state and config snapshot
+// were all applied. A bundle that was refused (an unenforceable ruleset under
+// POL-005, a rejected IdP sync, an over-cap or stale-epoch snapshot, a CA that
+// would not decrypt), failed in transport, or panicked in the apply path never
+// reaches it. The value is in-memory only: a restarted standby is ineligible
+// until its first post-restart sync.
+//
+// A standby that fails the predicate holds empty or old configuration; promoted,
+// it would publish that as the authoritative config to every data plane — an
+// empty blocklist, missing policy rules, an old default action. Refusing costs
+// availability of the control plane (the data planes keep enforcing their last
+// applied config), and manual promotion remains the break-glass.
+//
+// Pure: the caller supplies both instants.
+func haSyncIneligibility(lastSync, now time.Time) (reason string, ineligible bool) {
+	if lastSync.IsZero() {
+		return "no successful state sync yet (manual promotion available)", true
+	}
+	if stale := now.Sub(lastSync); stale > haPromoteFreshnessWindow {
+		return fmt.Sprintf("last state sync %s ago exceeds the %s freshness window "+
+			"(promoting would serve stale config; use manual promotion to override)",
+			stale.Round(time.Second), haPromoteFreshnessWindow), true
+	}
+	return "", false
+}
+
+// autoPromoteSyncRefusal evaluates haSyncIneligibility against this node's
+// recorded last successful sync.
+func (h *HAState) autoPromoteSyncRefusal() (reason string, refused bool) {
+	h.mu.RLock()
+	lastSync := h.lastSyncOK
+	h.mu.RUnlock()
+	return haSyncIneligibility(lastSync, time.Now())
+}
+
+// refuseAutoPromoteUnsynced reports whether an AUTOMATIC promotion must be
+// refused on synchronization grounds, and logs the refusal. It is the single
+// call both automatic paths make. The reason is built from this node's own
+// clock and constants only — no peer- or operator-supplied value.
+func (h *HAState) refuseAutoPromoteUnsynced() bool {
+	reason, refused := h.autoPromoteSyncRefusal()
+	if refused {
+		logger.Printf("HA: auto-promotion refused — %s", reason)
+	}
+	return refused
+}
+
+// legacyAutoPromote is the legacy (no fencing lease) leader-unreachable path
+// when --ha-auto-failover is on. It used to promote unconditionally: a standby
+// that had never completed a sync — or whose every attempt had been refused —
+// became leader on three failed rounds and published its empty state fleet-wide.
+// It now applies the same synchronization eligibility as lease mode
+// (haSyncIneligibility); an ineligible standby stays a read-only standby, keeps
+// retrying the sync, and raises ha_manual_failover_required once per outage,
+// because promoting it is now an operator decision.
+//
+// Returns whether promotion ACTUALLY happened, mirroring the lease path.
+// promote() is not infallible: onPromote can return an error, or (CHAOS-25)
+// panic and be contained — both reset the once-guard and leave this node a
+// standby. Returning an unconditional true there told standbyLoop to exit,
+// permanently ending BOTH replication and leader monitoring on a node that
+// never became a leader — the silent-stall outcome the per-round guard exists
+// to prevent, reached one level up. Returning IsLeader() keeps the loop ticking
+// so the next round retries the promotion, exactly as lease mode already does.
+func (s *standbyLoopState) legacyAutoPromote() bool {
+	if s.h.refuseAutoPromoteUnsynced() {
+		if !s.manualWarned {
+			s.h.warnAutoFailoverRefused(s.leaderAddr)
+			s.manualWarned = true
+		}
+		return false
+	}
+	s.h.promote("leader unreachable")
+	return s.h.IsLeader()
+}
+
+// warnAutoFailoverRefused pages that the leader is unreachable and this standby
+// will NOT take over on its own although automatic failover is enabled, because
+// it holds no sufficiently fresh copy of the leader's state. It reuses the
+// ha_manual_failover_required event: the operator action is the same one — decide
+// whether to promote this node manually.
+func (h *HAState) warnAutoFailoverRefused(leaderAddr string) {
+	logger.Printf("HA: leader %q did not answer the last sync rounds and automatic failover was REFUSED — this standby has no fresh "+
+		"copy of the leader's state, so promoting it would publish empty or stale configuration to every "+
+		"data plane. Staying standby (read-only) and retrying the sync. Restore the leader, or promote this "+
+		"node manually if the leader is permanently gone and you accept serving its state.",
+		sanitizeLog(leaderAddr))
+	go alerts.Fire("ha_manual_failover_required", alerts.Payload{
+		Event: "ha_manual_failover_required",
+		Host:  leaderAddr,
+		Detail: "leader did not answer the last sync rounds; automatic failover refused because this standby has not synced the " +
+			"leader's state recently enough; standby staying read-only pending manual action",
+		Source: "ha",
+	})
+}
+
+// autoPromoteBlockedLocked is the standby-side status line for the eligibility
+// predicate: the reason an automatic promotion would be refused RIGHT NOW, or
+// "" when it would not be (or when this node has no automatic path at all —
+// legacy mode with auto-failover off). Evaluated live, so a standby that is not
+// failover-ready says so before the leader is lost. Caller holds h.mu.
+func (h *HAState) autoPromoteBlockedLocked() string {
+	if h.lease == nil && !h.autoFailover {
+		return ""
+	}
+	reason, _ := haSyncIneligibility(h.lastSyncOK, time.Now())
+	return reason
+}
+
+// manualPromoteSyncWarning describes, for the operator performing a MANUAL
+// promotion, the state this standby would be promoted on when it fails the
+// automatic path's eligibility predicate; "" when it passes. Manual promotion is
+// the break-glass and is never refused on these grounds (a cluster whose leader
+// is permanently gone must stay recoverable) — the risk is stated, not blocked.
+func (h *HAState) manualPromoteSyncWarning() string {
+	h.mu.RLock()
+	lastSync := h.lastSyncOK
+	h.mu.RUnlock()
+	now := time.Now()
+	if _, ineligible := haSyncIneligibility(lastSync, now); !ineligible {
+		return ""
+	}
+	if lastSync.IsZero() {
+		return "this standby never completed a state sync from the leader: it was promoted on its own local " +
+			"configuration, which may be empty, and now publishes that to every data plane"
+	}
+	return fmt.Sprintf("this standby's last successful state sync was %s (%s ago, beyond the %s freshness window): "+
+		"it was promoted on that state and now publishes it to every data plane",
+		lastSync.UTC().Format(time.RFC3339), now.Sub(lastSync).Round(time.Second), haPromoteFreshnessWindow)
+}
+
+// logManualPromoteSyncOverride records that a manual promotion is overriding
+// the automatic path's synchronization eligibility. No-op for an eligible node.
+func (h *HAState) logManualPromoteSyncOverride() {
+	if w := h.manualPromoteSyncWarning(); w != "" {
+		logger.Printf("HA: MANUAL promotion overrides the synchronization eligibility that gates automatic failover — %s", w)
+	}
+}
+
+// manualPromoteOutcome builds the manual-promotion API response and audit
+// detail, carrying the synchronization warning into both when there is one.
+func manualPromoteOutcome(status HAStatus, syncWarning string) (resp map[string]any, auditDetail string) {
+	resp = map[string]any{"ok": true, "role": status.Role, "term": status.Term}
+	auditDetail = fmt.Sprintf("manual standby→leader promotion (term=%d)", status.Term)
+	if syncWarning != "" {
+		resp["warning"] = syncWarning
+		auditDetail += "; WARNING: " + syncWarning
+	}
+	return resp, auditDetail
 }
 
 // enterStandbyResync re-enters standby mode against the S0-recorded
