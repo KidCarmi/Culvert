@@ -30,6 +30,10 @@ protected:
   - .github/workflows/product-contracts.yml
 
 amended:
+  - id: AGT-009
+    reason: "ADR-0062 slice 6, PR 3: the provenance files are now read, by the runtime recovery's admission only (AGT-010, runtime_recovery on, default off). The invariant said 'nothing in this build acts on them'; it now says who reads them and what they can authorize (acting only on an image installed.json or a kept upgrade record of this agent names; restoring only an image gated.json holds). How they are written is unchanged and no registered test was edited. owner_approved stays false."
+  - id: AGT-001
+    reason: "ADR-0062 slice 6, PR 3: runtime.recover is a new state-changing kind. It holds the maintenance lock while it runs, like reconcile.startup, so an operator's state-changing request gets 409 naming it; it is begun only when no operation holds the lock. The invariant (one state-changing operation at a time) is unchanged; one permitted holder and one forbidden admission are added, with a test. No registered test was edited (ops_test.go's kind list gains the kind). owner_approved stays false."
   - id: AGT-900
     reason: "ADR-0062 slice 6, PR 2 (owner decision of 2026-11-28: runtime recovery acts only on images this agent installed). The startup reconcile now decides a new record kind, runtime.recover, which slice 6's executor (PR 3, not in this build) writes armed at phase restarted before it moves anything. It is decided by the unchanged armed-rollback branch, so the steps are exactly those already permitted for an armed inline rollback, with one added gate: any verdict that tags or starts the prior needs the prior image's data-epoch labels to admit the data directory's current epoch (AGT-008, read at this start); incompatible or unknown reports recovery_required (restore_incompatible / restore_compatibility_unknown) and changes nothing. A runtime.recover record not armed, or at any phase but restarted, is reported. The invariant is widened by that one clause; upgrade and image-rollback records decide exactly as before (the lifecycle model's decision table is unchanged for them, and the differential test compares the real decision with it over all 580,608 inputs). New permitted and forbidden transitions and tests are added; no registered test was edited. Nothing in this build writes such a record, so behaviour is unchanged until PR 3. owner_approved stays false."
   - id: AGT-900
@@ -632,12 +636,15 @@ contracts:
       permitted:
         - "read-only operations concurrently"
         - "the opt-in startup reconcile (reconcile.startup) holding the lock while it runs, with reads served"
+        - "the opt-in runtime recovery (runtime.recover) holding the lock while it runs, with reads served"
       forbidden:
         - "two state-changing operations running together"
         - "an operator's state-changing request admitted while the startup reconcile runs"
+        - "an operator's state-changing request admitted while a runtime recovery runs, or a runtime recovery begun while any operation holds the lock"
     tests:
       - {file: "cmd/culvert-maint/internal/ops/ops_test.go", name: TestManager_SecondStateChangingOpReturnsConflict}
       - {file: "cmd/culvert-maint/startup_reconcile_converge_test.go", name: TestConvergeRecovery_KillDuringReconcile}
+      - {file: "cmd/culvert-maint/internal/server/runtime_recovery_test.go", name: TestRuntimeRecovery_RefusesWithoutEveryCondition}
     validation: unit
     compatibility: "Upgrade and backup must not interleave on an appliance. reconcile.startup is a state-changing kind no API admits; it exists only with reconcile_on_startup = \"converge\"."
 
@@ -741,6 +748,7 @@ contracts:
         - "reporting a container id in GET /v1/status runtime_health"
     tests:
       - {file: "cmd/culvert-maint/internal/server/runtime_observer_test.go", name: TestObserver_GatedRecordsLastGood}
+      - {file: "cmd/culvert-maint/internal/server/runtime_recovery_test.go", name: TestRuntimeRecovery_ObserverTicksTrigger}
       - {file: "cmd/culvert-maint/internal/server/runtime_observer_test.go", name: TestObserver_BadObservationsKeepLastGood}
       - {file: "cmd/culvert-maint/internal/server/runtime_observer_test.go", name: TestObserver_IdentityChangeAcrossTheProbeDiscards}
       - {file: "cmd/culvert-maint/internal/server/runtime_observer_test.go", name: TestObserver_UnreadableTagNeverGates}
@@ -784,7 +792,7 @@ contracts:
     area: agent-lifecycle
     status: enforced
     owner_approved: false
-    invariant: "<state_dir>/health/installed.json is written only by an upgrade this agent ran, after its health gate and digest verify passed, and names the image it installed and the image it replaced; an upgrade that failed its gate or was already current writes nothing. <state_dir>/health/gated.json holds at most two distinct images, newest first, and is changed only by a passed runtime gate on an image with a repo-bound, allow-listed digest reference. Both are written only when the runtime health store is on, and nothing in this build acts on them."
+    invariant: "<state_dir>/health/installed.json is written only by an upgrade this agent ran, after its health gate and digest verify passed, and names the image it installed and the image it replaced; an upgrade that failed its gate or was already current writes nothing. <state_dir>/health/gated.json holds at most two distinct images, newest first, and is changed only by a passed runtime gate on an image with a repo-bound, allow-listed digest reference. Both are written only when the runtime health store is on; they are read only by the runtime recovery's admission (AGT-010), which may act on an image only when installed.json or a kept upgrade record of this agent names it, and may restore only an image gated.json holds."
     authority: "Maintenance agent (cmd/culvert-maint, separate module). Design: docs/adr/0062-maintenance-agent-durable-lifecycle-execution.md slice 6 (PR 1); owner decision 2026-11-28 (runtime recovery acts only on images this agent installed)."
     code:
       - "cmd/culvert-maint/internal/runtimehealth/provenance.go"
@@ -807,7 +815,46 @@ contracts:
       - {file: "cmd/culvert-maint/internal/runtimehealth/provenance_test.go", name: TestInstalled_Refusals}
       - {file: "cmd/culvert-maint/internal/runtimehealth/provenance_test.go", name: TestReadGated_Refusals}
     validation: unit
-    compatibility: "Additive files under <state_dir>/health (schema 1), written only with runtime_health_interval on. An older agent ignores them; nothing reads them until slice 6's executor."
+    compatibility: "Additive files under <state_dir>/health (schema 1), written only with runtime_health_interval on. An older agent ignores them; slice 6's executor (AGT-010) reads them only with runtime_recovery on."
+
+  - id: AGT-010
+    area: agent-lifecycle
+    status: open
+    owner_approved: false
+    invariant: "With runtime_recovery = \"restore_last_gated\" (default off; accepted only with runtime_health_interval on), the agent changes Docker at runtime only as a runtime.recover operation holding the maintenance lock, begun after 3 consecutive kept not_ready samples of one proxy container and image X, and only when, read fresh under the lock: the settle window is over; that container runs with the fixed tag on X; X is the image installed.json names or the target of a kept upgrade record of this agent; the image R that change replaced is in gated.json, its gated reference passes the repo-bound exact-digest gate and the image allowlist, and it is local as R; R's data-epoch labels admit the data's epoch; and fewer than 2 recoveries were begun for X from that source. It counts the attempt and writes the armed runtime.recover record (prior R, target X) before anything moves, both fail-closed, then runs the startup reconcile's armed-rollback plan (AGT-900). Anything else is reported and changes nothing."
+    authority: "Maintenance agent (cmd/culvert-maint, separate module). Design: docs/adr/0062-maintenance-agent-durable-lifecycle-execution.md slice 6 (PR 3); owner decision 2026-11-28 (runtime recovery acts only on images this agent installed). Open until the real-Docker qualification (slice 6, PR 4)."
+    question: "OPEN until verified on a real Docker daemon (slice 6, PR 4): does the runtime recovery restore the replaced image, refuse every unproven case, and survive a kill at each step, against real Docker in all four cells? If it does, is 3 consecutive not_ready samples the trigger the owner wants?"
+    code:
+      - "cmd/culvert-maint/internal/server/runtime_recovery.go"
+      - "cmd/culvert-maint/internal/server/runtime_recovery_admit.go"
+      - "cmd/culvert-maint/internal/runtimehealth/recover_attempts.go"
+    configs:
+      - "cmd/culvert-maint/internal/config/config.go"
+    transitions:
+      permitted:
+        - "retagging to R's gated, validated reference, `compose up`, a fresh gate and verification by image id, then audit-first retirement of its own record, as the armed-rollback plan of AGT-900"
+        - "reporting a refusal in GET /v1/status runtime_recovery without beginning an operation"
+      forbidden:
+        - "acting with runtime_recovery off, or without the observer"
+        - "acting on fewer than 3 consecutive kept not_ready samples of the same container and image"
+        - "acting on an image this agent did not install: a hand retag, a hand `compose up`, or an image no installed.json or kept upgrade record of this agent names"
+        - "restoring an image not in gated.json, without a repo-bound allow-listed reference, not local as that image, or not proven compatible with the data"
+        - "acting while the settle window is open or another operation holds the lock, or when the fixed tag is not on the running image"
+        - "moving anything before the attempt is counted and the armed record written, or beyond 2 recoveries begun for one install"
+        - "retiring any record but its own"
+    tests:
+      - {file: "cmd/culvert-maint/internal/server/runtime_recovery_test.go", name: TestRuntimeRecovery_RestoresTheReplacedImage}
+      - {file: "cmd/culvert-maint/internal/server/runtime_recovery_test.go", name: TestRuntimeRecovery_RefusesWithoutEveryCondition}
+      - {file: "cmd/culvert-maint/internal/server/runtime_recovery_test.go", name: TestRuntimeRecovery_AdmissionRepeatedUnderTheLock}
+      - {file: "cmd/culvert-maint/internal/server/runtime_recovery_test.go", name: TestRuntimeRecovery_TheCapIsDurable}
+      - {file: "cmd/culvert-maint/internal/server/runtime_recovery_test.go", name: TestRuntimeRecovery_FromAKeptUpgradeRecord}
+      - {file: "cmd/culvert-maint/internal/server/runtime_recovery_test.go", name: TestRuntimeRecovery_TriggerCountsConsecutiveNotReady}
+      - {file: "cmd/culvert-maint/internal/server/runtime_recovery_test.go", name: TestRuntimeRecovery_ObserverTicksTrigger}
+      - {file: "cmd/culvert-maint/internal/server/runtime_recovery_test.go", name: TestRuntimeRecovery_WorkerRunsATriggerAndStops}
+      - {file: "cmd/culvert-maint/internal/config/config_runtime_recovery_test.go", name: TestLoad_RuntimeRecovery}
+      - {file: "cmd/culvert-maint/internal/runtimehealth/recover_attempts_test.go", name: TestRecoverAttempts_Refusals}
+    validation: unit
+    compatibility: "New, default off: nothing changes unless runtime_recovery is set. Adds <state_dir>/health/recover_attempts.json (schema 1). An agent older than this key refuses to start with it present; one before PR 2 reports a runtime.recover record as an interrupted operation of unknown kind."
 
   - id: CFG-001
     area: config-compatibility
