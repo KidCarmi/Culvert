@@ -432,7 +432,10 @@ func (e *e2eEnv) caseRecoveryCrashAfterTag(t *testing.T, name string) {
 	runOK, runGot := runOnlyReadsEpoch(p2)
 	res.check("the restart read the data epoch", runOK && !strings.HasPrefix(runGot, "0 "), "at least one cli --print-data-epoch, nothing else", runGot)
 	res.eq("runtime.recover records", "", r.recoveryRecords())
-	res.eq("recovery audit", "runtime.recover/started@runtime-recovery runtime.recover/failed@startup(agent_restart_interrupted) runtime.recover:reconciled/succeeded@reconcile",
+	// The interruption entry carries the record's own actor, as for every
+	// interrupted operation (main.go: agent:startup only when a record names
+	// none); the converge's per-record entry is the reconcile's.
+	res.eq("recovery audit", "runtime.recover/started@runtime-recovery runtime.recover/failed@runtime-recovery(agent_restart_interrupted) runtime.recover:reconciled/succeeded@reconcile",
 		p2.recoveryAudit(opID))
 	res.how = "held at up_before:2, SIGKILL"
 	res.observed = fmt.Sprintf("%s; %s", recordOf(view, opID), e.describe(s))
