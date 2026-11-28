@@ -115,7 +115,7 @@
 | Proxy listen address | `-addr` | Startup-only, correct |
 | UI listen address | `-ui-addr` | Startup-only, correct |
 | TLS cert/key for UI | `-tls-cert`, `-tls-key` | Startup-only, correct |
-| SOCKS5 listen address | `-socks5-addr` | Startup-only, correct |
+| SOCKS5 port / bind address | `-socks5-port`, `-socks5-bind` (`proxy.socks5_port`, `proxy.socks5_bind`) | Startup-only, correct (recorded GUI-parity deferral: a listener bind is a deployment boundary, not runtime policy) |
 | CA bundle path | `-ca-bundle` | Startup-only, correct |
 | Category feed DB path | `-cat-feed-db` | Startup-only, correct |
 | ClamAV address | `-clamav-addr` | Startup-only, correct |

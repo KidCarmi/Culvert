@@ -82,6 +82,7 @@ type startupState struct {
 	rateLimitRPMCanonicalSet bool // true iff -rate-limit-rpm was explicitly passed
 	ipMode                   *string
 	socks5Port               *int
+	socks5Bind               *string
 	metricsTok               *string
 	cpGRPCAddr               *string
 	cpGRPCCert               *string
@@ -163,7 +164,8 @@ type startupState struct {
 	fc             *FileConfig
 	pPort          int
 	uPort          int
-	socks5PortVal  int // resolved in loadFileConfigAndFlags; reused by initSOCKS5 and validatePortCollisions
+	socks5PortVal  int    // resolved in loadFileConfigAndFlags; reused by initSOCKS5 and validatePortCollisions
+	socks5BindVal  string // resolved + validated in loadFileConfigAndFlags; "" = all interfaces (the historical default)
 	lPath          string
 	blPath         string
 	lMaxMB         int
@@ -343,6 +345,7 @@ func parseFlags(s *startupState) {
 	s.rateLimitRPMCanonical = flag.Int("rate-limit-rpm", 0, "Max requests/min per IP (0=off); canonical flag, matches rate_limit_rpm on every other surface")
 	s.ipMode = flag.String("ip-filter-mode", "", "IP filter mode: allow|block (empty=off)")
 	s.socks5Port = flag.Int("socks5-port", 0, "SOCKS5 proxy port (0=disabled)")
+	s.socks5Bind = flag.String("socks5-bind", "", "IP address to bind the SOCKS5 listener to, e.g. 127.0.0.1 (empty=all interfaces; hostnames rejected)")
 	s.metricsTok = flag.String("metrics-token", "", "Bearer token for /metrics (empty=open)")
 	s.cpGRPCAddr = flag.String("cp-grpc-addr", "", "ControlPlane gRPC listen addr e.g. :50051 (empty=off)")
 	s.cpGRPCCert = flag.String("cp-grpc-cert", "", "ControlPlane gRPC TLS cert (mTLS)")
@@ -718,6 +721,11 @@ func loadFileConfigAndFlags(s *startupState) {
 	if err := validatePortCollisions(s.pPort, s.uPort, s.socks5PortVal); err != nil {
 		log.Fatalf("Invalid port configuration: %v", err)
 	}
+	// The SOCKS5 bind address is validated on the RESOLVED value for the same
+	// reason: config.yaml's proxy.socks5_bind is checked at load time, but the
+	// -socks5-bind flag bypasses that gate. This runs before setupLogger, so it
+	// exits through log.Fatalf like the port checks above.
+	s.socks5BindVal = mustResolveSOCKS5Bind(s.socks5Bind, s.fc.Proxy.SOCKS5Bind)
 	s.lPath = firstStr(*s.logFilePath, s.fc.Proxy.LogFile)
 	s.blPath = firstStr(*s.blockFile, s.fc.Proxy.Blocklist)
 	s.lMaxMB = firstNonZero(*s.logMaxMB, s.fc.Proxy.LogMaxMB, 50)
@@ -1185,7 +1193,7 @@ func initSOCKS5(s *startupState) {
 		// guarantees there is no moment in which the socket exists and the gate
 		// does not. Released in loadPersistentAdminState.
 		armSOCKS5PostureGate()
-		s.socks5Srv = startSOCKS5(s.socks5PortVal)
+		s.socks5Srv = startSOCKS5(s.socks5BindVal, s.socks5PortVal)
 	}
 }
 

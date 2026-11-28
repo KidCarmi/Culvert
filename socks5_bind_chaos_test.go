@@ -59,7 +59,7 @@ func freeSOCKS5Port(t *testing.T) int {
 // the next test.
 func startSupervisedSOCKS5(t *testing.T, port int) *socks5Supervisor {
 	t.Helper()
-	srv := startSOCKS5(port)
+	srv := startSOCKS5("", port)
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
@@ -643,7 +643,7 @@ func TestChaos66_StopIsPromptDuringBindBackoff(t *testing.T) {
 		socks5ChaosSetup(t)
 		port, release := occupyPort(t)
 
-		srv := startSOCKS5(port)
+		srv := startSOCKS5("", port)
 		waitForSOCKS5(t, 5*time.Second, "a recorded bind failure", func() bool {
 			return socks5ListenerState().BindTotal > 0
 		})
@@ -679,7 +679,7 @@ func TestChaos66_StopIsIdempotentAndNilSafe(t *testing.T) {
 	}
 
 	port := freeSOCKS5Port(t)
-	srv := startSOCKS5(port)
+	srv := startSOCKS5("", port)
 	waitForSOCKS5(t, 5*time.Second, "the listener to bind", func() bool {
 		return socks5ListenerState().Binds > 0
 	})
@@ -753,7 +753,7 @@ func TestChaos66_StopDuringStartupLeavesNothingServing(t *testing.T) {
 		socks5ChaosSetup(t)
 		port := freeSOCKS5Port(t)
 
-		srv := startSOCKS5(port)
+		srv := startSOCKS5("", port)
 		// No wait: Stop deliberately races the very first bind.
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		if err := srv.Stop(ctx); err != nil {
@@ -778,7 +778,7 @@ func TestChaos66_CleanStopIsNotReportedAsAFault(t *testing.T) {
 	fired := socks5ChaosSetup(t)
 
 	port := freeSOCKS5Port(t)
-	srv := startSOCKS5(port)
+	srv := startSOCKS5("", port)
 	waitForSOCKS5(t, 5*time.Second, "the listener to bind", func() bool {
 		return socks5ListenerState().Binds > 0
 	})

@@ -249,6 +249,36 @@ outage that has already been seen.
 
 ---
 
+## Bind address
+
+By default the SOCKS5 listener binds **every interface** (`:<port>`), as it
+always has. To limit it to one address, set an IP literal:
+
+```
+-socks5-bind 127.0.0.1          # CLI flag (wins over config.yaml when non-empty)
+```
+
+```yaml
+proxy:
+  socks5_port: 1080
+  socks5_bind: "127.0.0.1"      # or an interface IP, e.g. "10.0.5.20"; "::1" for IPv6 loopback
+```
+
+- Empty or absent keeps today's every-interface bind. Nothing changes on
+  upgrade.
+- Only IP literals are accepted. A hostname, a bracketed IPv6 address, a value
+  with a port, or one with leading/trailing whitespace fails startup with an
+  `Invalid SOCKS5 bind address` / `proxy.socks5_bind` error, so the bound
+  interface never depends on DNS.
+- An address that is not local to the host (or whose interface is not up yet)
+  does not stop the appliance: the listener reports `address_unavailable` on the
+  surfaces above and keeps retrying, like any other bind failure.
+- Startup-only, like `-socks5-port`: there is no admin UI/API setting.
+- A loopback bind is useful when only local software on the appliance should
+  reach SOCKS5. It does not change what SOCKS5 enforces.
+
+---
+
 ## See also
 
 - `docs/engineering/CHAOS-ENGINEERING-REVIEW-2026-08-23.md` — the full finding

@@ -25,6 +25,7 @@ type FileConfig struct {
 		TLSKey                string   `yaml:"tls_key"`                 // path to TLS key for UI
 		UISANs                []string `yaml:"ui_sans"`                 // additional SANs for self-signed cert (IPs or hostnames)
 		SOCKS5Port            int      `yaml:"socks5_port"`             // 0 = disabled
+		SOCKS5Bind            string   `yaml:"socks5_bind"`             // IP literal to bind the SOCKS5 listener to (e.g. "127.0.0.1"); empty = all interfaces (startup-only)
 		MetricsToken          string   `yaml:"metrics_token"`           // Bearer token for /metrics; empty=open
 		PolicyFile            string   `yaml:"policy_file"`             // JSON file for PBAC policy rules
 		CAPath                string   `yaml:"ca_path"`                 // Path for encrypted Root CA bundle
@@ -596,6 +597,9 @@ func (fc *FileConfig) validate() error {
 	var errs []string
 	errs = append(errs, fc.validateEnums()...)
 	errs = append(errs, fc.validateLimits()...)
+	if err := validateSOCKS5BindAddress(fc.Proxy.SOCKS5Bind); err != nil {
+		errs = append(errs, "proxy.socks5_bind: "+err.Error())
+	}
 	errs = append(errs, fc.validateCluster()...)
 	errs = append(errs, fc.validateCDR()...)
 

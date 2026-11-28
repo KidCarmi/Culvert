@@ -173,7 +173,7 @@ rewrite:
 ### Key CLI flags
 
 ```
-Core        -port 8080  -ui-port 9090  -socks5-port 0  -config <file>
+Core        -port 8080  -ui-port 9090  -socks5-port 0  -socks5-bind <ip>  -config <file>
 TLS         -ca-path <bundle>  -tls-cert  -tls-key  -ui-no-tls
 Auth        -ui-users-file <db>  -ui-allow-ip <cidrs>  -session-timeout 8
 Filtering   -blocklist  -policy  -geoip-db  -clamav-addr  -yara-rules-dir  -threat-feed-db

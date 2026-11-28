@@ -20,6 +20,9 @@ proxy:
   port: 8080          # HTTP proxy port (1–65535)
   ui_port: 9090       # Web UI port (HTTPS, self-signed cert by default)
   socks5_port: 0      # SOCKS5 proxy port (0 = disabled, e.g. 1080)
+  socks5_bind: ""     # IP address the SOCKS5 listener binds (e.g. "127.0.0.1" or an interface IP). Empty = every
+                      # interface (the default, unchanged). IP literals only: a hostname fails startup. Startup-only;
+                      # -socks5-bind overrides.
   blocklist: ""       # Path to blocklist file (one host per line; *.example.com wildcards supported)
   log_file: ""        # Path to log file (empty = stdout only)
   log_max_mb: 50      # Rotate log when it reaches this size in MB
