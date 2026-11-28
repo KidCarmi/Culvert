@@ -1,0 +1,117 @@
+# ADR-0064: HA restart authority (legacy) and the publication safety gate
+
+- **Status:** Proposed — design note recorded before implementation (owner decisions of 2026-11-28).
+- **Builds on:** ADR-0004 (legacy HA), ADR-0005 (fencing lease; its commit semantics are NOT changed here),
+  contract `CLU-004`. Composes with ADR-0063 (state authority, draft).
+- **Owner decisions (verbatim, abridged):** (C) "In legacy mode, a restarting leader must revalidate its
+  authority before resuming leadership-dependent operations. Peer reachability alone must not be treated
+  as proof of exclusive leadership. … If exclusive authority cannot be established in legacy mode, fail
+  closed for leadership-dependent operations while preserving independent services wherever safe."
+  (D) "Automatic state reconciliation with a publication safety gate: consistent state proceeds
+  automatically; recoverable, verifiably authoritative state is reconciled automatically; conflicting,
+  ambiguous or unrecoverable state holds publishing and exposes an actionable diff. Never silently
+  overwrite newer fleet state or publish an unauthorized rollback. Leadership acquisition and publishing
+  authorization must be separate concepts."
+
+## Two concepts
+
+| Concept | Lease mode | Legacy mode |
+|---|---|---|
+| **LeadershipHeld** | the etcd lease (ADR-0005, unchanged) | restart revalidation (part C) |
+| **PublishAuthorized** | the publication gate (part D) | the publication gate (part D) |
+
+A node may hold leadership and not be publish-authorized. The lifecycle surface owned by the early
+listener work reads both from here: `haLeadershipHeld()` and `haPublishAuthorized() (ok, reason)`.
+
+## Part C — legacy restart revalidation
+
+**Today.** `resumeLeadershipAttempt` reads `role=leader` from `ha_config.json` and resumes. If the standby
+promoted while the node was down, both lead ("BOTH may now lead").
+
+**What can prove exclusive authority without a lease.** A standby that has not promoted runs no Control
+Plane listener, so the restarted leader cannot ask it anything; an unanswered dial is equally a healthy
+standby, a dead peer or a partition and proves nothing. The evidence that exists:
+
+1. **No standby has ever synced** (`standby_addr` empty in the persisted config). No other node holds this
+   cluster's state or CA, and CLU-004 forbids automatic promotion of such a node. → authority established.
+2. **The peer polls us.** A standby only ever calls `HASync` while it is a standby; a node that promoted
+   stops. An authenticated `HASync` from the recorded peer, received after this restart, is the peer's own
+   statement "I am standby, of term ≤ T". The request now also carries `role` and `term` (additive). The
+   resume completes inside that RPC and the same RPC is answered, so the poll that proves it is not counted
+   as a failure by the standby. → authority established.
+3. **The peer leads.** The restarted node dials the recorded standby address with `HASync`. An answer
+   carrying `leader_term` ≥ ours means the peer promoted. → the node joins it as standby automatically
+   (`enterStandbyResync`), idempotently, with no operator act. A term below ours is ignored (not leader of
+   a later term).
+4. **Neither.** → authority NOT established. The node stays in the existing HA-gated state (`intentGate`):
+   no HA role, leader-gated RPCs refused, CA issuance refused, `/healthz` 503, admin mutations refused with
+   an explicit reason, HA status shows `authority: revalidating`. Proxying with the last configuration,
+   the admin UI (read), diagnostics and logs keep working. The attempt is retried with the existing capped
+   backoff and paged once per episode (`ha_resume_unfenced`). An operator whose standby is permanently gone
+   asserts leadership with the existing promote endpoint (audited, with a warning).
+
+Residual, stated: a standby whose three polls are all lost in transit while the leader hears them is the
+ADR-0004 asymmetric-partition case; only a fence closes it. Lease mode is unchanged; tests are added for
+expiry during a slow start, a returning stale leader, asymmetric connectivity and partition heal.
+
+## Part D — publication safety gate
+
+**The defect.** A promoted node seeds its version above everything the old leader issued and publishes
+what it holds. A data plane that had applied versions the standby never replicated is handed older
+content at a higher version: a silent rollback.
+
+**ADR-0005 constraint.** A promotion must commit a snapshot stamped with the new epoch before the epoch is
+advertised. The gate therefore never blocks a commit into the store. It gates **distribution** (what
+`GetConfig`, `GetConfigDelta` and `HASync` hand out) and **operator mutations**.
+
+**Evidence.** `W`, the replicated watermark (`replicatedLeaderConfigVersion`, today memory-only); `P0`, the
+first version this node committed as leader; both persisted in `ha_publish_gate.json` at promotion with
+the term/epoch. Per data plane: `known_version` on every `GetConfig`/`GetConfigDelta`, and
+`config_version`, `epoch`, `synced_fp` (blocklist only) on every heartbeat. From the previous leader, when
+reachable: its committed snapshot, version, term and epoch over a new token-authenticated RPC
+(`HAPeerSnapshot`). **Not available:** a whole-snapshot fingerprint from data planes, the epoch a version
+was committed under, and any way to fetch a snapshot from a data plane.
+
+**Classification, per data plane request with known version `k`.**
+
+| Case | Meaning | Action |
+|---|---|---|
+| `k ≤ W` or `P0 ≤ k ≤ current` | consistent with this node's lineage | serve normally — no hold, no operator |
+| `W < k < P0`, or `k > current` | the data plane holds state this node does not | answer **unchanged** to that data plane (it keeps what it has; never rolled back), record the evidence, enter **HOLD** |
+| heartbeat epoch above ours | a newer leader exists | this node is stale: stop serving (lease: self-fence path; legacy: part C) |
+| `known_version` absent while HOLD | old data plane, unknown state | `Unavailable` (keeps last-good); served normally when not held |
+
+**HOLD.** Data planes consistent with this node keep being served its committed snapshot (never frozen).
+Operator mutations are refused with the reason. `HASync` to standbys is refused, so a demoted leader's
+newer state is not overwritten. Status, diagnostics and one alert carry the diff: watermark, own range,
+and per node the reported version, epoch and blocklist fingerprint.
+
+**Automatic reconciliation (RECOVERABLE).** While held, fetch `HAPeerSnapshot` from the previous leader.
+Adopt iff the reply is authenticated, its term/epoch is the one this node last replicated from (below our
+own), and its version is ≥ every version reported in `(W, P0)`. Adoption applies it through the normal
+`applyHABundle` path, republishes at a new version, re-verifies the blocklist fingerprint against nodes
+that reported it, sets `W` to the adopted version and releases the hold. Every step is idempotent: the
+gate file records the phase; a restart resumes at the fetch.
+
+**UNRECOVERABLE.** Peer unreachable, older build (`Unimplemented`), version below a reported one, two
+fingerprints reported for one version, or a version above `current`: the hold stays, reconciliation is
+retried, and the operator has one explicit, audited action — *publish as authoritative* (accept this
+node's state; data planes ahead of it are then served and roll back). *Adopt from node X* is not
+implementable: data planes cannot serve their snapshot (new evidence needed; see Open).
+
+**One gate.** `haPublishAuthorized()` is the single predicate; ADR-0063's "no undeclared emptying" check
+is consulted by the same function when that work lands, not a second gate beside it.
+
+**Wire compatibility.** New request fields and the new RPC are additive. An old data plane that omits
+`known_version` is served as today unless a hold is active. An old standby/ex-leader lacks
+`HAPeerSnapshot`: the state is unrecoverable-automatically and held. The gate arms only on an HA
+promotion; a standalone or never-promoted control plane behaves exactly as before.
+
+**Availability cost.** Healthy failover: none. Data planes ahead of the promoted node: unchanged until
+reconciled. Operator edits: refused during a hold. Old leader gone for good: operator release.
+
+## Open (needs new evidence, not guessed)
+
+- A data-plane whole-snapshot fingerprint and the epoch each version was committed under would let the
+  gate verify adoption end to end instead of by version plus blocklist fingerprint.
+- A data-plane "serve my last-good snapshot" RPC would make *adopt from node X* possible.
