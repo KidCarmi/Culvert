@@ -290,8 +290,10 @@ func TestCommandIntent_AFailureAsTheRetryLoopEndsIsStillRetried(t *testing.T) {
 	r.srv.intentRetryStop = make(chan struct{})
 	r.srv.intentRetryEvery = 5 * time.Millisecond
 	var once sync.Once
+	hookRan := make(chan struct{})
 	r.srv.intentRetryExitHook = func() {
 		once.Do(func() {
+			defer close(hookRan)
 			// In the gap: an operation's command returns and its close fails.
 			r.jnl.SetWriteErrorForTest(nil)
 			if _, err := r.jnl.BeginCommand(testOpULID, journal.MutationComposeUp, time.Now().UTC()); err != nil {
@@ -310,6 +312,14 @@ func TestCommandIntent_AFailureAsTheRetryLoopEndsIsStillRetried(t *testing.T) {
 		t.Fatal(err)
 	}
 	r.jnl.SetWriteErrorForTest(nil)
+	// The first loop's sweep alone makes the condition below true for a
+	// moment, before its exit hook has run: polling from then on would check
+	// the fence while the hook is putting it back up. Wait for the hook first.
+	select {
+	case <-hookRan:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the retry loop never reached its exit")
+	}
 	deadline := time.Now().Add(5 * time.Second)
 	for (r.intentOnDisk(t) != nil || r.srv.staleIntents()) && time.Now().Before(deadline) {
 		time.Sleep(10 * time.Millisecond)
