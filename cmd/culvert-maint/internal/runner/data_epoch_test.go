@@ -15,6 +15,8 @@ func TestParseDataEpoch(t *testing.T) {
 		"empty":                      "",
 		"usage text of an old image": "flag provided but not defined: -print-data-epoch\nUsage of ./culvert:",
 		"two objects":                ok + ok,
+		"trailing bytes on the line": `{"schema":1,"epoch":1,"marker_present":false,"build_min":1,"build_max":1}x`,
+		"two objects on one line":    `{"schema":1,"epoch":1,"marker_present":false,"build_min":1,"build_max":1}{"schema":1}`,
 		"unknown field":              `{"schema":1,"epoch":1,"marker_present":false,"build_min":1,"build_max":1,"x":1}`,
 		"marker presence missing":    `{"schema":1,"epoch":1,"build_min":1,"build_max":1}`,
 		"epoch zero":                 `{"schema":1,"epoch":0,"marker_present":false,"build_min":1,"build_max":1}`,
