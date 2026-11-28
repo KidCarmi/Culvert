@@ -436,6 +436,9 @@ func TestBinaryStartup_DataPlane_RestartKeepsControlPlaneState(t *testing.T) {
 		PolicyRules: []PolicyRule{{Priority: 1, Name: "from-control-plane", DestFQDN: "localhost", Action: ActionDrop}},
 	})
 
+	// Persisted hit history for the rule the last-good snapshot carries.
+	hitFile := suBinWrite(t, filepath.Join(n.dataDir, "hit_counters.json"), `{"from-control-plane":{"hits":41,"lastHit":1700000000}}`)
+
 	n.start()
 	suBinWaitProxy(t, proxyPort)
 
@@ -468,6 +471,26 @@ func TestBinaryStartup_DataPlane_RestartKeepsControlPlaneState(t *testing.T) {
 		t.Errorf("the SOCKS5 listener does not serve after start-up (gate never released?): %v %v", reply, err)
 	}
 	_ = c.Close()
+
+	// Hit history: the replay replaced the rule (new, zeroed counter cells);
+	// the history must have been put back, so the shutdown save persists at
+	// least the 41 hits the node started with — not the zero (plus this
+	// test's own request) it would write had the replay's cells been kept.
+	n.stop()
+	raw, err := os.ReadFile(hitFile)
+	if err != nil {
+		t.Fatalf("hit counter file after shutdown: %v", err)
+	}
+	var saved map[string]struct {
+		Hits int64 `json:"hits"`
+	}
+	if err := json.Unmarshal(raw, &saved); err != nil {
+		t.Fatalf("hit counter file: %v\n%s", err, raw)
+	}
+	if got := saved["from-control-plane"].Hits; got < 41 {
+		t.Errorf("after a data-plane restart the persisted hit count for the replayed rule is %d, want at least the 41 it had: "+
+			"the last-good replay zeroed the rule's counters and nothing restored them\n%s", got, raw)
+	}
 }
 
 // TestBinaryStartup_DataPlane_FirstEnrolmentNoLastGood: a data plane with no

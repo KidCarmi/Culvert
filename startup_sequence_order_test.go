@@ -73,7 +73,11 @@ var startupStepPhases = map[string]startupPhase{
 	// The activation, then the one reconciliation that publishes (it must
 	// follow the role being active), then the node is marked ready.
 	"enterStartupActivationPhase": phaseActivation, "activateClusterRoles": phaseActivation,
-	"pacReconcileAllLifecycles": phaseActivation, "markNodeReady": phaseActivation,
+	// Re-applies the persisted hit history onto the rules a data plane's
+	// replay just replaced. Not a store loader: it reads the in-memory
+	// baseline phase 2 loaded and touches no file.
+	"restoreHitCountsAfterActivation": phaseActivation,
+	"pacReconcileAllLifecycles":       phaseActivation, "markNodeReady": phaseActivation,
 
 	"openTrafficGates": phaseTraffic, "startAdminUI": phaseTraffic, "buildAndStartProxyServer": phaseTraffic,
 }
@@ -127,6 +131,7 @@ func TestStartupSequence_PhasesNeverGoBackwards(t *testing.T) {
 		"an unclassified new step":                     append(append([]string(nil), calls...), "initSomethingNew"),
 		"a second activation":                          append(append([]string(nil), calls[:len(calls)-3]...), "activateClusterRoles", "openTrafficGates", "startAdminUI", "buildAndStartProxyServer"),
 		"ready marked before the activation":           swap("markNodeReady", "activateClusterRoles"),
+		"hit history re-restored before the replay":    swap("restoreHitCountsAfterActivation", "activateClusterRoles"),
 		"a traffic gate opened before ready":           swap("markNodeReady", "openTrafficGates"),
 		"the stores phase entered after a store":       swap("enterStartupStoresPhase", "initBlocklist"),
 		"the activation phase entered after the role":  swap("enterStartupActivationPhase", "activateClusterRoles"),
@@ -179,6 +184,8 @@ func startupLifecycleMarkerError(calls []string) string {
 		{"enterStartupStoresPhase", "initConnAndRateLimit"},
 		{"loadReleaseManagement", "enterStartupActivationPhase"},
 		{"enterStartupActivationPhase", "activateClusterRoles"},
+		{"activateClusterRoles", "restoreHitCountsAfterActivation"},
+		{"restoreHitCountsAfterActivation", "markNodeReady"},
 		{"activateClusterRoles", "pacReconcileAllLifecycles"},
 		{"pacReconcileAllLifecycles", "markNodeReady"},
 		{"markNodeReady", "openTrafficGates"},
@@ -973,5 +980,131 @@ func TestStartupSequence_PRGateRunsTheRealBinary(t *testing.T) {
 	}
 	if !strings.Contains(wf[aggAt:], "\n      - startup-sequence\n") {
 		t.Error("the Fast PR Gate aggregate does not need startup-sequence: a failing start-up test would not fail the gate")
+	}
+}
+
+// ── hit history survives the replay ─────────────────────────────────────────
+
+// suSeedHitHistory writes hit_counters.json for the named rules and runs the
+// phase-2 restore exactly as loadPersistentAdminState does (loadHitCounters →
+// RestoreHitCounts). Returns the file path.
+func suSeedHitHistory(t *testing.T, hits map[string]int64) string {
+	t.Helper()
+	withCleanRuleMet(t)
+	recs := map[string]persistedRuleCounter{}
+	for name, n := range hits {
+		recs[name] = persistedRuleCounter{Hits: n, LastHit: 1_700_000_000}
+	}
+	raw, err := json.Marshal(recs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "hit_counters.json")
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	loadHitCounters(path)
+	RestoreHitCounts()
+	return path
+}
+
+func suHitCounts() map[string]int64 {
+	out := map[string]int64{}
+	rules := policyStore.List()
+	for i := range rules {
+		out[rules[i].Name] = rules[i].HitCount
+	}
+	return out
+}
+
+func suPersistedHitCounts(t *testing.T, path string) map[string]int64 {
+	t.Helper()
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var recs map[string]persistedRuleCounter
+	if err := json.Unmarshal(raw, &recs); err != nil {
+		t.Fatalf("hit counter file: %v", err)
+	}
+	out := map[string]int64{}
+	for name, r := range recs {
+		out[name] = r.Hits
+	}
+	return out
+}
+
+// TestClusterHalves_DataPlane_HitHistorySurvivesTheReplay: a data plane with
+// persisted hit history restarts. The last-good replay replaces every rule —
+// here with the SAME rules — and a replaced rule starts at zero. The step that
+// follows the activation puts the history back, so the next save persists the
+// counts, not zeros. Without that step (the negative control inside) both the
+// live counts and the saved file are zero: the history is lost for good.
+func TestClusterHalves_DataPlane_HitHistorySurvivesTheReplay(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		reRestore bool
+		want      int64
+	}{
+		{"with_the_post_activation_restore", true, 41},
+		{"negative_control_without_it", false, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			env := suIsolate(t)
+			env.seedPolicyFile(t, "kept-rule", "other-rule")
+			persistDPLastGoodConfigSnapshot(ConfigSnapshot{Version: 7, DefaultAction: "deny", PolicyRules: suRules("kept-rule", "other-rule")})
+			ctx, cancel := context.WithCancel(context.Background())
+			t.Cleanup(cancel)
+			act := loadClusterIdentity(clusterStartupConfig{ClusterDBPath: env.clusterDB, DPAddr: "127.0.0.1:1", DPNodeID: "dp-hits"}, ctx, nil)
+
+			env.loadStores(t, "")
+			hitFile := suSeedHitHistory(t, map[string]int64{"kept-rule": 41, "other-rule": 7})
+			if got := suHitCounts()["kept-rule"]; got != 41 {
+				t.Fatalf("control: phase 2 restored %d hits, want 41", got)
+			}
+
+			act.activate() // the replay: PolicyStore.ReplaceAll
+			if got := suHitCounts()["kept-rule"]; got != 0 {
+				t.Fatalf("control: the replay left %d hits on a replaced rule; this test's premise (ReplaceAll zeroes counters) no longer holds", got)
+			}
+			if tc.reRestore {
+				restoreHitCountsAfterActivation()
+			}
+
+			if got := suHitCounts()["kept-rule"]; got != tc.want {
+				t.Errorf("live hit count after start-up = %d, want %d", got, tc.want)
+			}
+			saveHitCounters(hitFile) // the periodic / shutdown saver
+			if got := suPersistedHitCounts(t, hitFile)["kept-rule"]; got != tc.want {
+				t.Errorf("persisted hit count after the next save = %d, want %d", got, tc.want)
+			}
+			if tc.reRestore {
+				if got := suHitCounts()["other-rule"]; got != 7 {
+					t.Errorf("other-rule = %d hits, want 7", got)
+				}
+			}
+		})
+	}
+}
+
+// TestClusterHalves_ControlPlane_HitHistoryIsNotDoubled: on a node whose
+// activation replaces no rule — a control plane — the second restore adds
+// nothing, however often it runs.
+func TestClusterHalves_ControlPlane_HitHistoryIsNotDoubled(t *testing.T) {
+	env := suIsolate(t)
+	addr := fmt.Sprintf("127.0.0.1:%d", cpFreePort(t))
+	act := loadClusterIdentity(clusterStartupConfig{ClusterDBPath: env.clusterDB, CPAddr: addr}, t.Context(), nil)
+	env.loadStores(t, "allow")
+	hitFile := suSeedHitHistory(t, map[string]int64{"on-disk-a": 41, "on-disk-b": 7})
+	act.activate()
+	cpWaitFor(t, 15*time.Second, "the control-plane listener", func() bool { return cpGRPCListenerState().Serving })
+	restoreHitCountsAfterActivation()
+	restoreHitCountsAfterActivation()
+	if got := suHitCounts(); got["on-disk-a"] != 41 || got["on-disk-b"] != 7 {
+		t.Errorf("hit counts after a control-plane start-up = %v, want on-disk-a=41 on-disk-b=7 (not doubled)", got)
+	}
+	saveHitCounters(hitFile)
+	if got := suPersistedHitCounts(t, hitFile); got["on-disk-a"] != 41 || got["on-disk-b"] != 7 {
+		t.Errorf("persisted hit counts = %v, want 41 / 7", got)
 	}
 }
