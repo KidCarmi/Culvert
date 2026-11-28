@@ -179,15 +179,26 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
     phase, readiness, leadership and publication authority are now reported
     separately on `/health` (`startup`), `/ready` (a gating `startup` row),
     `/healthz` and `/api/cluster/status`.
-  - **High availability, upgrade order:** on its own this does not stop a
-    standby from failing over when its leader restarts slowly — a standby on
-    this or an earlier release still counts the starting answer as a failed
-    round, exactly as it counted a closed port. The standby-side change that
-    treats it as "leader alive" ships separately; when it does, upgrade the
-    standby before the leader. In lease mode a starting node holds no lease,
-    so a leader whose store load outlasts the lease TTL comes back as a
-    standby (safe; leadership moves). With a two-million-host blocklist the
-    measured time to ready is about four seconds.
+    Those HTTP surfaces are served by listeners that open only once the node
+    is ready, so there they always read `ready` in this release; while a node
+    is starting, its phase is visible in the `CULVERT_NODE_STARTING` answer
+    and in the log.
+  - **High availability:** a legacy-mode standby (no etcd lease) now reads
+    `CULVERT_NODE_STARTING` as "the leader is alive": such a round does not
+    count toward the failover threshold and is not a sync. This is bounded —
+    after five minutes of nothing but starting answers they count as failures
+    again, so a leader hung in start-up cannot block failover. Without it, a
+    leader whose stores take more than about fifteen seconds to load would be
+    failed over on every restart and then resume as a second leader.
+    **Upgrade the standby before the leader:** a standby on an earlier release
+    counts the starting answer as a failure, as it counted a closed port. In
+    lease mode nothing changes: a starting node holds no lease, so a leader
+    whose store load outlasts the lease TTL comes back as a standby (safe;
+    leadership moves). With a two-million-host blocklist the measured time to
+    ready is about four seconds.
+  - **"Before any listener that enforces policy" means SOCKS5 and the proxy.**
+    The MCP runtime listener (off by default) binds earlier in start-up,
+    before a data plane's replay, and enforces its own durable local state.
   No data migration is needed; existing data directories start as they are.
 - **A legacy HA standby no longer promotes itself against a leader that is
   still answering.** With `--ha-auto-failover` and no etcd lease, every sync

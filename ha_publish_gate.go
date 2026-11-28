@@ -434,7 +434,11 @@ func releasePublishHold(actor string) (released bool, st publishGateState, err e
 	// A data plane ignores a snapshot whose version is not above its own, so
 	// the release publishes ABOVE every reported version. Outside the gate lock:
 	// the publish marshals a snapshot.
-	globalConfigStore.raiseVersionAtLeast(maxV)
+	// maxV+1, not maxV: the commit records the counter as the delta's BASE, and
+	// a node that reports maxV must not be offered a delta computed from THIS
+	// node's previous content — it holds different content. With the base one
+	// above everything reported, no node is at the base and each resyncs in full.
+	globalConfigStore.raiseVersionAtLeast(maxV + 1)
 	if perr := publishCurrentConfigSnapshot(); perr != nil {
 		return false, publishGateSnapshot(), fmt.Errorf("publishing this node's configuration as authoritative failed: %w", perr)
 	}

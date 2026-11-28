@@ -350,6 +350,10 @@ func runStartupSequence(s *startupState) *http.Server {
 	// reconciles configuration (TestStartupSequence_* enforce both directions).
 	enterStartupActivationPhase()
 	activateClusterRoles(s)
+	// A data plane's last-good replay replaced the rulebase, and a replaced
+	// rule starts with fresh, zeroed counter cells: put the persisted hit
+	// history back before anything can save or serve them.
+	restoreHitCountsAfterActivation()
 	// 2F-B (C1): complete the post-commit effects of any PAC publish/rollback
 	// that was proven committed but not fully recorded when the previous
 	// process stopped (config version, cluster publication, success audit,
@@ -364,9 +368,11 @@ func runStartupSequence(s *startupState) *http.Server {
 	markNodeReady()
 
 	// ── Phase 4: traffic gates and listeners ────────────────────────────────
-	// After the activation, so no listener that enforces policy serves before
-	// a data plane's last-good replay: the SOCKS5 pre-posture gate (its socket
+	// After the activation, so neither SOCKS5 nor the proxy serves before a
+	// data plane's last-good replay: the SOCKS5 pre-posture gate (its socket
 	// has been bound since initSOCKS5), the admin UI, then the proxy listener.
+	// Known exception: the MCP runtime listener (initMCPRuntime, off by
+	// default) binds in phase 2 and enforces its own durable local state.
 	openTrafficGates()
 	startAdminUI(s)
 	return buildAndStartProxyServer(s)
@@ -993,6 +999,29 @@ func initClusterIdentity(s *startupState) {
 // after every store loader and reconciliation, before every traffic gate.
 func activateClusterRoles(s *startupState) {
 	s.clusterActivation.activate()
+}
+
+// restoreHitCountsAfterActivation re-applies the persisted per-rule hit
+// history after the cluster role has activated.
+//
+// initPersistentAdminState restores it once, into the rules the policy file
+// loaded (loadHitCounters → RestoreHitCounts). On a data plane the activation
+// then replays the last-good snapshot through PolicyStore.ReplaceAll, which
+// gives EVERY rule — changed or not — new counter cells at zero. Before the
+// activation moved behind the store loaders the replay ran first and the one
+// restore came after it; with nothing restoring after the replay, the next
+// periodic or shutdown save would write the zeros and the history would be
+// gone for good.
+//
+// RestoreHitCounts is idempotent by construction (each cell records the
+// baseline it has already received), so on a node whose activation replaced
+// nothing — a control plane, a standalone gateway, a data plane with no
+// last-good snapshot — this adds nothing: counts are not doubled. No traffic
+// has flowed yet (the gates open after markNodeReady), so no live hit exists
+// to lose. It reads the in-memory baseline loadHitCounters kept, not the
+// file, so a save that raced in between cannot have damaged it.
+func restoreHitCountsAfterActivation() {
+	RestoreHitCounts()
 }
 
 // openTrafficGates releases the gates that hold a bound listener closed until

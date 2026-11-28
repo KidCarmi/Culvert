@@ -314,7 +314,7 @@ func cpGRPCTeardownViolations(files []*ast.File) []string {
 	}
 	for _, f := range files {
 		for _, decl := range f.Decls {
-			owner := cpTopLevelName(decl)
+			owner := cpTeardownOwnerName(decl)
 			ast.Inspect(decl, func(n ast.Node) bool {
 				sc.visit(owner, n)
 				return true
@@ -430,12 +430,14 @@ type cpTeardownScan struct {
 }
 
 var (
-	// stopEarlyListener (cp_starting_listener.go) stops the start-up "starting"
-	// server it alone built. That server is never adopted by a supervisor and
-	// never serves a real handler, so it is outside the claim protocol this
-	// wall protects; it is named here so the wall keeps rejecting every OTHER
-	// Stop on a *grpc.Server.
-	cpTeardownStopOwners = map[string]bool{"teardownCPGRPCServer": true, "gracefulStopBounded": true, "buildControlPlaneServer": true, "stopEarlyListener": true}
+	// cpEarlyListenerStopOwner — the METHOD (*cpStartingListener).stopEarlyListener
+	// (cp_starting_listener.go) — stops the start-up "starting" server it
+	// alone built. That server is never adopted by a supervisor and never
+	// serves a real handler, so it is outside the claim protocol this wall
+	// protects. The exception is pinned to the receiver type, not the bare
+	// name: any other function called stopEarlyListener is judged like every
+	// other Stop on a *grpc.Server.
+	cpTeardownStopOwners = map[string]bool{"teardownCPGRPCServer": true, "gracefulStopBounded": true, "buildControlPlaneServer": true, cpEarlyListenerStopOwner: true}
 	cpTeardownCallGraph  = map[string][]string{
 		"gracefulStopBounded":    {"stopControlPlaneServer"},
 		"stopControlPlaneServer": {"teardownCPGRPCServer"},
@@ -443,6 +445,26 @@ var (
 		"retireCPGRPCServer":     {"releaseAttempt"},
 	}
 )
+
+const cpEarlyListenerStopOwner = "(*cpStartingListener).stopEarlyListener"
+
+// cpTeardownOwnerName is cpTopLevelName, except that the early listener's stop
+// METHOD is named with its receiver so the owner exception cannot be claimed by
+// a function that merely shares its name.
+func cpTeardownOwnerName(decl ast.Decl) string {
+	fn, ok := decl.(*ast.FuncDecl)
+	if !ok || fn.Name.Name != "stopEarlyListener" {
+		return cpTopLevelName(decl)
+	}
+	if fn.Recv != nil && len(fn.Recv.List) == 1 {
+		if star, ok := fn.Recv.List[0].Type.(*ast.StarExpr); ok {
+			if id, ok := star.X.(*ast.Ident); ok && id.Name == "cpStartingListener" {
+				return cpEarlyListenerStopOwner
+			}
+		}
+	}
+	return fn.Name.Name
+}
 
 func cpEarliest(m map[string]token.Pos, key string, p token.Pos) {
 	if cur, ok := m[key]; !ok || p < cur {

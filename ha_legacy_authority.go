@@ -40,9 +40,6 @@ import (
 	"fmt"
 	"sync"
 	"time"
-
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/status"
 )
 
 // errLegacyAuthorityNotEstablished gates a legacy leader resume that has no
@@ -257,49 +254,4 @@ func haAuthorityStatus() (state, reason string) {
 		return "revalidating", r
 	}
 	return "", ""
-}
-
-// haLeaderAnswer classifies what a sync round proved about the leader.
-type haLeaderAnswer int
-
-const (
-	haNoAnswer         haLeaderAnswer = iota // nothing: transport failure or an unclassified refusal
-	haAnsweredReply                          // a bundle came back (applied or not), or the leader rejected our token
-	haAnsweredStarting                       // "I am starting" — alive, bounded by haStartingGrace
-	haAnsweredHolding                        // "publication not authorized" — a live leader deliberately holding
-)
-
-// The refusal tokens are owned by the node lifecycle (node_lifecycle.go), which
-// emits them; this file owns how a standby counts them.
-const (
-	haNodeStartingMarker       = cpStartingStatusMarker
-	haPublishNotAuthorizedMark = cpPublishRefusedMarker
-)
-
-// haStartingGrace bounds how long an unbroken run of "starting" answers is
-// taken as proof that the leader is alive. A leader hung in start-up must not
-// block failover forever; half the freshness window keeps a standby that was
-// synced when the leader went down eligible to promote when the grace ends.
-// Safe in legacy mode because a leader that finishes starting later
-// revalidates its authority and joins the promoted peer (part C).
-const haStartingGrace = haPromoteFreshnessWindow / 2
-
-// haLeaderStartingError reports whether err is a leader's "starting, not
-// ready" refusal.
-func haLeaderStartingError(err error) bool { return isCPStartingStatus(err) }
-
-// haLeaderAnswerOf classifies a FAILED HASync. PermissionDenied counts as a
-// reply: only a serving leader evaluates the HA token. A standby's own refusal
-// ("not the HA leader") is Unavailable without a token and stays haNoAnswer:
-// that peer does not lead.
-func haLeaderAnswerOf(err error) haLeaderAnswer {
-	switch {
-	case haLeaderStartingError(err):
-		return haAnsweredStarting
-	case isCPPublishNotAuthorizedStatus(err):
-		return haAnsweredHolding
-	case status.Code(err) == codes.PermissionDenied:
-		return haAnsweredReply
-	}
-	return haNoAnswer
 }

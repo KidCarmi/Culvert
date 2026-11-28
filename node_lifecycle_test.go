@@ -9,6 +9,8 @@ import (
 	"errors"
 	"fmt"
 	"go/ast"
+	"go/parser"
+	"go/token"
 	"strings"
 	"testing"
 	"time"
@@ -548,5 +550,39 @@ func TestNodeLifecycle_HealthSurfacesReportThePhase(t *testing.T) {
 	addLifecycleHealth(resp)
 	if resp["ready"] != true || resp["leadership_held"] != false || resp["publish_authorized"] != false {
 		t.Errorf("ready, no leadership, publication refused: %v — the three must be reported independently", resp)
+	}
+}
+
+// TestCPStartingListener_TeardownExceptionIsPinnedToTheMethod: the CHAOS-71
+// teardown wall exempts (*cpStartingListener).stopEarlyListener and nothing
+// else — a plain function, or a method on another type, that borrows the name
+// and stops a *grpc.Server is still a violation.
+func TestCPStartingListener_TeardownExceptionIsPinnedToTheMethod(t *testing.T) {
+	parse := func(src string) []*ast.File {
+		f, err := parser.ParseFile(token.NewFileSet(), "x.go", "package main\nimport \"google.golang.org/grpc\"\n"+src, 0)
+		if err != nil {
+			t.Fatalf("parse: %v", err)
+		}
+		return []*ast.File{f}
+	}
+	for name, src := range map[string]string{
+		"a plain function":         "func stopEarlyListener(srv *grpc.Server) { srv.Stop() }",
+		"a method on another type": "type other struct{ srv *grpc.Server }\nfunc (o *other) stopEarlyListener() { o.srv.Stop() }",
+	} {
+		found := false
+		for _, v := range cpGRPCTeardownViolations(parse(src)) {
+			if strings.Contains(v, "references Stop on a *grpc.Server") {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("%s named stopEarlyListener was exempted from the teardown wall", name)
+		}
+	}
+	actual := "type cpStartingListener struct{ srv *grpc.Server }\nfunc (l *cpStartingListener) stopEarlyListener() { l.srv.Stop() }"
+	for _, v := range cpGRPCTeardownViolations(parse(actual)) {
+		if strings.Contains(v, "references Stop on a *grpc.Server") {
+			t.Errorf("the real method is not exempt: %s", v)
+		}
 	}
 }

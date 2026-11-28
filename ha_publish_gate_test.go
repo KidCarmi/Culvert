@@ -10,10 +10,12 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -267,6 +269,11 @@ func TestPublishGate_OperatorRelease(t *testing.T) {
 		t.Fatalf("after the release the node must be served ABOVE its version (unchanged=%v v%d err=%v)", unchanged, snap.Version, err)
 	}
 	published := globalConfigStore.Version()
+	// The node that was ahead holds DIFFERENT content at its version: it must
+	// be resynced in full, never offered a delta built from this node's content.
+	if reply := dpGetConfigDelta(t, ahead); reply.Mode == "delta" {
+		t.Fatalf("the released node was offered a delta from v%d: it would be applied onto content this node never had", reply.BaseVersion)
+	}
 
 	// Idempotent.
 	if code, resp := postPublishRelease(t, `{"force":true}`); code != http.StatusOK || resp["released"] != false {
@@ -383,22 +390,22 @@ func TestStaleLeader_DeniedLeaseResumeDistributesNothing(t *testing.T) {
 	}
 	for _, k := range []int64{0, 1, globalConfigStore.Version()} {
 		_, snap, err := dpGetConfig(t, k)
-		if status.Code(err) != codes.Unavailable || !strings.Contains(err.Error(), haPublishNotAuthorizedMark) {
+		if status.Code(err) != codes.Unavailable || !strings.Contains(err.Error(), cpPublishRefusedMarker) {
 			t.Fatalf("k=%d: a stale leader served configuration (v%d, blocked=%v, err=%v)", k, snap.Version, snap.BlockedHosts, err)
 		}
 	}
 	conn := startBufconnCP(t)(t, clusterClientCallOptions()...)
 	var raw json.RawMessage
 	dreq, _ := json.Marshal(getConfigDeltaRequest{KnownVersion: 1})
-	if err := conn.Invoke(context.Background(), methodGetConfigDelta, json.RawMessage(dreq), &raw); !strings.Contains(status.Convert(err).Message(), haPublishNotAuthorizedMark) {
+	if err := conn.Invoke(context.Background(), methodGetConfigDelta, json.RawMessage(dreq), &raw); !strings.Contains(status.Convert(err).Message(), cpPublishRefusedMarker) {
 		t.Errorf("GetConfigDelta from a stale leader: %v", err)
 	}
 	hreq, _ := json.Marshal(map[string]any{"token": eligSharedSecret, "role": "standby"})
-	if err := conn.Invoke(context.Background(), methodHASync, json.RawMessage(hreq), &raw); !strings.Contains(status.Convert(err).Message(), haPublishNotAuthorizedMark) {
+	if err := conn.Invoke(context.Background(), methodHASync, json.RawMessage(hreq), &raw); !strings.Contains(status.Convert(err).Message(), cpPublishRefusedMarker) {
 		t.Errorf("HASync from a stale leader: %v", err)
 	}
 	// A standby counts that refusal as a live leader holding, not as an outage.
-	if got := haLeaderAnswerOf(status.Error(codes.Unavailable, haPublishNotAuthorizedMark+": x")); got != haAnsweredHolding {
+	if got := haLeaderAnswerOf(status.Error(codes.Unavailable, cpPublishRefusedMarker+": x")); got != haAnsweredHolding {
 		t.Errorf("standby classification = %v, want holding", got)
 	}
 
@@ -420,5 +427,66 @@ func TestStaleLeader_DeniedLeaseResumeDistributesNothing(t *testing.T) {
 	}
 	if _, snap, gerr := dpGetConfig(t, 0); gerr != nil || len(snap.BlockedHosts) != 1 {
 		t.Fatalf("control: a fenced leader must serve (err=%v)", gerr)
+	}
+}
+
+// The promotion exception to "publishing needs leadership" cannot be held open
+// and cannot be borrowed by a stale leader.
+func TestPromotionCommitting_IsBoundedToPromoteAndClosedToAStaleLeader(t *testing.T) {
+	isolateEligGlobals(t)
+	restore := swapGlobalHA(t)
+	t.Cleanup(func() { globalHA.Stop(); restore() })
+	if n := haPromotionsInFlight.Load(); n != 0 {
+		t.Fatalf("precondition: %d promotion(s) in flight", n)
+	}
+
+	// A promotion whose activation fails, and one whose activation PANICS,
+	// both leave the counter at zero (the decrement is deferred in promote()).
+	resetCrashGuardStateForTest()
+	t.Cleanup(resetCrashGuardStateForTest)
+	var sawInFlight bool
+	for _, onPromote := range []func() error{
+		func() error { sawInFlight = haPromotionCommitting(); return errors.New("listener: address in use") },
+		func() error { panic("activation blew up") },
+	} {
+		h := newEligStandby(&atomic.Int32{})
+		h.mu.Lock()
+		h.pc.onPromote = onPromote
+		h.mu.Unlock()
+		globalHA = h
+		if err := h.PromoteManually(); err == nil {
+			t.Fatal("setup: the promotion must fail")
+		}
+		if n := haPromotionsInFlight.Load(); n != 0 {
+			t.Fatalf("a failed promotion left %d promotion(s) in flight: the exception is held open", n)
+		}
+	}
+	if !sawInFlight {
+		t.Fatal("control: inside promote() the exception must be visible to the activation publish")
+	}
+
+	// A stale leader: role leader, lease held by another node. It is not a
+	// standby, so promote() is never entered on it (PromoteManually refuses the
+	// role before the counter moves), and its publish is refused.
+	f := halease.NewFake(time.Minute)
+	if granted, _, _ := f.Acquire(context.Background(), "cp-new-leader"); !granted {
+		t.Fatal("seed acquire")
+	}
+	stale := &HAState{}
+	stale.SetLeaseProvider(f, "cp-stale")
+	stale.ResumeAsLeader(&haConfig{Enabled: true, Token: eligSharedSecret, PeerAddr: "peer:50051", Role: "leader", Term: 9})
+	globalHA = stale
+	if !stale.IsLeader() || stale.WriteAllowed() {
+		t.Fatalf("setup: want the read-only leader stance (leader=%v write=%v)", stale.IsLeader(), stale.WriteAllowed())
+	}
+	if err := stale.PromoteManually(); err == nil {
+		t.Fatal("a node that already holds the leader role must not enter promote()")
+	}
+	if haPromotionCommitting() {
+		t.Fatal("a refused promotion of a stale leader opened the publish exception")
+	}
+	before := globalConfigStore.Version()
+	if err := publishCurrentConfigSnapshot(); !errors.Is(err, errPublishWithoutLeadership) || globalConfigStore.Version() != before {
+		t.Fatalf("a stale leader published (err=%v, v%d → v%d)", err, before, globalConfigStore.Version())
 	}
 }

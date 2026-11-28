@@ -747,6 +747,9 @@ func (s *standbyLoopState) sync() bool {
 	}
 	applied, answered := s.h.syncFromLeader(s.ctx, s.client, s.token)
 	s.leaderAnswered = answered
+	if applied {
+		s.startingSince = time.Time{} // a sync ends any run of "starting" answers
+	}
 	return applied
 }
 
@@ -911,9 +914,9 @@ func (s *standbyLoopState) startingGraceOver(answer haLeaderAnswer) bool {
 		return false
 	}
 	if s.startingSince.IsZero() {
-		s.startingSince = time.Now()
+		s.startingSince = haStartingNow()
 	}
-	return time.Since(s.startingSince) > haStartingGrace
+	return haStartingNow().Sub(s.startingSince) > haStartingGrace
 }
 
 // onSyncFailed is tick's tail for a round that did not apply: count it, and at
@@ -1085,10 +1088,10 @@ func (h *HAState) warnManualFailoverRequired(leaderAddr string) {
 }
 
 // syncFromLeader calls HASync on the leader and applies the state bundle.
-// applied reports a fully applied bundle. leaderAnswered says whether the round
-// proved the leader alive: a reply (even one that was then unparseable, rejected
-// by the epoch check or refused in the apply path), or one of the refusals only
-// a live leader sends (haLeaderAnswerOf); haNoAnswer for any other failure.
+// applied reports a fully applied bundle. leaderAnswered reports that the RPC
+// returned a reply at all — true for a bundle that was then unparseable,
+// rejected by the epoch check or refused in the apply path; false only when the
+// call itself failed (transport error or a gRPC status).
 func (h *HAState) syncFromLeader(ctx context.Context, client *DataPlaneClient, token string) (applied bool, leaderAnswered haLeaderAnswer) {
 	// ADR-0005 S0: advertise this standby's own address so the leader can record
 	// it as the failback target (the topology otherwise never tells the leader).
@@ -1100,9 +1103,9 @@ func (h *HAState) syncFromLeader(ctx context.Context, client *DataPlaneClient, t
 	raw, err := client.call(ctx, methodHASync, json.RawMessage(reqBytes))
 	if err != nil {
 		logger.Printf("HA: HASync RPC error: %v", err)
-		// A leader that says it is STARTING, or that rejects this node's token,
-		// answered: it is alive, which is the opposite of evidence that it is
-		// gone (ADR-0064).
+		// A leader that says it is STARTING answered (ADR-0065); so did one
+		// that holds publication or rejects this node's token (ADR-0064): it
+		// is alive, which is the opposite of evidence that it is gone.
 		return false, haLeaderAnswerOf(err)
 	}
 	// Record the HA bundle size so the NEXT HASync poll's deadline scales with

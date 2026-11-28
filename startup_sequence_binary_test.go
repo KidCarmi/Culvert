@@ -310,6 +310,20 @@ func (p *suBinPoller) waitReplies(t *testing.T, more int, d time.Duration) []Con
 const suBinPolicy = `[{"priority":1,"name":"cp-rule-a","destFQDN":"a.example.com","action":"Allow"},` +
 	`{"priority":2,"name":"cp-rule-b","destFQDN":"b.example.com","action":"Drop"}]`
 
+// suBinBlockedHosts is the size of the control plane's blocklist in the poller
+// test: large enough that loading it takes a few hundred milliseconds, so the
+// "starting" window is long enough for a 10 ms poller to observe on every
+// start, and small enough to keep the test quick.
+const suBinBlockedHosts = 150_000
+
+func suBinBlocklist() string {
+	var sb strings.Builder
+	for i := 0; i < suBinBlockedHosts; i++ {
+		fmt.Fprintf(&sb, "host-%06d.blocked-by-cp.example\n", i)
+	}
+	return sb.String()
+}
+
 func suBinWantLoaded(t *testing.T, when string, replies []ConfigSnapshot) {
 	t.Helper()
 	for i := range replies {
@@ -318,10 +332,10 @@ func suBinWantLoaded(t *testing.T, when string, replies []ConfigSnapshot) {
 		for j := range s.PolicyRules {
 			names = append(names, s.PolicyRules[j].Name)
 		}
-		if strings.Join(names, ",") != "cp-rule-a,cp-rule-b" || len(s.BlockedHosts) != 1 || s.DefaultAction != "allow" {
-			t.Fatalf("%s: reply #%d (v%d) served rules=%v blocked_hosts=%v default_action=%q — a poller must only ever be "+
-				"served the control plane's LOADED configuration (2 rules, 1 blocked host, allow)",
-				when, i+1, s.Version, names, s.BlockedHosts, s.DefaultAction)
+		if strings.Join(names, ",") != "cp-rule-a,cp-rule-b" || len(s.BlockedHosts) != suBinBlockedHosts || s.DefaultAction != "allow" {
+			t.Fatalf("%s: reply #%d (v%d) served rules=%v blocked_hosts=%d default_action=%q — a poller must only ever be "+
+				"served the control plane's LOADED configuration (2 rules, %d blocked hosts, allow)",
+				when, i+1, s.Version, names, len(s.BlockedHosts), s.DefaultAction, suBinBlockedHosts)
 		}
 	}
 }
@@ -345,7 +359,7 @@ func TestBinaryStartup_ControlPlane_PollerOnlyEverSeesLoadedConfig(t *testing.T)
 	n, proxyPort := suBinNewNode(t, bin,
 		"-cp-grpc-addr", grpcAddr,
 		"-policy", suBinWrite(t, filepath.Join(cfgDir, "policy.json"), suBinPolicy),
-		"-blocklist", suBinWrite(t, filepath.Join(cfgDir, "blocklist.txt"), "blocked-by-cp.example\n"),
+		"-blocklist", suBinWrite(t, filepath.Join(cfgDir, "blocklist.txt"), suBinBlocklist()),
 		"-config", suBinWrite(t, filepath.Join(cfgDir, "config.yaml"), "default_action: allow\n"),
 	)
 	poller := suBinStartPoller(t, grpcAddr)
@@ -366,7 +380,7 @@ func TestBinaryStartup_ControlPlane_PollerOnlyEverSeesLoadedConfig(t *testing.T)
 		t.Error("the poller was never answered " + cpStartingStatusMarker + ": the control plane's port was closed while its stores loaded, " +
 			"which a standby cannot tell from a dead leader")
 	}
-	n.wantLogOrder("control-plane listener bound in STARTING state", "Blocklist loaded: 1 entries", "Policy: 2 rule(s) loaded",
+	n.wantLogOrder("control-plane listener bound in STARTING state", fmt.Sprintf("Blocklist loaded: %d entries", suBinBlockedHosts), "Policy: 2 rule(s) loaded",
 		"Policy: default action: allow", "control-plane early listener on", "ControlPlane: config v",
 		"ControlPlane: enabled (gRPC", "Startup: node READY")
 	firstVersion := first[len(first)-1].Version
@@ -436,6 +450,9 @@ func TestBinaryStartup_DataPlane_RestartKeepsControlPlaneState(t *testing.T) {
 		PolicyRules: []PolicyRule{{Priority: 1, Name: "from-control-plane", DestFQDN: "localhost", Action: ActionDrop}},
 	})
 
+	// Persisted hit history for the rule the last-good snapshot carries.
+	hitFile := suBinWrite(t, filepath.Join(n.dataDir, "hit_counters.json"), `{"from-control-plane":{"hits":41,"lastHit":1700000000}}`)
+
 	n.start()
 	suBinWaitProxy(t, proxyPort)
 
@@ -468,6 +485,26 @@ func TestBinaryStartup_DataPlane_RestartKeepsControlPlaneState(t *testing.T) {
 		t.Errorf("the SOCKS5 listener does not serve after start-up (gate never released?): %v %v", reply, err)
 	}
 	_ = c.Close()
+
+	// Hit history: the replay replaced the rule (new, zeroed counter cells);
+	// the history must have been put back, so the shutdown save persists at
+	// least the 41 hits the node started with — not the zero (plus this
+	// test's own request) it would write had the replay's cells been kept.
+	n.stop()
+	raw, err := os.ReadFile(hitFile)
+	if err != nil {
+		t.Fatalf("hit counter file after shutdown: %v", err)
+	}
+	var saved map[string]struct {
+		Hits int64 `json:"hits"`
+	}
+	if err := json.Unmarshal(raw, &saved); err != nil {
+		t.Fatalf("hit counter file: %v\n%s", err, raw)
+	}
+	if got := saved["from-control-plane"].Hits; got < 41 {
+		t.Errorf("after a data-plane restart the persisted hit count for the replayed rule is %d, want at least the 41 it had: "+
+			"the last-good replay zeroed the rule's counters and nothing restored them\n%s", got, raw)
+	}
 }
 
 // TestBinaryStartup_DataPlane_FirstEnrolmentNoLastGood: a data plane with no

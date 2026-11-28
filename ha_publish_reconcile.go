@@ -265,7 +265,9 @@ func adoptPreservedSnapshot(before publishGateState, rec *haPreservedSnapshot) b
 			maxV = before.Evidence[i].Version
 		}
 	}
-	globalConfigStore.raiseVersionAtLeast(maxV) // CLU-002: strictly above every reported and known version
+	// CLU-002: strictly above every reported and known version — and one more,
+	// so the commit's delta base is a version no node holds (releasePublishHold).
+	globalConfigStore.raiseVersionAtLeast(maxV + 1)
 	if err := publishCurrentConfigSnapshot(); err != nil {
 		notePublishReconcile("publishing the adopted configuration failed: " + err.Error())
 		return false
