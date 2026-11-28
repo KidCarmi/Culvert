@@ -433,9 +433,6 @@ func chainPayloadBytes(chain []blocklistDelta) int {
 // secrets from the remainder for unenrolled callers. Epoch-fenced via the reply
 // Epoch (the DP ratchets it exactly like a full snapshot).
 func (s *controlPlaneServer) GetConfigDelta(ctx context.Context, req json.RawMessage) (json.RawMessage, error) {
-	if err := refuseDistributionIfUnauthorized("GetConfigDelta"); err != nil {
-		return nil, err
-	}
 	if ok, reason := globalConfigStore.ServableConfig(); !ok {
 		return nil, status.Errorf(codes.Unavailable, "control plane has no valid config to distribute: %s", reason)
 	}
@@ -456,12 +453,6 @@ func (s *controlPlaneServer) GetConfigDelta(ctx context.Context, req json.RawMes
 	// new one is exposed, and a Data Plane would apply it without ratcheting.
 	// The stamp already carries the role-less floor (configEpochLocked).
 	cur, epoch := globalConfigStore.committedVersionEpoch()
-	// ADR-0064 part D: same rule as GetConfig — never roll a data plane back.
-	if keep, gerr := publishGateForDataPlane(gatePeerLabel(ctx), "get_config_delta", dreq.KnownVersion); gerr != nil {
-		return nil, gerr
-	} else if keep {
-		return json.Marshal(getConfigDeltaReply{Mode: "unchanged", TargetVersion: dreq.KnownVersion, Epoch: epoch})
-	}
 	if dreq.KnownVersion == cur {
 		// Idle-drift detection: if the DP reports a fingerprint for the current
 		// version that disagrees with ours, it has drifted (e.g. a half-applied

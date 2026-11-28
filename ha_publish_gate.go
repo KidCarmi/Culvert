@@ -492,16 +492,26 @@ func (h *HAState) beginPublishGateArming() publishGateArming {
 	return publishGateArming{active: true, watermark: w}
 }
 
-// arm completes the arming once the node leads.
-func (a publishGateArming) arm(term uint64, epoch int64) {
-	if !a.active {
+// armIfPromoted completes the arming when the promotion it was begun for made
+// this node the leader; a promotion that failed arms nothing.
+func (a publishGateArming) armIfPromoted(h *HAState) {
+	if !a.active || !h.IsLeader() {
+		globalConfigStoreUnmark(a.active)
 		return
 	}
 	first := globalConfigStore.markedCommitVersion()
 	if first == 0 {
 		first = globalConfigStore.Version() + 1 // the promotion committed nothing: own versions start with the next commit
 	}
-	armPublishGate(a.watermark, first, term, epoch)
+	armPublishGate(a.watermark, first, h.Status().Term, h.CurrentEpoch())
+}
+
+// globalConfigStoreUnmark disarms the commit mark of a promotion that did not
+// complete.
+func globalConfigStoreUnmark(active bool) {
+	if active {
+		globalConfigStore.markedCommitVersion()
+	}
 }
 
 // publishGateForDataPlane applies the gate to one config request. It returns
@@ -606,15 +616,6 @@ var haPreviousLeaderReachable = func() bool {
 	return true
 }
 
-// refuseDistributionIfUnauthorized is the check GetConfig, GetConfigDelta and
-// HASync make before serving.
-func refuseDistributionIfUnauthorized(method string) error {
-	if reason, refused := haDistributionRefused(); refused {
-		return cpPublishNotAuthorizedStatus(method, reason)
-	}
-	return nil
-}
-
 // pagePublishHold pages a publication hold once. A promotion (and so a hold)
 // can precede the load of the persisted webhooks at start-up, so before the
 // startup flush the page queues and is delivered only while the hold is still
@@ -642,4 +643,44 @@ func publishHoldInForce() bool {
 // gate lock (lock order: the gate lock is a leaf).
 func publishGateApplies() bool {
 	return haTopologySource().Status().Role == "leader"
+}
+
+// withPublishGate puts the publication gate in front of a config-serving
+// handler (GetConfig, GetConfigDelta): a data plane holding a version this
+// promoted node never replicated is told to keep what it has — it is never
+// handed older content at a higher version — and a caller whose state is
+// unknown during a hold gets Unavailable. Everyone else reaches the handler
+// unchanged. The blanket "nothing may be distributed" refusal is the
+// lifecycle gate's (nodeServingRefusal → haDistributionRefused).
+func withPublishGate(source string, fn func(context.Context, json.RawMessage) (json.RawMessage, error)) func(context.Context, json.RawMessage) (json.RawMessage, error) {
+	return func(ctx context.Context, req json.RawMessage) (json.RawMessage, error) {
+		var known struct {
+			KnownVersion int64 `json:"known_version"`
+		}
+		_ = json.Unmarshal(req, &known) // tolerate empty/garbage: version 0
+		keep, err := publishGateForDataPlane(gatePeerLabel(ctx), source, known.KnownVersion)
+		switch {
+		case err != nil:
+			return nil, err
+		case !keep:
+			return fn(ctx, req)
+		case source == "get_config_delta":
+			_, epoch := globalConfigStore.committedVersionEpoch()
+			return json.Marshal(getConfigDeltaReply{Mode: "unchanged", TargetVersion: known.KnownVersion, Epoch: epoch})
+		}
+		return json.Marshal(configUnchangedReply{ConfigUnchanged: true, Version: known.KnownVersion})
+	}
+}
+
+// publishGateSources names the handlers the gate fronts and how their reports
+// are labelled in the evidence.
+var publishGateSources = map[string]string{"GetConfig": "get_config", "GetConfigDelta": "get_config_delta"}
+
+// publishGated wraps fn with the publication gate when method serves
+// configuration to data planes; any other handler is returned as it is.
+func publishGated(method string, fn func(context.Context, json.RawMessage) (json.RawMessage, error)) func(context.Context, json.RawMessage) (json.RawMessage, error) {
+	if src, ok := publishGateSources[method]; ok {
+		return withPublishGate(src, fn)
+	}
+	return fn
 }

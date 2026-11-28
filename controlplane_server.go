@@ -104,22 +104,11 @@ func (s *controlPlaneServer) GetConfig(ctx context.Context, req json.RawMessage)
 	// (nothing valid was ever published) — a fresh DP must not be handed a zero
 	// snapshot. The DP treats Unavailable as a poll failure and keeps its
 	// last-good; the operator sees the reason and trims the oversized config.
-	if err := refuseDistributionIfUnauthorized("GetConfig"); err != nil {
-		return nil, err
-	}
 	if ok, reason := globalConfigStore.ServableConfig(); !ok {
 		return nil, status.Errorf(codes.Unavailable, "control plane has no valid config to distribute: %s", reason)
 	}
 	var greq getConfigRequest
 	_ = json.Unmarshal(req, &greq) // tolerate empty/"{}"/garbage → KnownVersion 0
-	// ADR-0064 part D: a data plane holding a version this promoted node never
-	// replicated keeps what it has — it is never handed older content at a
-	// higher version.
-	if keep, gerr := publishGateForDataPlane(gatePeerLabel(ctx), "get_config", greq.KnownVersion); gerr != nil {
-		return nil, gerr
-	} else if keep {
-		return json.Marshal(configUnchangedReply{ConfigUnchanged: true, Version: greq.KnownVersion})
-	}
 	if greq.KnownVersion > 0 && greq.KnownVersion >= globalConfigStore.Version() {
 		return json.Marshal(configUnchangedReply{ConfigUnchanged: true, Version: greq.KnownVersion})
 	}
@@ -1087,9 +1076,6 @@ func (s *controlPlaneServer) HASync(ctx context.Context, raw json.RawMessage) (j
 	// Refuse to replicate an empty config to a standby when the leader's initial
 	// publish was rejected (nothing valid ever published) — applyHABundle would
 	// otherwise apply the zero snapshot and wipe the standby's config.
-	if err := refuseDistributionIfUnauthorized("HASync"); err != nil {
-		return nil, err
-	}
 	if ok, reason := globalConfigStore.ServableConfig(); !ok {
 		return nil, status.Errorf(codes.Unavailable, "leader has no valid config to replicate: %s", reason)
 	}
@@ -1144,11 +1130,10 @@ func (s *controlPlaneServer) HASync(ctx context.Context, raw json.RawMessage) (j
 
 	published := globalConfigStore.Get()
 	bundle := HAStateBundle{
-		ClusterState:     stateJSON,
-		CACertPEM:        string(globalClusterCA.CACertPEM()),
-		CAKeyEncrypted:   caKeyEncrypted,
-		Config:           published,
-		PublishGate:      publishGateForBundle(), // ADR-0064 part D: inherited by the standby
+		ClusterState:   stateJSON,
+		CACertPEM:      string(globalClusterCA.CACertPEM()),
+		CAKeyEncrypted: caKeyEncrypted,
+		Config:         published, PublishGate: publishGateForBundle(), // ADR-0064: the standby inherits the gate
 		Version:          published.Version,
 		PromoteRequested: globalHA.plannedPromotion.Load(),   // ADR-0004 Slice 1e: coordinated handoff
 		LeaderTerm:       globalHA.Status().Term,             // ADR-0004 Slice 1c/P2: seed standby epoch
@@ -1547,7 +1532,7 @@ func haServingAllowed() (ok bool, reason string) {
 // unclassified method fails CLOSED (gated): a new RPC is never served by a
 // standby by omission.
 func gatedUnary(method string, fn func(context.Context, json.RawMessage) (json.RawMessage, error)) func(any, context.Context, func(any) error, grpc.UnaryServerInterceptor) (any, error) {
-	inner := wrapUnary(fn)
+	inner := wrapUnary(publishGated(method, fn)) // ADR-0064: the gate in front of the config-serving handlers
 	p, classified := cpRPCPolicies[method]
 	leaderGated := !classified || p.leaderGated
 	if method == "HASync" {

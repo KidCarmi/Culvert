@@ -1287,7 +1287,7 @@ func (h *HAState) promote(reason string) {
 		logger.Printf("HA: promote (%s) requested but no promote context available — ignoring", reason)
 		return
 	}
-	gate := h.beginPublishGateArming() // ADR-0064 part D: where this node's own versions begin
+	defer h.beginPublishGateArming().armIfPromoted(h) // ADR-0064 part D: where this node's own versions begin
 
 	// ADR-0005 S2: every path to leadership goes through the fence. Denied
 	// or transport-unknown ⇒ no promotion. A grant whose onPromote then
@@ -1379,7 +1379,6 @@ func (h *HAState) promote(reason string) {
 	h.stopLoops()
 	h.startLeaseKeepalive() // after stopLoops(): it halts the keepalive too
 	h.republishTopology()   // after the keepalive: renewal never waits on publication
-	gate.arm(newTerm, promoteEpoch)
 
 	logger.Printf("HA: now serving as leader (promoted from standby, term=%d)", newTerm)
 }
