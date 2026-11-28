@@ -242,7 +242,12 @@ barriers on the endpoint are unchanged and still inline at the call sites.
 The loop's context is built *before* the lock, and cancelling the old loop,
 publishing the endpoint and publishing the new `cancel` happen under **one**
 hold of the mutex. Two orderings remain and both are coherent: the configure
-wins and a loop runs, or the stop wins and none does. `cancel` is stored as
+wins and a loop runs, or the stop wins and the exporter ends disabled holding
+no handle. (Precisely — see §11 F1 — when the stop wins, Configure still starts
+a goroutine, because `go pushLoop(ctx)` is necessarily outside the lock; it
+takes its `ctx.Done()` arm immediately and exits, with nothing to flush. The
+exporter *converges* on "no loop" rather than holding that property at an
+instant.) `cancel` is stored as
 `nil` on the disable path, so a disabled exporter holds no handle to anything.
 
 **`SpanExporter.Endpoint()`** — the reader the span exporter lacked, which is
@@ -274,7 +279,8 @@ that exist today and the failure mode it guards is silence.
 
 ## 8. Required tests — shipped
 
-`internal/otlp/lifecycle_ownership_chaos130_test.go` (8 gates):
+`internal/otlp/lifecycle_ownership_chaos130_test.go` (8 gates; the counts and
+the shape of two of them changed under the independent review — see §11):
 
 - `ConcurrentConfigureLeavesOneSpanPushLoop` / `…MetricsPushLoop` — 60 rounds
   of 8 concurrent `Configure` on a fresh exporter; exactly one loop, and zero
@@ -291,7 +297,7 @@ that exist today and the failure mode it guards is silence.
   shapes, plus the invariant that binds it to `Configure`: for every shape,
   what `Configure` stores is what `NormalizeEndpoint` returns.
 
-`otlp_pair_lifecycle_chaos130_test.go` (7 gates): the snapshot restoring a
+`otlp_pair_lifecycle_chaos130_test.go` (9 gates): the snapshot restoring a
 traces exporter stopped alone; the disabling snapshot stopping traces with
 metrics already off (F9); a coherent plane left alone with no span discarded
 (F12); a repoint moving both halves; 200 concurrent pair transitions never
@@ -424,3 +430,145 @@ because the property is the right one, not because it caught anything.
   ownership decision than this round should make.
 - **R7 — nothing here addresses `CHAOS-126`'s R1.** A RAM buffer is still a RAM
   buffer: SIGKILL, OOM or a power loss lose what is held.
+
+---
+
+## 11. Independent review of the fix, and what it found
+
+The round's fix was reviewed independently before the PR was finished, with the
+reviewer given the code and a bounded question set and explicitly told not to
+read this document or the register entry. **It found one defect that would have
+broken CI on every unrelated PR, one real regression introduced by the fix, one
+vacuous gate, and one overstatement in this round's own prose.** All four were
+reproduced by the lead before being changed, and each now has its reproduction
+as a gate.
+
+### F1 (HIGH) — the round shipped a flaky gate, and CI runs exactly the command that trips it
+
+`TestChaos130_StopAndConfigureAreExclusive` asserted the invariant on a
+**process-wide differential goroutine count**. That cannot express it, because
+`go pushLoop(ctx)` is necessarily outside the critical section: when `Stop()`
+wins the race, `Configure` still starts a goroutine, which takes its
+`ctx.Done()` arm and exits at once. The exporter therefore **converges** on "no
+loop" instead of holding that property at an instant, and a neighbouring
+attempt's straggler shifts the per-attempt baseline by ±1.
+
+Reproduced by the lead on a loaded machine — the shape of a CI shard:
+
+| command | result |
+|---|---|
+| `go test -race -run TestChaos130 -count=3 ./internal/otlp/`, machine idle | 0/6 fail |
+| the same, with four CPU hogs running | **3 of 3 runs FAIL** |
+
+with readings including the impossible:
+
+```
+attempt 503: Enabled() = false with -1 live push loop(s); want 0
+attempt 553: Enabled() = true  with  0 live push loop(s); want 1
+```
+
+`-1` is the proof: the baseline, not the product, was wrong. And the Fast Gate
+and the QA gate both run `go test -race -count=1 -timeout=10m -v ./...`
+(`pr-fast-gate.yml:494`, `qa-gate.yml:553`), so this would have reddened **any**
+PR that happened to land on the shard carrying this package, roughly one run in
+six, with a message pointing at the product code rather than at the harness.
+The worst kind of gate: one that cries wolf about someone else's change.
+
+**Fixed** by stating the invariant where it is instantaneous — `e.cancel` under
+`e.mu`, plus the endpoint settling with the active flag — and keeping the
+goroutine count only as a single **aggregate** assertion after all 600 races,
+where "every loop has unwound" is a property the implementation really does
+hold. A `quiesceLoops` helper now samples any baseline only once the count has
+stopped moving, which removes the same latent contamination from the three
+other gates that use a differential count. Re-measured under the identical
+load: **0 of 5 runs fail** at `-race -count=3`, and **0 of 3** for the whole
+package at `-race -count=1`. The differential oracle survived the rewrite —
+four gates still fail on the two-phase tree, one of them now reporting **72
+POSTs over 10 intervals** where 10 is correct.
+
+### F2 (MED) — the per-exporter reconcile could leave the two halves holding different credentials
+
+This one the fix introduced. Deciding each half independently is what closes
+130b and 130c — but it also means only the *wrong* half gets reconfigured, and
+the snapshot's inputs then reach only that half. From metrics off and traces at
+`E` with a locally configured auth header, a snapshot carrying `E` configured
+metrics with the snapshot's `nil` headers and **skipped traces**, so metrics
+would 401 against an authenticating collector forever while traces kept
+working. The old coupled guard never produced that state, because it always
+configured both.
+
+**Fixed** by separating the *decision* from the *action*: each half is still
+examined on its own, so a half that is dark or misdirected is still detected —
+but when **either** is wrong, **both** are reconfigured from the one set of
+inputs. The steady-state no-op is untouched (F12 still holds: both already at
+the endpoint ⇒ return, nothing cancelled, nothing discarded). The cost is
+restarting one healthy loop in an already-anomalous state, which no
+steady-state apply reaches, and it is the reading that matches this round's own
+thesis: the pair is one decision.
+
+### F3 (MED, caught as a vacuous gate) — the first credential gate asserted nothing
+
+The gate written for F2 passed against the broken code. `SpanExporter` had no
+`Headers()` reader, so the test could only check the metrics half — the half
+that was already correct. **This is the same shape as 130b's root cause**: the
+property could not be stated because the accessor did not exist, which is
+exactly why the CP apply had been reading the metrics exporter for both halves.
+`SpanExporter.Headers()` was added, mirroring its twin, and the gate now fails
+on the per-half reconcile with the right message.
+
+### F4 (LOW) — "the stop wins and nothing does" was not true
+
+This round's own comment and commit message said that under one critical
+section either the configure wins and a loop runs, or the stop wins and
+**nothing** does. A goroutine does start in the second case; it just exits
+immediately. The claim is corrected in `spans.go` and in §7 above, and the
+distinction is not cosmetic — it is precisely what made F1's assertion
+unsound.
+
+### Also closed while the findings were being fixed
+
+- **A split export plane is now reported.** The reviewer noted that
+  `otlp_export_partial` keys on `Enabled()` alone, so **both** halves running
+  against **different** collectors stayed as silent as the half-enabled case
+  used to be. A second row, `otlp_export_split`, names it — without naming
+  either endpoint, since one may embed a token.
+
+### Review findings recorded and NOT fixed here
+
+- **(LOW, pre-existing) `adminSettingsSave` can pair a new endpoint with the
+  old collector's token.** `admin_settings.go:843-846` writes
+  `s.OTLPEndpoint = globalOTLP.Endpoint()` unconditionally but
+  `s.OTLPHeaders` only when non-empty. A CP repoint to collector B passes `nil`
+  headers; the next unrelated admin save persists **endpoint B with the
+  retained header for collector A**, and the next restart sends A's bearer
+  token to B. Pre-existing on both the old and new CP paths, and a credential
+  hygiene question about `AdminSettings` persistence rather than about exporter
+  ownership — but it is the sharpest of the carried items and should be the
+  next one taken.
+- **(LOW, pre-existing) the shutdown flush is not under the pair mutex.**
+  `flushOTLPExporters` (`main_shutdown.go:428-437`) calls `FlushFinal`/`Flush`
+  directly. `FlushFinal` sets `finalized = true`; a `Configure` landing after
+  it resets `finalized = false`, re-arming `requeue` into a ring that dies with
+  the process — the silent loss `CHAOS-126` removed, in the last second of the
+  process's life. Narrow (it needs an admin save or a CP apply inside the flush
+  reserve, with the admin listener still up) and pre-existing, but noted
+  because this round's thesis is that this pair is one decision.
+
+### What the review confirmed sound
+
+No deadlock and no lock inversion: `otlpPairMu → exporter.mu` is the only order
+in the tree, and the inverse is *unconstructible* because `internal/otlp`
+cannot reference a `package main` symbol (ADR-0003). The only outward call from
+inside `Configure`/`Stop` is `obs.Printf` into an async `internal/logsink`
+writer, so no network write happens under the pair mutex. `checkOTLPExport` has
+one caller (`diagnostics.go:314`), not under the lock, and releases before
+`Health()`. No helper re-enters another. `grep` for
+`globalOTLP*.Configure|Stop` outside tests returns only the three helpers in
+`otlp.go` — all four lifecycle callers really do go through them. `go vet`'s
+`lostcancel` is clean and no path creates a cancel that is never stored, so the
+goroutine leak is genuinely closed. The new row has no reachable false
+positive, and the existing `otlp_export` failure row is behaviourally
+unchanged. Conventions check out: the inline `url.Parse` → scheme → 
+`isPrivateHost` SSRF guard is intact and still before the dial, handler-level
+`requireRole` is on both arms, the audit-then-save ordering is unchanged, and
+every function the change touched or added is inside the complexity gates.

@@ -191,7 +191,17 @@ func (e *SpanExporter) Configure(endpoint string, headers map[string]string) {
 	// other direction: a disable that interleaved left Enabled() reporting
 	// false with a live loop behind it (measured: 5 of 200 attempts). Under
 	// one critical section the two orderings are the only outcomes — the
-	// configure wins and the loop runs, or the stop wins and nothing does.
+	// configure wins and the loop runs, or the stop wins and the exporter ends
+	// disabled holding no handle.
+	//
+	// Precisely, because `go pushLoop(ctx)` is necessarily OUTSIDE the lock:
+	// when the stop wins, Configure still starts a goroutine. It takes its
+	// ctx.Done() arm on the first select and exits immediately, and its flush
+	// is a no-op because Stop has already cleared the endpoint and counted the
+	// buffer. So the exporter CONVERGES on "no loop" rather than holding that
+	// property at an instant — which is why the gate for this states the
+	// invariant on `e.cancel` under `e.mu`, where it IS instantaneous, and not
+	// on a goroutine count.
 	var (
 		ctx    context.Context
 		cancel context.CancelFunc
@@ -244,6 +254,27 @@ func (e *SpanExporter) Endpoint() string {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	return e.endpoint
+}
+
+// Headers returns a copy of the configured custom headers (nil when none),
+// mirroring MetricsExporter.Headers.
+//
+// CHAOS-130: the twin of the Endpoint() gap above. Without a reader here, the
+// property "both halves of the export plane hold the SAME credentials" could
+// not be asserted at all — and an unassertable invariant is how the pair came
+// apart in the first place. Not surfaced by any admin response; the OTLP
+// endpoint returns the header NAME only.
+func (e *SpanExporter) Headers() map[string]string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if len(e.headers) == 0 {
+		return nil
+	}
+	cp := make(map[string]string, len(e.headers))
+	for k, v := range e.headers {
+		cp[k] = v
+	}
+	return cp
 }
 
 // Stop halts the push loop and clears the endpoint.

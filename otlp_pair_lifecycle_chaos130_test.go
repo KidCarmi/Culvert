@@ -135,6 +135,73 @@ func TestChaos130_SnapshotEndpointNormalisationIsANoOp(t *testing.T) {
 	}
 }
 
+// Reconfiguring only the half that is wrong could leave the two halves holding
+// DIFFERENT credentials: with metrics off and traces at E with a locally
+// configured auth header, a snapshot carrying E configured metrics with the
+// snapshot's nil headers and skipped traces, so metrics 401s against an
+// authenticating collector forever while traces keeps working. One transition
+// for the pair, from one set of inputs (CHAOS-130).
+func TestChaos130_SnapshotReconcileLeavesThePairCredentialCoherent(t *testing.T) {
+	ensureObservabilityStartupTestLogger(t)
+	snapshotObservabilityGlobals(t)
+
+	globalOTLP.Stop()
+	globalOTLPTraces.Configure(chaos130Endpoint, map[string]string{"Authorization": "Bearer local"})
+	if !globalOTLPTraces.Enabled() || globalOTLP.Enabled() {
+		t.Fatal("fixture: traces enabled with a header, metrics off")
+	}
+
+	applySnapshotExtendedState(ConfigSnapshot{OTLPEndpoint: chaos130Endpoint})
+
+	if !globalOTLP.Enabled() || !globalOTLPTraces.Enabled() {
+		t.Fatalf("both halves must be exporting: metrics=%v traces=%v", globalOTLP.Enabled(), globalOTLPTraces.Enabled())
+	}
+	// The snapshot carries no credentials, so neither half may keep any: both
+	// were reconfigured from the same inputs.
+	if h := globalOTLP.Headers(); len(h) != 0 {
+		t.Errorf("metrics kept %d header(s) the snapshot did not supply", len(h))
+	}
+	if h := globalOTLPTraces.Headers(); len(h) != 0 {
+		t.Errorf("traces kept %d header(s) the snapshot did not supply, while metrics got none — the two halves now hold different credentials, so one of them 401s against an authenticating collector forever", len(h))
+	}
+	if got := globalOTLPTraces.Endpoint(); got != chaos130Endpoint {
+		t.Errorf("traces endpoint = %q; want %q", got, chaos130Endpoint)
+	}
+}
+
+// A plane split across two collectors is not a configuration any caller can
+// ask for, and it used to be as silent as the half-enabled one.
+func TestChaos130_SplitEndpointExportIsReported(t *testing.T) {
+	ensureObservabilityStartupTestLogger(t)
+	snapshotObservabilityGlobals(t)
+
+	const other = "http://collector2.invalid:4318"
+	globalOTLP.Configure(chaos130Endpoint, nil)
+	globalOTLPTraces.Configure(other, nil)
+
+	row := findDiagRow(checkOTLPExport(), "otlp_export_split")
+	if row == nil {
+		t.Fatal("no otlp_export_split row for a plane exporting to two different collectors")
+	}
+	if row.Status != diagWarn || row.OperatorAction == "" {
+		t.Errorf("row status = %q, action = %q", row.Status, row.OperatorAction)
+	}
+	// The endpoint may embed a token, so the row must not name either one.
+	if strings.Contains(row.Message, chaos130Endpoint) || strings.Contains(row.Message, other) {
+		t.Errorf("row names a collector endpoint, which may embed a token: %s", row.Message)
+	}
+	// A coherent plane is not a split.
+	configureOTLPPair(chaos130Endpoint, nil)
+	if row := findDiagRow(checkOTLPExport(), "otlp_export_split"); row != nil {
+		t.Errorf("a coherent plane reported a split: %s", row.Message)
+	}
+	// Nor is a fully disabled one.
+	stopOTLPPair()
+	if row := findDiagRow(checkOTLPExport(), "otlp_export_split"); row != nil {
+		t.Errorf("a disabled plane reported a split: %s", row.Message)
+	}
+}
+
 // A repoint through the snapshot must move BOTH halves.
 func TestChaos130_SnapshotRepointMovesBothHalves(t *testing.T) {
 	ensureObservabilityStartupTestLogger(t)

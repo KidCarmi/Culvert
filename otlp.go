@@ -86,13 +86,28 @@ func stopOTLPPair() {
 }
 
 // reconcileOTLPPairToEndpoint brings BOTH exporters to the endpoint a CP
-// snapshot carries, deciding each one from ITS OWN state rather than from the
-// metrics exporter's (CHAOS-130). An empty endpoint means export is off for
-// the fleet and stops whichever halves are still running.
+// snapshot carries. An empty endpoint means export is off for the fleet and
+// stops whichever halves are still running — each tested on its own, which is
+// the fail-OPEN arm this replaces: `else if globalOTLP.Enabled()` stopped
+// NEITHER half when metrics was already off, leaving the gateway shipping
+// request spans the control plane had told it to stop shipping (CHAOS-130).
 //
-// Reconciliation, not an unconditional reconfigure: an exporter already at the
-// snapshot's endpoint is left alone, because Configure would cancel a healthy
-// push loop and — for traces — throw away the buffered spans on every apply.
+// Reconciliation, not an unconditional reconfigure: when both halves already
+// sit at the snapshot's endpoint this returns having done nothing, because
+// Configure would cancel a healthy push loop and — for traces — throw away the
+// buffered spans on every apply.
+//
+// When EITHER half is wrong, BOTH are reconfigured, and that is deliberate.
+// Reconfiguring only the wrong half is what the per-exporter version of this
+// function did, and it could leave the two halves holding DIFFERENT
+// credentials: starting from metrics off and traces at E with a locally
+// configured auth header, a snapshot carrying E would configure metrics with
+// the snapshot's nil headers and skip traces, so metrics would 401 against an
+// authenticating collector forever while traces kept working. The old coupled
+// guard never produced that state because it always configured both. One
+// transition for the pair, from one set of inputs, is the property worth
+// keeping; the cost is restarting one healthy loop in an already-anomalous
+// state, which no steady-state apply ever reaches.
 func reconcileOTLPPairToEndpoint(endpoint string) {
 	// Compare in the alphabet the exporters STORE. Endpoint() returns the
 	// normalised value, so comparing a raw snapshot string against it made a
@@ -112,12 +127,13 @@ func reconcileOTLPPairToEndpoint(endpoint string) {
 		}
 		return
 	}
-	if !globalOTLP.Enabled() || globalOTLP.Endpoint() != endpoint {
-		globalOTLP.Configure(endpoint, nil)
+	metricsAtEndpoint := globalOTLP.Enabled() && globalOTLP.Endpoint() == endpoint
+	tracesAtEndpoint := globalOTLPTraces.Enabled() && globalOTLPTraces.Endpoint() == endpoint
+	if metricsAtEndpoint && tracesAtEndpoint {
+		return
 	}
-	if !globalOTLPTraces.Enabled() || globalOTLPTraces.Endpoint() != endpoint {
-		globalOTLPTraces.Configure(endpoint, nil)
-	}
+	globalOTLP.Configure(endpoint, nil)
+	globalOTLPTraces.Configure(endpoint, nil)
 }
 
 // parseTraceparent extracts trace-id and span-id from a W3C Traceparent

@@ -46,6 +46,29 @@ func settleLoops(t *testing.T, frag string, base, want int) int {
 	return got
 }
 
+// quiesceLoops waits for the process-wide count of frames in frag to stop
+// moving, then returns it. Sampling a baseline while a previous test's
+// cancelled loop is still unwinding is what makes a differential goroutine
+// count unreliable; this is the guard against it.
+func quiesceLoops(t *testing.T, frag string) int {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	prev := -1
+	stable := 0
+	for time.Now().Before(deadline) {
+		got := livePushLoops(t, frag)
+		if got == prev {
+			if stable++; stable >= 3 {
+				return got
+			}
+		} else {
+			prev, stable = got, 0
+		}
+		time.Sleep(3 * time.Millisecond)
+	}
+	return livePushLoops(t, frag)
+}
+
 const spanLoopFrag = "otlp.(*SpanExporter).pushLoop"
 const metricsLoopFrag = "otlp.(*MetricsExporter).pushLoop"
 
@@ -74,7 +97,7 @@ func TestChaos130_ConcurrentConfigureLeavesOneSpanPushLoop(t *testing.T) {
 		e := NewSpans()
 		e.client = ts.Client()
 		e.interval = time.Hour
-		base := livePushLoops(t, spanLoopFrag)
+		base := quiesceLoops(t, spanLoopFrag)
 
 		var wg sync.WaitGroup
 		for i := 0; i < 8; i++ {
@@ -102,7 +125,7 @@ func TestChaos130_ConcurrentConfigureLeavesOneMetricsPushLoop(t *testing.T) {
 		o := NewMetrics(func(now string) []Metric { return []Metric{{Name: "culvert_test"}} })
 		o.client = ts.Client()
 		o.interval = time.Hour
-		base := livePushLoops(t, metricsLoopFrag)
+		base := quiesceLoops(t, metricsLoopFrag)
 
 		var wg sync.WaitGroup
 		for i := 0; i < 8; i++ {
@@ -130,7 +153,7 @@ func TestChaos130_RacedSavesDoNotAccumulateLoops(t *testing.T) {
 	o.client = ts.Client()
 	o.interval = 15 * time.Second // production cadence: no ticks during the race
 
-	base := livePushLoops(t, metricsLoopFrag)
+	base := quiesceLoops(t, metricsLoopFrag)
 	for round := 0; round < 40; round++ {
 		var wg sync.WaitGroup
 		for i := 0; i < 4; i++ {
@@ -185,44 +208,66 @@ func TestChaos130_RacedSavesDoNotAmplifyCollectorLoad(t *testing.T) {
 	}
 }
 
-// Reproduction: 5 of 200 Stop()/Configure() races ended with Enabled()
-// reporting false while a push loop was still running behind it.
+// Stop() and Configure() must not interleave: whichever wins, the exporter's
+// report of itself and the ownership it actually holds have to agree.
+//
+// This is an INVARIANT gate, not a reproduction — unlike the gates above it
+// does not fail on the two-phase code, and it is kept because the property is
+// the right one rather than because it caught anything. An earlier version of
+// this round reported "5 of 200 races ended with Enabled() false behind a live
+// push loop"; that probe counted goroutines without waiting for the previous
+// attempt's cancelled loop to unwind, so it was partly measuring its own
+// residue, and the figure is withdrawn.
+//
+// The invariant is stated on the HANDLE, deliberately, and not on a goroutine
+// dump. `go pushLoop(ctx)` is necessarily outside the critical section, so
+// when Stop() wins, Configure still starts a goroutine — one that takes its
+// ctx.Done() arm on the first select and exits immediately, with nothing to
+// flush because Stop already cleared the endpoint and released the buffer.
+// The implementation therefore CONVERGES on "no loop"; it does not hold that
+// property at an instant, and a process-wide differential goroutine count
+// cannot express a converging property. Asserting it that way was measurably
+// flaky under -race on a loaded machine (reproduced 3 of 3 runs at -count=3,
+// including an impossible reading of -1 live loops, because a neighbouring
+// attempt's straggler shifted the baseline) — and CI runs exactly
+// `go test -race -count=1 ./...`. `e.cancel` under `e.mu` is the same
+// invariant stated where it IS instantaneous.
 func TestChaos130_StopAndConfigureAreExclusive(t *testing.T) {
 	ts := okCollector(t, nil)
+	base := quiesceLoops(t, spanLoopFrag)
 	for attempt := 0; attempt < 600; attempt++ {
 		e := NewSpans()
 		e.client = ts.Client()
 		e.interval = time.Hour // the race, not the ticking, is under test
 
-		base := livePushLoops(t, spanLoopFrag)
 		var wg sync.WaitGroup
 		wg.Add(2)
 		go func() { defer wg.Done(); e.Configure(ts.URL, nil) }()
 		go func() { defer wg.Done(); e.Stop() }()
 		wg.Wait()
 
+		// A disabled exporter owns no loop, so it holds no cancel; an enabled
+		// one owns exactly one, so it holds exactly one handle.
 		enabled := e.Enabled()
-		want := 0
-		if enabled {
-			want = 1
-		}
-		if got := settleLoops(t, spanLoopFrag, base, want); got != want {
-			t.Fatalf("attempt %d: Enabled() = %v with %d live push loop(s); want %d — the two reports must agree",
-				attempt, enabled, got, want)
-		}
-		// The same invariant stated on the handle rather than on the
-		// scheduler: a disabled exporter owns no loop, so it holds no cancel.
 		e.mu.Lock()
 		heldCancel := e.cancel != nil
+		endpoint := e.endpoint
 		e.mu.Unlock()
 		if heldCancel != enabled {
 			t.Fatalf("attempt %d: Enabled() = %v but a stored cancel handle = %v — Stop() and Configure() must not interleave",
 				attempt, enabled, heldCancel)
 		}
-		e.Stop()
-		if got := settleLoops(t, spanLoopFrag, base, 0); got != 0 {
-			t.Fatalf("attempt %d: %d live push loop(s) survived the final Stop()", attempt, got)
+		if (endpoint != "") != enabled {
+			t.Fatalf("attempt %d: Enabled() = %v but endpoint = %q — the active flag and the endpoint must settle together",
+				attempt, enabled, endpoint)
 		}
+		e.Stop()
+	}
+	// The aggregate statement the per-attempt one cannot make: after 600 races
+	// and 600 Stop()s, every loop either never ran or has unwound. A leak would
+	// show here as a count that never comes back down.
+	if got := settleLoops(t, spanLoopFrag, base, 0); got != 0 {
+		t.Errorf("%d push loop(s) still live after 600 raced Configure/Stop pairs; want 0", got)
 	}
 }
 
@@ -233,7 +278,7 @@ func TestChaos130_DisableLeavesNoLoopAndNoStaleCancel(t *testing.T) {
 	e := NewSpans()
 	e.client = ts.Client()
 	e.interval = 20 * time.Millisecond
-	base := livePushLoops(t, spanLoopFrag)
+	base := quiesceLoops(t, spanLoopFrag)
 
 	e.Configure(ts.URL, nil)
 	if got := settleLoops(t, spanLoopFrag, base, 1); got != 1 {
@@ -277,14 +322,19 @@ func TestChaos130_SpanExporterReportsItsEndpoint(t *testing.T) {
 }
 
 // The transition must stay atomic under the race detector with recording,
-// pushing and reconfiguring all live at once — and must still deliver.
+// pushing and reconfiguring all live at once — and must still deliver ON ITS
+// TICKS. The reconfigure period is deliberately several push intervals: at
+// 3 ms against a 5 ms interval the ticker was reset before it ever fired, so
+// everything the collector received came from the cancelled loops' ctx.Done()
+// flushes and the gate did not test what it claimed.
 func TestChaos130_ConfigureUnderConcurrentLoadStillDelivers(t *testing.T) {
 	var delivered atomic.Int64
 	ts := okCollector(t, &delivered)
 	e := NewSpans()
 	e.client = ts.Client()
 	e.interval = 5 * time.Millisecond
-	base := livePushLoops(t, spanLoopFrag)
+	const reconfigureEvery = 40 * time.Millisecond // 8 push intervals
+	base := quiesceLoops(t, spanLoopFrag)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	var wg sync.WaitGroup
@@ -302,10 +352,10 @@ func TestChaos130_ConfigureUnderConcurrentLoadStillDelivers(t *testing.T) {
 		defer wg.Done()
 		for ctx.Err() == nil {
 			e.Configure(ts.URL, nil)
-			time.Sleep(3 * time.Millisecond)
+			time.Sleep(reconfigureEvery)
 		}
 	}()
-	time.Sleep(150 * time.Millisecond)
+	time.Sleep(400 * time.Millisecond)
 	cancel()
 	wg.Wait()
 

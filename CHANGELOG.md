@@ -470,7 +470,11 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   spans), and the diagnostics report gains an `otlp_export_partial` warning
   that names the half that is dark — previously a half-enabled export plane
   produced no row, no counter and no log line, while Settings reported
-  "Exporting metrics + traces".
+  "Exporting metrics + traces". A second warning, `otlp_export_split`, names a
+  plane whose two halves are sending to different collectors, which was equally
+  silent; neither row names an endpoint, because one may embed a token. When
+  either half needs correcting both are reconfigured from the same inputs, so
+  the two can never end up holding different collector credentials.
 - **Request spans the collector never took are no longer destroyed, and the
   counter that reports the loss can finally see it (`CHAOS-126`).** The OTLP
   span exporter drained its ring buffer as the FIRST statement of every push

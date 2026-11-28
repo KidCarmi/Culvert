@@ -34,12 +34,12 @@ func checkOTLPExport() []OperatorContractCheck {
 	// divergence. Read-only and uncontended — the writers are the admin
 	// handler, the CP snapshot apply and startup.
 	otlpPairMu.Lock()
-	metricsOn := globalOTLP.Enabled()
-	tracesOn := globalOTLPTraces.Enabled()
+	metricsOn, metricsEP := globalOTLP.Enabled(), globalOTLP.Endpoint()
+	tracesOn, tracesEP := globalOTLPTraces.Enabled(), globalOTLPTraces.Endpoint()
 	otlpPairMu.Unlock()
 
 	var rows []OperatorContractCheck
-	if partial := otlpPartialExportRow(metricsOn, tracesOn); partial != nil {
+	if partial := otlpIncoherentExportRow(metricsOn, tracesOn, metricsEP, tracesEP); partial != nil {
 		rows = append(rows, *partial)
 	}
 
@@ -53,7 +53,9 @@ func checkOTLPExport() []OperatorContractCheck {
 	return append(rows, otlpExportRows(failing)...)
 }
 
-// otlpPartialExportRow reports an export plane with exactly one half running.
+// otlpIncoherentExportRow reports an export plane whose two halves do not
+// agree: exactly one of them running, or both running against DIFFERENT
+// collectors.
 //
 // CHAOS-130: the two exporters are configured and stopped together by every
 // caller, so one half running alone is not a configuration an operator can
@@ -68,24 +70,42 @@ func checkOTLPExport() []OperatorContractCheck {
 // The transitions are atomic now and this state should be unreachable; the row
 // exists because "unreachable" is a claim about the callers known today, and
 // the failure mode it guards against is silence.
-func otlpPartialExportRow(metricsOn, tracesOn bool) *OperatorContractCheck {
-	if metricsOn == tracesOn {
-		return nil
+func otlpIncoherentExportRow(metricsOn, tracesOn bool, metricsEP, tracesEP string) *OperatorContractCheck {
+	const action = "Settings → OpenTelemetry (OTLP): re-enter the collector endpoint and select Enable to apply " +
+		"the same setting to both halves, or clear it to turn export off entirely. " +
+		"Proxy traffic and policy enforcement are not affected."
+
+	if metricsOn != tracesOn {
+		off, on := "traces", "metrics"
+		if !metricsOn {
+			off, on = "metrics", "traces"
+		}
+		return &OperatorContractCheck{
+			Code:   "otlp_export_partial",
+			Status: diagWarn,
+			Message: "OpenTelemetry (OTLP) export is only half enabled — " + on + " is exporting and " +
+				off + " is not, so the dashboards and alerts built on this node's " + off +
+				" are not being updated and will not recover on their own",
+			OperatorAction: action,
+		}
 	}
-	off, on := "traces", "metrics"
-	if !metricsOn {
-		off, on = "metrics", "traces"
+	// Both halves running, but not to the same place. No caller can ask for
+	// this — every one of them configures the pair from a single endpoint — so
+	// like the half-enabled case it is the residue of two transitions that
+	// interleaved, and it splits a node's telemetry across two collectors with
+	// neither one complete. The endpoints are NOT named: one may embed a token
+	// (see this file's header).
+	if metricsOn && metricsEP != tracesEP {
+		return &OperatorContractCheck{
+			Code:   "otlp_export_split",
+			Status: diagWarn,
+			Message: "OpenTelemetry (OTLP) export is split across two different collectors — metrics and traces " +
+				"are being sent to different endpoints, so neither collector has a complete view of this node " +
+				"and it will not correct itself",
+			OperatorAction: action,
+		}
 	}
-	return &OperatorContractCheck{
-		Code:   "otlp_export_partial",
-		Status: diagWarn,
-		Message: "OpenTelemetry (OTLP) export is only half enabled — " + on + " is exporting and " +
-			off + " is not, so the dashboards and alerts built on this node's " + off +
-			" are not being updated and will not recover on their own",
-		OperatorAction: "Settings → OpenTelemetry (OTLP): re-enter the collector endpoint and select Enable to apply " +
-			"the same setting to both halves, or clear it to turn export off entirely. " +
-			"Proxy traffic and policy enforcement are not affected.",
-	}
+	return nil
 }
 
 // otlpLatestPushFailed reports whether the latest recorded push attempt failed:
