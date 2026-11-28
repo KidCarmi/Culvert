@@ -57,12 +57,14 @@ func quiesceLoops(t *testing.T, frag string) int {
 	stable := 0
 	for time.Now().Before(deadline) {
 		got := livePushLoops(t, frag)
-		if got == prev {
-			if stable++; stable >= 3 {
-				return got
-			}
-		} else {
+		if got != prev {
 			prev, stable = got, 0
+			time.Sleep(3 * time.Millisecond)
+			continue
+		}
+		stable++
+		if stable >= 3 {
+			return got
 		}
 		time.Sleep(3 * time.Millisecond)
 	}
