@@ -349,3 +349,76 @@ func TestPublishGate_FailedLeasePromotionArmsNothing(t *testing.T) {
 		t.Fatalf("a failed promotion armed the gate: %+v", st)
 	}
 }
+
+// Stale-leader fencing (lease mode): a leader whose resume the lease DENIED and
+// that has no standby to join keeps the leader role read-only (ADR-0005 S2).
+// The lease is the authority, so that node distributes nothing: data planes
+// and a standby get CULVERT_PUBLISH_NOT_AUTHORIZED and keep what they have.
+func TestStaleLeader_DeniedLeaseResumeDistributesNothing(t *testing.T) {
+	isolateEligGlobals(t)
+	resetPublishGateForTest()
+	t.Cleanup(resetPublishGateForTest)
+	restore := swapGlobalHA(t)
+	t.Cleanup(func() { globalHA.Stop(); restore() })
+	if err := globalConfigStore.Update(ConfigSnapshot{BlockedHosts: []string{"stale-leader.example"}}); err != nil {
+		t.Fatal(err)
+	}
+
+	f := halease.NewFake(time.Minute)
+	if granted, _, _ := f.Acquire(context.Background(), "cp-new-leader"); !granted {
+		t.Fatal("seed acquire: another node holds the lease")
+	}
+	globalHA.SetLeaseProvider(f, "cp-stale")
+	globalHA.SetResyncMaterial(resyncCtx(t), ":50051", "", "", "")
+	globalHA.ResumeAsLeader(&haConfig{Enabled: true, Token: eligSharedSecret, PeerAddr: "peer:50051", Role: "leader", Term: 9})
+	if !globalHA.IsLeader() || globalHA.WriteAllowed() {
+		t.Fatalf("setup: want the read-only leader stance (leader=%v write=%v)", globalHA.IsLeader(), globalHA.WriteAllowed())
+	}
+
+	if haLeadershipHeld() {
+		t.Error("a leader without the lease does not hold leadership")
+	}
+	if ok, why := haPublishAuthorized(); ok || !strings.Contains(why, "without the fencing lease") {
+		t.Errorf("publishing must not be authorized; ok=%v why=%q", ok, why)
+	}
+	for _, k := range []int64{0, 1, globalConfigStore.Version()} {
+		_, snap, err := dpGetConfig(t, k)
+		if status.Code(err) != codes.Unavailable || !strings.Contains(err.Error(), haPublishNotAuthorizedMark) {
+			t.Fatalf("k=%d: a stale leader served configuration (v%d, blocked=%v, err=%v)", k, snap.Version, snap.BlockedHosts, err)
+		}
+	}
+	conn := startBufconnCP(t)(t, clusterClientCallOptions()...)
+	var raw json.RawMessage
+	dreq, _ := json.Marshal(getConfigDeltaRequest{KnownVersion: 1})
+	if err := conn.Invoke(context.Background(), methodGetConfigDelta, json.RawMessage(dreq), &raw); !strings.Contains(status.Convert(err).Message(), haPublishNotAuthorizedMark) {
+		t.Errorf("GetConfigDelta from a stale leader: %v", err)
+	}
+	hreq, _ := json.Marshal(map[string]any{"token": eligSharedSecret, "role": "standby"})
+	if err := conn.Invoke(context.Background(), methodHASync, json.RawMessage(hreq), &raw); !strings.Contains(status.Convert(err).Message(), haPublishNotAuthorizedMark) {
+		t.Errorf("HASync from a stale leader: %v", err)
+	}
+	// A standby counts that refusal as a live leader holding, not as an outage.
+	if got := haLeaderAnswerOf(status.Error(codes.Unavailable, haPublishNotAuthorizedMark+": x")); got != haAnsweredHolding {
+		t.Errorf("standby classification = %v, want holding", got)
+	}
+
+	// Control: once the node holds the lease it distributes again.
+	f.ExpireForTest()
+	if !globalHA.acquireLeaseForLeadership("test") {
+		t.Fatal("control: acquire after expiry")
+	}
+	epoch, err := globalHA.commitGrant("test")
+	if err == nil {
+		globalHA.mu.Lock()
+		var page *haDeferredPage
+		page, err = globalHA.exposeGrantLocked("test", epoch)
+		globalHA.mu.Unlock()
+		page.dispatch()
+	}
+	if err != nil {
+		t.Fatalf("control: install grant: %v", err)
+	}
+	if _, snap, gerr := dpGetConfig(t, 0); gerr != nil || len(snap.BlockedHosts) != 1 {
+		t.Fatalf("control: a fenced leader must serve (err=%v)", gerr)
+	}
+}

@@ -336,6 +336,9 @@ func publishHoldReasonLocked() string {
 // content and accept configuration changes. ADR-0063's declared-emptying check
 // is to be consulted here as well, not in a second gate.
 func haPublishAuthorized() (ok bool, reason string) {
+	if reason, refused := haDistributionRefused(); refused {
+		return false, reason
+	}
 	publishGate.mu.Lock()
 	defer publishGate.mu.Unlock()
 	loadPublishGateLocked()
@@ -587,4 +590,33 @@ var haPreviousLeaderReachable = func() bool {
 	}
 	_ = conn.Close()
 	return true
+}
+
+// haDistributionRefused reports whether this node must hand out NO
+// configuration at all — to data planes or to a standby. That is narrower than
+// "not publish-authorized": during a publication hold the gate answers each
+// data plane itself (consistent ones are served, ahead ones keep their state)
+// and HASync stays served. Here the node has no authority to distribute
+// anything: it holds the leader ROLE without the fencing lease (a resume the
+// lease denied, with no standby to join — the ADR-0005 S2 stance). The lease
+// is the authority, so a node without it is a stale leader as far as anyone
+// else can tell, and its configuration must not reach the fleet. Data planes
+// keep their last-good configuration, as on any failed poll.
+//
+// The listener's blanket CULVERT_PUBLISH_NOT_AUTHORIZED refusal keys on THIS
+// predicate, not on haPublishAuthorized.
+func haDistributionRefused() (reason string, refused bool) {
+	if globalHA.unfencedLeader() {
+		return "this node holds the HA leader role without the fencing lease, so it is not authorized to distribute configuration", true
+	}
+	return "", false
+}
+
+// refuseDistributionIfUnauthorized is the check GetConfig, GetConfigDelta and
+// HASync make before serving.
+func refuseDistributionIfUnauthorized(method string) error {
+	if reason, refused := haDistributionRefused(); refused {
+		return status.Errorf(codes.Unavailable, "%s: %s; %s is not served", haPublishNotAuthorizedMark, reason, method)
+	}
+	return nil
 }

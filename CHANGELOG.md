@@ -61,6 +61,14 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Security
 
+- **A control plane that holds the leader role without the fencing lease no
+  longer serves configuration.** A restarted leader that the lease refused,
+  with no standby to rejoin, kept the leader role read-only but still answered
+  config polls and standby syncs. The lease is the authority: such a node now
+  answers `GetConfig`, `GetConfigDelta` and `HASync` with `Unavailable`
+  (`CULVERT_PUBLISH_NOT_AUTHORIZED`), and data planes keep their last applied
+  configuration, as on any failed poll. A data plane that has never received a
+  configuration cannot get its first one from such a node.
 - **A promoted HA control plane no longer rolls data planes back.** A standby
   that takes over numbers its configuration above everything the old leader
   issued. A data plane that had applied a version the standby never received

@@ -1047,7 +1047,7 @@ contracts:
     area: cluster-sync
     status: enforced
     owner_approved: false
-    invariant: "A control plane that became leader by an HA promotion never hands a data plane older configuration at a higher version. A data plane that reports a version the promoted node never replicated (between its replicated watermark and its first own version, or above its current version) is answered unchanged and keeps what it has; publication is then held: configuration changes are refused, consistent data planes keep being served, and the HA status lists the nodes and versions. A failover in which no data plane is ahead is never held. The hold and its bounds survive a restart and a second failover. Leadership and publishing authorization are separate: a hold does not remove leadership, and it never blocks a commit into the control plane's own store."
+    invariant: "A control plane that became leader by an HA promotion never hands a data plane older configuration at a higher version. A data plane that reports a version the promoted node never replicated (between its replicated watermark and its first own version, or above its current version) is answered unchanged and keeps what it has; publication is then held: configuration changes are refused, consistent data planes keep being served, and the HA status lists the nodes and versions. A failover in which no data plane is ahead is never held. The hold and its bounds survive a restart and a second failover. A node that holds the leader role without the fencing lease distributes no configuration at all (GetConfig, GetConfigDelta and HASync answer Unavailable CULVERT_PUBLISH_NOT_AUTHORIZED). Leadership and publishing authorization are separate: a hold does not remove leadership, and it never blocks a commit into the control plane's own store."
     authority: "Publication gate (ha_publish_gate.go) at the distribution doors (controlplane_server.go GetConfig, controlplane_delta.go GetConfigDelta, heartbeat)."
     code:
       - "ha_publish_gate.go"
@@ -1072,6 +1072,7 @@ contracts:
       - {file: "ha_publish_gate_test.go", name: TestPublishGate_NotArmedWithoutAPromotion}
       - {file: "ha_publish_gate_test.go", name: TestPublishGate_DemotionDisarms}
       - {file: "ha_publish_gate_test.go", name: TestPublishGate_FailedLeasePromotionArmsNothing}
+      - {file: "ha_publish_gate_test.go", name: TestStaleLeader_DeniedLeaseResumeDistributesNothing}
     validation: integration
     compatibility: "Additive on the wire: the HA bundle gains publish_gate, ignored by older standbys (which then do not inherit a hold). A data plane build that sends no known_version is served as before unless a hold is active, when it receives Unavailable and keeps its last-good configuration. A control plane that was never promoted has no gate."
 

@@ -104,6 +104,9 @@ func (s *controlPlaneServer) GetConfig(ctx context.Context, req json.RawMessage)
 	// (nothing valid was ever published) — a fresh DP must not be handed a zero
 	// snapshot. The DP treats Unavailable as a poll failure and keeps its
 	// last-good; the operator sees the reason and trims the oversized config.
+	if err := refuseDistributionIfUnauthorized("GetConfig"); err != nil {
+		return nil, err
+	}
 	if ok, reason := globalConfigStore.ServableConfig(); !ok {
 		return nil, status.Errorf(codes.Unavailable, "control plane has no valid config to distribute: %s", reason)
 	}
@@ -1084,6 +1087,9 @@ func (s *controlPlaneServer) HASync(ctx context.Context, raw json.RawMessage) (j
 	// Refuse to replicate an empty config to a standby when the leader's initial
 	// publish was rejected (nothing valid ever published) — applyHABundle would
 	// otherwise apply the zero snapshot and wipe the standby's config.
+	if err := refuseDistributionIfUnauthorized("HASync"); err != nil {
+		return nil, err
+	}
 	if ok, reason := globalConfigStore.ServableConfig(); !ok {
 		return nil, status.Errorf(codes.Unavailable, "leader has no valid config to replicate: %s", reason)
 	}

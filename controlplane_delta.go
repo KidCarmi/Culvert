@@ -433,6 +433,9 @@ func chainPayloadBytes(chain []blocklistDelta) int {
 // secrets from the remainder for unenrolled callers. Epoch-fenced via the reply
 // Epoch (the DP ratchets it exactly like a full snapshot).
 func (s *controlPlaneServer) GetConfigDelta(ctx context.Context, req json.RawMessage) (json.RawMessage, error) {
+	if err := refuseDistributionIfUnauthorized("GetConfigDelta"); err != nil {
+		return nil, err
+	}
 	if ok, reason := globalConfigStore.ServableConfig(); !ok {
 		return nil, status.Errorf(codes.Unavailable, "control plane has no valid config to distribute: %s", reason)
 	}
