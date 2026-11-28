@@ -158,6 +158,18 @@ the epoch.
 
 ## Known limits
 
+- **At the end of the grace a legacy pair can have two leaders.** When a
+  leader is still loading its stores after `haStartingGrace` (5 minutes) of
+  starting answers, a legacy standby promotes. The old leader is alive: when
+  its load finishes it resumes leadership as well, and both lead until the
+  authority revalidation of ADR-0064 lands (a restarting legacy leader proving
+  its authority before it resumes). The grace run is one run across rounds
+  that get no answer at all — only a reply from the leader or an applied sync
+  ends it — so a leader that answers intermittently is bounded the same way.
+  Before the start-up reorder this promotion did not happen on a slow start,
+  but only because the leader bound and served within a fraction of a second
+  — serving the state of its still-empty stores.
+
 - **The MCP runtime listener is not behind the activation.** `initMCPRuntime`
   binds it in phase 2, before a data plane's last-good replay. It is off by
   default and enforces its own durable, node-local distribution state, not the

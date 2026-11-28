@@ -876,7 +876,13 @@ func (h *HAState) noteRefusedRound(leaderAddr string) {
 func (s *standbyLoopState) countSyncFailure() bool {
 	answer := s.leaderAnswered
 	s.leaderAnswered = haNoAnswer
-	if answer != haAnsweredStarting {
+	// The starting run — and so its grace clock — ends only when the leader
+	// REPLIES (or a sync applies: sync()). A round with no answer at all does
+	// not end it: a leader hung in start-up that answers "starting" on some
+	// rounds and times out on others is one run, and restarting the clock on
+	// every timeout would let it block failover for ever — the case the grace
+	// exists to bound.
+	if answer == haAnsweredReply {
 		s.startingSince = time.Time{}
 	}
 	if s.h.leaseConfigured() || answer == haNoAnswer || s.startingGraceOver(answer) {
@@ -1077,10 +1083,12 @@ func (h *HAState) warnManualFailoverRequired(leaderAddr string) {
 }
 
 // syncFromLeader calls HASync on the leader and applies the state bundle.
-// applied reports a fully applied bundle. leaderAnswered reports that the RPC
-// returned a reply at all — true for a bundle that was then unparseable,
-// rejected by the epoch check or refused in the apply path; false only when the
-// call itself failed (transport error or a gRPC status).
+// applied reports a fully applied bundle. leaderAnswered says what the round
+// proved about the leader (haLeaderAnswer): haAnsweredReply for a bundle that
+// came back — even one that was then unparseable, rejected by the epoch check
+// or refused in the apply path; haAnsweredStarting / haAnsweredHolding for the
+// two refusals only a live leader sends (haLeaderAnswerOf); haNoAnswer for any
+// other failure of the call.
 func (h *HAState) syncFromLeader(ctx context.Context, client *DataPlaneClient, token string) (applied bool, leaderAnswered haLeaderAnswer) {
 	// ADR-0005 S0: advertise this standby's own address so the leader can record
 	// it as the failback target (the topology otherwise never tells the leader).

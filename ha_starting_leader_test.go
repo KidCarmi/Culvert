@@ -226,3 +226,100 @@ func TestLeaseStandby_StartingAnswerStillCounts(t *testing.T) {
 		t.Errorf("lease holder = %q, want the promoted standby", held.Holder)
 	}
 }
+
+// slAlternate points the standby at the real early listener and at a closed
+// port on alternate rounds: a leader hung in start-up that answers "starting"
+// on some rounds and does not answer at all on others.
+func slAlternate(p *eligPair, starting, dead *DataPlaneClient, round int) {
+	if round%2 == 0 {
+		p.s.client = starting
+		return
+	}
+	p.s.client = dead
+}
+
+// TestLegacyStandby_FlakyStartingLeaderIsStillBoundedByTheGrace: starting,
+// no answer, starting, no answer … is ONE starting run. Inside the grace it
+// never promotes (each starting answer resets the streak a no-answer round
+// started). The grace clock is NOT restarted by the no-answer rounds, so once
+// it is over the starting answers count too, the streak climbs, and the
+// standby promotes — a leader hung in start-up cannot hold failover off for
+// ever by answering only some of the time.
+func TestLegacyStandby_FlakyStartingLeaderIsStillBoundedByTheGrace(t *testing.T) {
+	p := newEligPair(t)
+	advance := slClock(t)
+	p.leader.serve(p.good)
+	p.s.guardedSyncOnce()
+	dead := p.s.client
+	p.leader.down() // the scripted client now fails every call: no answer
+	slStartingLeader(t, p)
+	starting := p.s.client
+
+	// Inside the grace: alternate for many rounds.
+	for round := 0; round < 4*haStandbyMaxFail; round++ {
+		slAlternate(p, starting, dead, round)
+		if p.s.guardedTick() || p.h.IsLeader() {
+			t.Fatalf("promoted on round %d of a flaky starting run INSIDE the grace", round)
+		}
+		if got := p.h.Status().SyncFailCount; got > 1 {
+			t.Fatalf("round %d: sync_fail_count = %d inside the grace; a starting answer must reset the streak", round, got)
+		}
+		advance(5 * time.Second)
+	}
+	if p.s.startingSince.IsZero() {
+		t.Fatal("the no-answer rounds cleared the grace clock: every timeout would restart the grace and the run would never be bounded")
+	}
+
+	// Past the grace, measured from the FIRST starting answer of the run.
+	advance(haStartingGrace)
+	promoted := false
+	for round := 0; round < 2*haStandbyMaxFail && !promoted; round++ {
+		slAlternate(p, starting, dead, round)
+		promoted = p.s.guardedTick()
+		advance(5 * time.Second)
+	}
+	if !promoted || !p.h.IsLeader() {
+		t.Fatalf("a flaky starting leader past the grace still blocks failover (sync_fail_count %d)", p.h.Status().SyncFailCount)
+	}
+}
+
+// TestLegacyStandby_AReplyEndsTheStartingRun is the control for the test
+// above: what DOES restart the grace is the leader replying. A bundle that
+// comes back and is refused is a reply; the next starting run starts a new
+// clock.
+func TestLegacyStandby_AReplyEndsTheStartingRun(t *testing.T) {
+	p := newEligPair(t)
+	advance := slClock(t)
+	p.leader.serve(p.good)
+	p.s.guardedSyncOnce()
+	scripted := p.s.client
+	slStartingLeader(t, p)
+	starting := p.s.client
+
+	p.s.guardedTick() // the run begins
+	first := p.s.startingSince
+	if first.IsZero() {
+		t.Fatal("setup: no starting run")
+	}
+	advance(haStartingGrace - time.Second)
+
+	p.leader.serve(p.refused) // the leader REPLIES; the bundle is refused
+	p.s.client = scripted
+	if p.s.guardedTick() {
+		t.Fatal("promoted on a refused reply")
+	}
+	if !p.s.startingSince.IsZero() {
+		t.Fatal("a reply from the leader did not end the starting run")
+	}
+
+	p.s.client = starting
+	advance(2 * time.Second) // past where the FIRST run's grace would have ended
+	for i := 0; i < 2*haStandbyMaxFail; i++ {
+		if p.s.guardedTick() || p.h.Status().SyncFailCount != 0 {
+			t.Fatalf("round %d of a new starting run was counted: the previous run's clock was carried over a reply", i)
+		}
+	}
+	if !p.s.startingSince.After(first) {
+		t.Error("the new starting run did not start a new clock")
+	}
+}

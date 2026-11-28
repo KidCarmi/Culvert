@@ -130,6 +130,12 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
     again, so a leader hung in start-up cannot block failover. Without it, a
     leader whose stores take more than about fifteen seconds to load would be
     failed over on every restart and then resume as a second leader.
+    **Known limit:** if a leader is still loading after those five minutes,
+    the standby promotes while the old leader is alive, and the old leader
+    resumes when its load completes — two leaders, until the restart authority
+    revalidation ships. Earlier releases avoided that promotion only because
+    a restarting leader served within a fraction of a second, from stores it
+    had not loaded yet.
     **Upgrade the standby before the leader:** a standby on an earlier release
     counts the starting answer as a failure, as it counted a closed port. In
     lease mode nothing changes: a starting node holds no lease, so a leader
