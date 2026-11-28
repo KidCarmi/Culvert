@@ -1267,7 +1267,7 @@ var dpLastFullSnapshotBytes atomic.Int64
 // so they scale with the last full size; everything else stays tight.
 func callDeadline(method string) time.Duration {
 	switch method {
-	case methodGetConfig, methodHASync, methodGetConfigDelta:
+	case methodGetConfig, methodHASync, methodGetConfigDelta, methodHAPeerSnapshot:
 		// GetConfigDelta carries a delta chain (up to the ring's byte bound) plus
 		// the non-blocklist remainder — a multi-MiB reply on a thin WAN. Without the
 		// scaled deadline it would time out at 5s and fall through to the full pull,

@@ -303,6 +303,10 @@ func (h *HAState) enterStandbyResync(reason string) bool {
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	// ADR-0064: preserve before overwrite. What this node committed as leader
+	// is about to be replaced by the new leader's bundle; the new leader may
+	// lack it and need to adopt it (ha_publish_reconcile.go).
+	h.preserveLedSnapshot(reason)
 	logger.Printf("HA: re-entering standby against recorded ex-standby %s (%s)", sanitizeLog(target), sanitizeLog(reason))
 	h.StartAsStandby(ctx, target, token,
 		rc.grpcAddr, rc.certFile, rc.keyFile, rc.caFile, autoFailover,

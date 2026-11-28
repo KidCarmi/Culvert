@@ -77,20 +77,29 @@ type publishGateState struct {
 	// account for: one per promotion (its watermark, its first own version),
 	// including those inherited from the leader this node replicated. A
 	// reported version inside a gap is state this node does not hold.
-	Gaps       []publishGateGap      `json:"gaps,omitempty"`
-	Watermark  int64                 `json:"watermark"`       // W
-	FirstOwn   int64                 `json:"first_own"`       // P0
-	Term       uint64                `json:"term"`            // leadership term the gate was armed for
-	Epoch      int64                 `json:"epoch,omitempty"` // fencing epoch at arming (0 in legacy mode)
-	ArmedAt    string                `json:"armed_at"`
-	Held       bool                  `json:"held"`
-	HeldSince  string                `json:"held_since,omitempty"`
-	HoldReason string                `json:"hold_reason,omitempty"`
-	Phase      string                `json:"phase,omitempty"` // "" | "reconciling" | "adopted" (reconciliation journal)
-	ReleasedBy string                `json:"released_by,omitempty"`
-	ReleasedAt string                `json:"released_at,omitempty"`
-	Reconciled int64                 `json:"reconciled_through,omitempty"` // last version adopted from the previous leader
-	Evidence   []publishGateEvidence `json:"evidence,omitempty"`
+	Gaps       []publishGateGap `json:"gaps,omitempty"`
+	Watermark  int64            `json:"watermark"`       // W
+	FirstOwn   int64            `json:"first_own"`       // P0
+	Term       uint64           `json:"term"`            // leadership term the gate was armed for
+	Epoch      int64            `json:"epoch,omitempty"` // fencing epoch at arming (0 in legacy mode)
+	ArmedAt    string           `json:"armed_at"`
+	Held       bool             `json:"held"`
+	HeldSince  string           `json:"held_since,omitempty"`
+	HoldReason string           `json:"hold_reason,omitempty"`
+	Phase      string           `json:"phase,omitempty"` // "" | "reconciling" | "adopted" (reconciliation journal)
+	ReleasedBy string           `json:"released_by,omitempty"`
+	ReleasedAt string           `json:"released_at,omitempty"`
+	Reconciled int64            `json:"reconciled_through,omitempty"` // last version adopted from the previous leader
+	// ContentFP is this node's distributed content at arming: reconciliation
+	// requires that it has committed nothing of its own since.
+	ContentFP string `json:"content_fp,omitempty"`
+	// ReconcileNote is why the last automatic reconciliation attempt did not
+	// release the hold.
+	ReconcileNote string `json:"reconcile_note,omitempty"`
+	// AdoptingVersion is the preserved version an adoption in phase
+	// "reconciling" is installing: the journal a crash resumes from.
+	AdoptingVersion int64                 `json:"adopting_version,omitempty"`
+	Evidence        []publishGateEvidence `json:"evidence,omitempty"`
 }
 
 // publishGateGap is one unaccounted version range, bounds exclusive.
@@ -191,7 +200,7 @@ func armPublishGate(watermark, firstOwn int64, term uint64, epoch int64) {
 	}
 	next := publishGateState{
 		Armed: true, Watermark: watermark, FirstOwn: firstOwn, Term: term, Epoch: epoch,
-		ArmedAt: time.Now().UTC().Format(time.RFC3339),
+		ArmedAt: time.Now().UTC().Format(time.RFC3339), ContentFP: contentFingerprint(globalConfigStore.Get()),
 	}
 	// Start from the previous leader's gate: its open gaps, and its hold with
 	// the evidence, are still true of the fleet.
@@ -262,6 +271,9 @@ func publishGateDecide(node, source string, k, epoch int64, fp string) publishGa
 	if !st.Armed {
 		return gateServe
 	}
+	if st.Held {
+		ensurePublishReconcileLoop() // also resumes a hold loaded after a restart
+	}
 	if k <= 0 {
 		if st.Held {
 			return gateUnavailable
@@ -320,6 +332,7 @@ func recordGateEvidenceLocked(ev publishGateEvidence) {
 		publishGate.alerted = true
 		pagePublishHold(st.HoldReason)
 	}
+	ensurePublishReconcileLoop()
 }
 
 func publishHoldReasonLocked() string {
@@ -366,9 +379,10 @@ func addPublishGateStatus(resp map[string]any) {
 		gate["held_since"] = st.HeldSince
 		gate["ahead_nodes"] = st.Evidence
 		gate["conflict"] = publishGateConflict(st.Evidence)
-		gate["action"] = "Automatic: this node keeps trying to adopt the previous leader's committed state. " +
-			"If the previous leader is gone for good, release the hold: POST /api/cluster/ha/publish-release " +
-			"(the listed nodes are then rolled back to this node's configuration)."
+		gate["reconcile_note"] = st.ReconcileNote
+		gate["action"] = "Automatic: this node keeps trying to adopt the previous leader's preserved configuration " +
+			"(reconcile_note says why the last attempt did not). If that cannot succeed, release the hold: " +
+			"POST /api/cluster/ha/publish-release (the listed nodes are then rolled back to this node's configuration)."
 	}
 	resp["publish_gate"] = gate
 }
@@ -432,13 +446,21 @@ func releasePublishHold(actor string) (released bool, st publishGateState, err e
 	// watermark moves up to it, and the own range restarts at the release.
 	g.Watermark, g.FirstOwn = maxV, globalConfigStore.Version()
 	g.Gaps = nil // every earlier version is superseded by this node's release
-	g.Held, g.HoldReason, g.HeldSince, g.Phase = false, "", "", ""
+	g.Held, g.HoldReason, g.HeldSince, g.Phase, g.ReconcileNote = false, "", "", "", ""
+	g.AdoptingVersion = 0
 	g.Evidence = nil
+	g.ContentFP = contentFingerprint(globalConfigStore.Get())
 	g.ReleasedBy, g.ReleasedAt = actor, time.Now().UTC().Format(time.RFC3339)
 	publishGate.alerted = false
 	savePublishGateLocked()
 	return true, *g, nil
 }
+
+// haPromotionVersionJump separates a promoted node's own versions from the
+// previous leader's lineage: more versions than a leader can commit between
+// two standby syncs, so (watermark, first own version) is never empty and a
+// version inside it can only be the previous leader's.
+const haPromotionVersionJump = 1 << 20
 
 // publishGateArming carries a promotion's bounds from its start to its end.
 type publishGateArming struct {
@@ -453,8 +475,21 @@ func (h *HAState) beginPublishGateArming() publishGateArming {
 	if h != haTopologySource() {
 		return publishGateArming{}
 	}
+	w := replicatedLeaderConfigVersion.Load()
+	// The promotion's first own version must be unmistakably above everything
+	// the previous leader can have issued and everything already reported:
+	// the wall-clock seed normally guarantees it, but a clock behind the old
+	// leader's counter would number it watermark+1 — the very number of the
+	// old leader's next, unreplicated version. Jump the counter instead.
+	floor := max(w, globalConfigStore.Version())
+	if in := takeInheritedPublishGate(); in != nil {
+		for i := range in.Evidence {
+			floor = max(floor, in.Evidence[i].Version)
+		}
+	}
+	globalConfigStore.raiseVersionAtLeast(floor + haPromotionVersionJump)
 	globalConfigStore.markNextCommit()
-	return publishGateArming{active: true, watermark: replicatedLeaderConfigVersion.Load()}
+	return publishGateArming{active: true, watermark: w}
 }
 
 // arm completes the arming once the node leads.

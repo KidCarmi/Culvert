@@ -1346,6 +1346,7 @@ func registerConfigService(srv grpc.ServiceRegistrar) {
 			{MethodName: "PushAuditEvents", Handler: gatedUnary("PushAuditEvents", svc.PushAuditEvents)},
 			{MethodName: "RenewCert", Handler: gatedUnary("RenewCert", svc.RenewCert)},
 			{MethodName: "HASync", Handler: gatedUnary("HASync", svc.HASync)},
+			{MethodName: "HAPeerSnapshot", Handler: gatedUnary("HAPeerSnapshot", svc.HAPeerSnapshot)},
 		},
 		Streams: []grpc.StreamDesc{},
 	}, nil)
@@ -1520,6 +1521,7 @@ var cpRPCPolicies = map[string]cpRPCPolicy{
 	"PushMetrics":     {true, "a standby accepting heartbeats would report DPs connected to a node that cannot manage them"},
 	"SyncRateLimits":  {true, "cluster rate-limit state must converge on the leader, not a standby"},
 	"PushAuditEvents": {true, "audit events accepted by a standby are not on the leader's record"},
+	"HAPeerSnapshot":  {false, "served by a DEMOTED leader to the leader that replaced it (HA-token authenticated; ADR-0064) — the node that answers is by construction not the leader"},
 	"HASync":          {true, "only the leader may serve replication bundles (the puller's epoch check is lease-mode only)"},
 	"Enroll":          {true, "issuance — additionally haIssuanceAllowed inside the handler (ADR-0005 S3)"},
 	"RenewCert":       {true, "issuance — additionally haIssuanceAllowed inside the handler (ADR-0005 S3)"},

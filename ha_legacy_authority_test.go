@@ -286,7 +286,7 @@ func TestLegacyStandby_StartingLeaderIsAnAnsweredRound(t *testing.T) {
 	p.leader.serve(p.good)
 	p.s.guardedSyncOnce() // synced: eligible to promote on a real outage
 	p.s.client = &DataPlaneClient{callForTest: func(context.Context, string, json.RawMessage) (json.RawMessage, error) {
-		return nil, status.Error(codes.Unavailable, haNodeStartingMarker+": control plane is starting (phase=stores, elapsed=1s); HASync is not served until the node is ready")
+		return nil, cpStartingStatus("HASync")
 	}}
 	for i := 0; i < haStandbyMaxFail*3; i++ {
 		if p.s.guardedTick() || p.h.IsLeader() {
@@ -311,7 +311,7 @@ func TestLegacyStandby_StartingGraceExpiresAndTheLateLeaderJoinsAsStandby(t *tes
 	p.leader.serve(p.good)
 	p.s.guardedSyncOnce()
 	p.s.client = &DataPlaneClient{callForTest: func(context.Context, string, json.RawMessage) (json.RawMessage, error) {
-		return nil, status.Error(codes.Unavailable, haNodeStartingMarker+": control plane is starting (phase=stores, elapsed=3s); HASync is not served until the node is ready")
+		return nil, cpStartingStatus("HASync") // exactly what the early listener answers while stores load
 	}}
 	for i := 0; i < haStandbyMaxFail+1; i++ {
 		if p.s.guardedTick() {
@@ -352,7 +352,7 @@ func TestLegacyStandby_PublishNotAuthorizedLeaderIsAliveWithoutBound(t *testing.
 	p.leader.serve(p.good)
 	p.s.guardedSyncOnce()
 	p.s.client = &DataPlaneClient{callForTest: func(context.Context, string, json.RawMessage) (json.RawMessage, error) {
-		return nil, status.Error(codes.Unavailable, haPublishNotAuthorizedMark+": HASync is not served")
+		return nil, cpPublishNotAuthorizedStatus("HASync", "held")
 	}}
 	p.s.startingSince = time.Now().Add(-haStartingGrace * 4) // irrelevant to this answer
 	for i := 0; i < haStandbyMaxFail*3; i++ {

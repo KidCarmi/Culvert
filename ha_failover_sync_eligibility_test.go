@@ -92,6 +92,13 @@ func isolateEligGlobals(t *testing.T) {
 	tempHADir(t)
 	resetPublishGateForTest() // a promotion arms the publication gate (ADR-0064)
 	t.Cleanup(resetPublishGateForTest)
+	// No background reconciliation in tests: each test drives it itself.
+	prevSpawn, prevFetch := publishReconcileSpawn, haFetchPeerSnapshot
+	publishReconcileSpawn = func(func()) { publishReconcileRunning.Store(false) }
+	haFetchPeerSnapshot = func(context.Context) (*haPreservedSnapshot, error) {
+		return nil, errors.New("previous leader unreachable")
+	}
+	t.Cleanup(func() { publishReconcileSpawn, haFetchPeerSnapshot = prevSpawn, prevFetch })
 	bindFreshAdmissionOwners(t) // the snapshot apply mutates ipf/rl in place (RISK-030)
 	snapshotPolicyStoreForTest(t)
 	policyStore.ReplaceAll(nil)
