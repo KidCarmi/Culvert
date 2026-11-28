@@ -202,6 +202,20 @@ The TTL is the **failover-latency ↔ tolerance trade**:
 - **Standby also down during failover** — nothing promotes; the lease sits
   expired until a node returns and acquires it.
 
+## Restarting a leader in legacy mode (no lease)
+
+A leader that restarts does not resume on its saved role. It resumes when its
+standby polls it (within one ~5 s sync interval of the standby seeing it
+again), or at once when no standby ever synced from it. If the standby
+promoted meanwhile, the restarted node joins it as standby by itself. Until
+one of these happens `GET /api/cluster/ha` reports `authority: revalidating`
+with `authority_reason` and `authority_action`, `/healthz` is 503, cluster
+RPCs that need a leader and admin configuration changes are refused (503
+`ha_write_hold`), and the proxy keeps enforcing its last configuration. If
+the standby is permanently gone, promote the restarted node (HA panel or
+`POST /api/cluster/ha/promote`); the response and the audit entry carry a
+warning, because nothing can show that the standby did not promote.
+
 ## Break-glass
 
 - **Manual promotion** (UI button / `POST /api/cluster/ha/promote`) still

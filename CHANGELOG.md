@@ -61,6 +61,25 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Security
 
+- **A restarted HA leader without a fencing lease no longer resumes leadership
+  on its saved role alone.** If the standby had promoted while the leader was
+  down, both led. The restarted node now resumes only when it has evidence: no
+  standby ever synced from it, or its standby polls it (the poll is answered,
+  so it does not count toward the standby's failover). If the peer answers as
+  leader of a later term the node joins it as standby by itself. A peer that
+  merely cannot be reached proves nothing. **Operator-visible effect:** until
+  then the node holds no HA role — `/healthz` is 503, leader-gated cluster
+  RPCs and certificate issuance are refused, and admin changes to distributed
+  configuration return 503 `ha_write_hold` with the reason — while the proxy
+  keeps enforcing its last configuration and the admin UI, logs and
+  diagnostics stay readable. `GET /api/cluster/ha` shows `authority:
+  revalidating` and the recovery action; `ha_resume_unfenced` fires once. A
+  leader that restarts while its standby is permanently gone needs one
+  operator action: promote it (HA panel or `POST /api/cluster/ha/promote`),
+  which is audited with a warning. Lease mode is unchanged. Remaining limit: a
+  standby whose polls reach the leader while every reply is lost can still
+  promote (only a fencing lease closes that). (ADR-0064; contract `CLU-005`.)
+
 - **A legacy HA standby no longer promotes itself against a leader that is
   still answering.** With `--ha-auto-failover` and no etcd lease, every sync
   round that did not apply counted toward the three-round "leader unreachable"

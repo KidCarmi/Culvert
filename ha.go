@@ -1053,11 +1053,17 @@ func (h *HAState) warnManualFailoverRequired(leaderAddr string) {
 func (h *HAState) syncFromLeader(ctx context.Context, client *DataPlaneClient, token string) (applied, leaderAnswered bool) {
 	// ADR-0005 S0: advertise this standby's own address so the leader can record
 	// it as the failback target (the topology otherwise never tells the leader).
-	reqBytes, _ := json.Marshal(map[string]string{"token": token, "standby_addr": h.advertiseAddr()})
+	// role/term (ADR-0064 part C): the poll is this node's own statement that it
+	// is a standby, which a restarting legacy leader needs before it resumes.
+	reqBytes, _ := json.Marshal(map[string]any{
+		"token": token, "standby_addr": h.advertiseAddr(), "role": "standby", "term": h.Status().Term,
+	})
 	raw, err := client.call(ctx, methodHASync, json.RawMessage(reqBytes))
 	if err != nil {
 		logger.Printf("HA: HASync RPC error: %v", err)
-		return false, false
+		// A leader that says it is STARTING answered: it is alive and coming
+		// up, which is the opposite of evidence that it is gone (ADR-0064).
+		return false, haLeaderStartingError(err)
 	}
 	// Record the HA bundle size so the NEXT HASync poll's deadline scales with
 	// it. An HA-only standby never runs fetchAndApply (the GetConfig path), so
@@ -1713,6 +1719,7 @@ func apiClusterHA(w http.ResponseWriter, r *http.Request) {
 		// -ha-etcd-endpoints wiring; the endpoints themselves are startup
 		// config — read-once, restart-scoped — so the panel shows STATUS).
 		addLeaseHealth(resp, globalHA)
+		addAuthorityStatus(resp)
 		// M5: recent role-transition history (promotions + self-fences), newest
 		// first. Raw facts for the HA panel; empty when nothing has transitioned.
 		resp["failover_events"] = globalHAFailoverRing.Load().list()
@@ -1845,6 +1852,10 @@ func apiClusterHAPromote(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !requireRole(w, r, RoleAdmin) {
+		return
+	}
+	if globalHA.legacyRevalidationPending() {
+		apiAssertLegacyLeadership(w, r)
 		return
 	}
 	// Read BEFORE promoting: once this node is leader the sync state it was

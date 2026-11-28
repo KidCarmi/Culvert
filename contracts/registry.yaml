@@ -958,6 +958,37 @@ contracts:
     validation: integration
     compatibility: "A legacy HA pair with --ha-auto-failover whose standby has not synced (never, not since its last restart, or not within 10 minutes) no longer fails over by itself; the operator promotes it manually. The evidence of a successful sync is held in memory only, so it does not survive a standby restart. Lease-mode decisions are unchanged except one: a leader that was demoted (self-fence, or a foreign lease holder observed) and re-entered standby no longer auto-promotes until it has applied one bundle from its new leader; before, it could within 10 minutes of the sync it made before it led."
 
+  - id: CLU-005
+    area: cluster-sync
+    status: enforced
+    owner_approved: false
+    invariant: "Without a fencing lease, a control plane whose persisted HA role is leader resumes leadership after a restart only on evidence of exclusive authority: no standby ever synced from it, its standby polls it, or an operator asserts it. A peer that answers as leader of a later term makes it join that peer as standby automatically. Peer unreachability is never evidence. Until authority is established the node holds no HA role: leader-gated RPCs, CA issuance and admin changes to distributed configuration are refused with the reason, /healthz is 503, and the proxy, admin reads and diagnostics keep working."
+    authority: "Legacy restart revalidation (ha_legacy_authority.go) over the persisted-intent gate (ha_intent.go) and the admin write gate (ha_write_gate.go)."
+    code:
+      - "ha_legacy_authority.go"
+      - "ha_write_gate.go"
+    configs:
+      - "ha-auto-failover"
+    transitions:
+      permitted:
+        - "an operator asserting leadership on a revalidating node through the promote endpoint, audited with a warning"
+        - "resuming at once in lease mode, where the lease is the authority"
+      forbidden:
+        - "resuming legacy leadership because the peer could not be reached"
+        - "taking another restarting leader's probe for a standby's poll"
+        - "refusing reads, authentication, diagnostics or the HA recovery endpoints while revalidating"
+    tests:
+      - {file: "ha_legacy_authority_test.go", name: TestLegacyRestart_NoStandbyEverSyncedResumesAtOnce}
+      - {file: "ha_legacy_authority_test.go", name: TestLegacyRestart_SilentPeerFailsClosed}
+      - {file: "ha_legacy_authority_test.go", name: TestLegacyRestart_StandbyPollEstablishesAuthorityAndIsAnswered}
+      - {file: "ha_legacy_authority_test.go", name: TestLegacyRestart_PeerLeadsLaterTermJoinsAsStandby}
+      - {file: "ha_legacy_authority_test.go", name: TestLegacyRestart_PeerLeadsSameTermFailsClosed}
+      - {file: "ha_legacy_authority_test.go", name: TestLegacyRestart_OperatorAssertsLeadership}
+      - {file: "ha_legacy_authority_test.go", name: TestLegacyRestart_LeaseModeIsNotSubjectToIt}
+      - {file: "ha_legacy_authority_test.go", name: TestLegacyStandby_StartingLeaderIsAnAnsweredRound}
+    validation: integration
+    compatibility: "A legacy HA leader that restarts while its standby is down or partitioned no longer leads until the standby polls it again (automatic) or an operator promotes it. An older standby build is recognised by its poll. Lease mode is unchanged."
+
   - id: REC-001
     area: failure-recovery
     status: enforced

@@ -1517,11 +1517,33 @@ func gatedUnary(method string, fn func(context.Context, json.RawMessage) (json.R
 	if p, ok := cpRPCPolicies[method]; ok && !p.leaderGated {
 		return inner
 	}
+	if method == "HASync" {
+		return haSyncGatedUnary(fn)
+	}
 	return func(srv any, ctx context.Context, dec func(any) error, ic grpc.UnaryServerInterceptor) (any, error) {
 		if ok, reason := haServingAllowed(); !ok {
 			return nil, status.Errorf(codes.Unavailable, "%s refused: %s", method, reason)
 		}
 		return inner(srv, ctx, dec, ic)
+	}
+}
+
+// haSyncGatedUnary is HASync's gated handler. It differs from the generic one
+// in ORDER only: the request is decoded first and shown to the legacy restart
+// revalidation (ADR-0064 part C), which may establish this node's leadership
+// from the standby's own poll, and only then is the leader gate evaluated — so
+// the poll that proves authority is itself answered.
+func haSyncGatedUnary(fn func(context.Context, json.RawMessage) (json.RawMessage, error)) func(any, context.Context, func(any) error, grpc.UnaryServerInterceptor) (any, error) {
+	return func(_ any, ctx context.Context, dec func(any) error, _ grpc.UnaryServerInterceptor) (any, error) {
+		var raw json.RawMessage
+		if err := dec(&raw); err != nil {
+			return nil, err
+		}
+		noteStandbyPollWhileRevalidating(raw)
+		if ok, reason := haServingAllowed(); !ok {
+			return nil, status.Errorf(codes.Unavailable, "HASync refused: %s", reason)
+		}
+		return fn(ctx, raw)
 	}
 }
 

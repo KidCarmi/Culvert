@@ -23,6 +23,7 @@ package main
 // it, because role gating then applies.
 
 import (
+	"errors"
 	"fmt"
 	"time"
 )
@@ -36,6 +37,10 @@ type haIntentGateState struct {
 	// queued before the startup flush is delivered only while ITS episode is
 	// still the open one (haIntentEpisodeOpen).
 	episode uint64
+	// legacy marks an episode that is a LEGACY RESTART REVALIDATION
+	// (ha_legacy_authority.go): the config was read; what is unknown is
+	// whether this node still leads.
+	legacy bool
 }
 
 // haIntentPageAfter is how many failed reads in one episode page: one
@@ -106,6 +111,9 @@ func (h *HAState) intentGate() (reason string, gated bool) {
 	if h.intent.reason == "" || h.role != "" {
 		return "", false
 	}
+	if h.intent.legacy {
+		return h.intent.reason + " — this node serves no leader-gated request and accepts no distributed-configuration change until its authority is established", true
+	}
 	return fmt.Sprintf("the persisted HA config (%s) could not be read (%s) — this node cannot tell whether it leads, so it serves no leader-gated request until a read succeeds", haConfigFile, h.intent.reason), true
 }
 
@@ -137,8 +145,7 @@ func pageHAIntentUnreadable(err error, episode uint64) {
 	payload := AlertPayload{
 		Event:  "ha_resume_unfenced",
 		Source: "ha",
-		Detail: "the persisted HA config could not be read during the leadership resume (" + err.Error() +
-			"); leader-gated RPCs and CA issuance stay refused (no write authority) and the read is retried",
+		Detail: haIntentPageDetail(err),
 	}
 	if !startupAlertsFlushed() {
 		deferStartupAlertWhile("ha_resume_unfenced", payload, func() bool { return globalHA.haIntentEpisodeOpen(episode) })
@@ -170,4 +177,16 @@ func (h *HAState) unfencedLeader() bool {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 	return h.role == "leader" && h.lease != nil && h.leaseEpoch == 0
+}
+
+// haIntentPageDetail words the episode page: a read failure, or a legacy
+// restart whose authority could not be established.
+func haIntentPageDetail(err error) string {
+	if errors.Is(err, errLegacyAuthorityNotEstablished) || errors.Is(err, errLegacyPeerAlsoLeads) {
+		return err.Error() + "; this node did NOT resume leadership: leader-gated RPCs, CA issuance and " +
+			"distributed-configuration changes stay refused, the proxy keeps serving its last configuration, and the " +
+			"check is retried. If the standby is permanently gone, promote this node from the HA panel."
+	}
+	return "the persisted HA config could not be read during the leadership resume (" + err.Error() +
+		"); leader-gated RPCs and CA issuance stay refused (no write authority) and the read is retried"
 }

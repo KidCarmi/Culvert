@@ -230,6 +230,8 @@ func retryLeadershipResume() {
 // reports whether the intent was DECIDED (resumed, or nothing to resume);
 // false means it could not be — the node is left HA-gated for a retry.
 func resumeLeadershipAttempt() (decided bool) {
+	resumeAttemptMu.Lock()
+	defer resumeAttemptMu.Unlock()
 	haCfg, haErr := loadHAConfig()
 	action, err := haPersistedAction(haCfg, haErr)
 	if err != nil {
@@ -245,6 +247,15 @@ func resumeLeadershipAttempt() (decided bool) {
 		globalHA.clearIntentUnknown()
 		return true
 	}
+	// ADR-0064 part C: in legacy mode the persisted role is not authority.
+	switch legacyRestartAuthority(haCfg) {
+	case legacyJoined:
+		globalHA.clearIntentUnknown()
+		return true
+	case legacyUndecided, legacyNotStandby:
+		globalHA.markIntentLegacy()
+		return false
+	}
 	if !haBootResumeAsLeader(haCfg) {
 		// Lost to shutdown or a live HA transition (decided), or the
 		// revalidation after the lease acquisition did not confirm the
@@ -256,13 +267,7 @@ func resumeLeadershipAttempt() (decided bool) {
 		return false
 	}
 	globalHA.clearIntentUnknown()
-	if haCfg.AutoFailover {
-		logger.Printf("HA: resumed as leader from %s after restart. WARNING: automatic failover is "+
-			"enabled — if the standby promoted while this node was down, BOTH may now lead. Verify via "+
-			"/healthz or the HA panel and reconcile (ADR-0004/RISK-001).", haConfigFile)
-	} else {
-		logger.Printf("HA: resumed as leader from %s after restart (peer=%q)", haConfigFile, sanitizeLog(haCfg.PeerAddr))
-	}
+	logger.Printf("HA: resumed as leader from %s after restart (peer=%q)", haConfigFile, sanitizeLog(haCfg.PeerAddr))
 	return true
 }
 
