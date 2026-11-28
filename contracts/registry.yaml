@@ -30,6 +30,8 @@ protected:
   - .github/workflows/product-contracts.yml
 
 amended:
+  - id: CLU-004
+    reason: "ADR-0064 (owner decisions of 2026-11-28), widening in the same direction, no registered test edited. In legacy mode a sync round counts as answered — and so not toward the leader-unreachable threshold — not only when a bundle came back and was not applied, but also when the leader rejects the HA token (PermissionDenied), reports CULVERT_PUBLISH_NOT_AUTHORIZED (a live leader holding), or reports CULVERT_NODE_STARTING; the last for at most half the freshness window of an unbroken run, after which such rounds count again so a leader hung in start-up cannot block failover. Starting and holding answers never refresh the last-successful-sync time. A promotion additionally arms the publication gate (CLU-006) and a demotion disarms it; the eligibility predicate itself is unchanged. Tests added in ha_legacy_authority_test.go and ha_legacy_refused_bundle_test.go. Not owner-approved wording."
   - id: AGT-009
     reason: "ADR-0062 slice 6, PR 3: the provenance files are now read, by the runtime recovery's admission only (AGT-010, runtime_recovery on, default off). The invariant said 'nothing in this build acts on them'; it now says who reads them and what they can authorize (acting only on an image installed.json or a kept upgrade record of this agent names; restoring only an image gated.json holds). How they are written is unchanged and no registered test was edited. owner_approved stays false."
   - id: AGT-001
