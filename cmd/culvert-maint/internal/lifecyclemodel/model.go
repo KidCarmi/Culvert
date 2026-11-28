@@ -70,6 +70,14 @@ type State struct {
 	Audits   int
 	RcAct    string
 	RcOut    string
+
+	// RT: the record is a runtime.recover record (ADR-0062 slice 6), written armed at
+	// restarted by the agent's own runtime recovery: prior P is the image an upgrade
+	// this agent installed replaced, target T the unhealthy installed image. Compat is
+	// the data-compatibility verdict for P on the current data (slice 6a): "ok",
+	// "unknown" or "incompatible". Both are fixed for the life of the state.
+	RT     bool
+	Compat string
 }
 
 const (
@@ -180,8 +188,15 @@ func rollbackArmed(s State) bool {
 // Model is the apply-flow model. The zero value is ready to use.
 type Model struct{}
 
-// Inits returns every initial state, in a fixed order.
+// Inits returns every initial state, in a fixed order: the upgrade apply starts, then the
+// runtime recovery starts (slice 6).
 func (Model) Inits() []State {
+	return append(applyInits(), runtimeRecoverInits()...)
+}
+
+// applyInits are the upgrade apply starts. The apply and crash vectors walk only these:
+// they are vectors of the apply flow, which a runtime recovery does not run.
+func applyInits() []State {
 	type ps struct {
 		prior string
 		same  bool
@@ -205,6 +220,29 @@ func (Model) Inits() []State {
 	}
 	return out
 }
+
+// runtimeRecoverInits are the states a runtime recovery starts its plan from: the
+// record is durable (armed, restarted, prior P, target T), the unhealthy installed
+// image T runs under the tag, and the recovery is about to decide, as the startup
+// reconcile's act does for an interrupted armed rollback (one executor).
+func runtimeRecoverInits() []State {
+	var out []State
+	for _, compat := range []string{compatModelOK, compatModelUnknown, compatModelIncompatible} {
+		for _, ph := range []bool{true, false} {
+			out = append(out, State{Prior: priorValid, RB: true, TH: false, PH: ph, PC: pcRcDecide,
+				Running: imgT, Tag: imgT, JR: "restarted", Op: "runtime", TID: imgT, Armed: true,
+				RT: true, Compat: compat})
+		}
+	}
+	return out
+}
+
+// Data-compatibility verdicts of a runtime.recover record's prior (slice 6a).
+const (
+	compatModelOK           = "ok"
+	compatModelUnknown      = "unknown"
+	compatModelIncompatible = "incompatible"
+)
 
 // Events lists the outcomes the next stage can have, in a fixed order (the order
 // decides breadth-first tie-breaking and therefore which shortest trace is reported).
@@ -531,7 +569,8 @@ var ObservedFields = []string{"prior", "same", "backup", "rb", "th", "ph", "pc",
 	"fail_stage", "reason", "post_fail", "rb_att", "rb_failed", "rb_restarted", "rb_ok", "op", "tid",
 	"terminal", "danger_phase", "rollback_armed", "tag_ahead", "serving_healthy", "jr_rank", "rb_resolved",
 	"stopped", "reconcile",
-	"journal_armed", "converge", "attempts", "acts", "audits", "rc_action", "rc_out", "reconcile_v2"}
+	"journal_armed", "converge", "attempts", "acts", "audits", "rc_action", "rc_out", "reconcile_v2",
+	"rt", "compat"}
 
 // Observe projects a state onto the named fields the properties are written against.
 // Values are string, bool or float64.
@@ -549,6 +588,7 @@ func (Model) Observe(s State) map[string]any {
 	}
 	return map[string]any{
 		"journal_armed": s.Armed, "converge": isConvergePC(s.PC), "attempts": float64(s.Attempts),
+		"rt": s.RT, "compat": s.Compat,
 		"acts": float64(s.Acts), "audits": float64(s.Audits), "rc_action": actionOf(s.RcAct), "rc_out": s.RcOut,
 		"reconcile_v2": rec2,
 		"prior":        s.Prior, "same": s.Same, "backup": s.Backup, "rb": s.RB, "th": s.TH, "ph": s.PH,

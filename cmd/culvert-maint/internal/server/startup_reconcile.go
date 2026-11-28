@@ -516,9 +516,11 @@ func (s *Server) resumeAudited(rec *journal.Record) bool {
 // UpEvidence afresh (otherwise the value in in is kept; see
 // reconcileCase.ownUpReturned).
 func (s *Server) readReconcileFacts(ctx context.Context, rec *journal.Record, in *reconcileInputsV2, readEvidence bool) {
-	imageKind := (in.Kind == ops.KindUpgradeApply && in.Mode == "") || (in.Kind == ops.KindRollbackCreate && in.Mode == "image")
 	in.DockerReadable = false
-	if !imageKind {
+	// Compatibility is evidence of this read only: a recheck never inherits
+	// an earlier verdict (the zero value, unknown, refuses every restore).
+	in.Compat, in.CompatReason = compatUnknown, ""
+	if !isImageKind(in.Kind, in.Mode) {
 		return
 	}
 	pc, err := s.opts.Runner.ReadProxyContainer(ctx)
@@ -537,6 +539,14 @@ func (s *Server) readReconcileFacts(ctx context.Context, rec *journal.Record, in
 	if readEvidence {
 		in.UpEvidence = s.readUpEvidence(ctx, in, pc.Present)
 	}
+	s.readRecordImages(ctx, rec, in)
+}
+
+// readRecordImages fills the local image ids of the record's validated
+// references and, for a runtime.recover record, the restore target's
+// compatibility with the data. Nothing is read for a record whose references
+// failed validation.
+func (s *Server) readRecordImages(ctx context.Context, rec *journal.Record, in *reconcileInputsV2) {
 	in.TargetLocalID, in.PriorLocalID = "", ""
 	if !in.RefValid {
 		return
@@ -551,6 +561,23 @@ func (s *Server) readReconcileFacts(ctx context.Context, rec *journal.Record, in
 			in.PriorLocalID = id
 		}
 	}
+	if in.Kind == ops.KindRuntimeRecover {
+		s.readRestoreCompat(ctx, rec.PriorRef, in)
+	}
+}
+
+// readRestoreCompat fills in.Compat for a runtime.recover record: the restore
+// target's data-epoch labels against the data epoch (slice 6a). Called only
+// after validateReconcileRefs accepted the record, so PriorRef is repo-bound.
+// Anything that cannot be read is unknown, never compatible.
+func (s *Server) readRestoreCompat(ctx context.Context, priorRef string, in *reconcileInputsV2) {
+	in.Compat, in.CompatReason = compatUnknown, compatReasonLabelsUnreadable
+	if priorRef == "" {
+		return
+	}
+	rng, rerr := s.opts.Runner.ImageDataEpochRange(ctx, priorRef)
+	de, derr := s.opts.Runner.ReadDataEpoch(ctx)
+	in.Compat, in.CompatReason = dataCompat(rng, rerr, de, derr)
 }
 
 // readUpEvidence reads the Docker-side evidence of a death inside `compose up`

@@ -110,6 +110,12 @@ const (
 	// an operator's state-changing request gets 409 naming it (AGT-001). It is
 	// not journaled: it never creates a record, it only acts on existing ones.
 	KindReconcileStartup = "reconcile.startup"
+	// KindRuntimeRecover is the agent's own runtime recovery (ADR-0062 slice
+	// 6): it puts back the image an upgrade this agent installed replaced,
+	// when that upgrade's image keeps failing its health check. Its journal
+	// record is written armed, before anything moves, and is decided by the
+	// same armed-rollback branch as an interrupted inline rollback.
+	KindRuntimeRecover = "runtime.recover"
 )
 
 // stateChangingKinds is the production allowlist of operation kinds
@@ -662,6 +668,7 @@ var journaledKinds = map[string]struct{}{
 	KindUpgradeApply:   {},
 	KindRollbackCreate: {},
 	KindRestoreCommit:  {},
+	KindRuntimeRecover: {},
 }
 
 // IsJournaled reports whether kind's in-flight state is recorded in the

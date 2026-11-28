@@ -2,6 +2,7 @@ package server
 
 import (
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -69,6 +70,14 @@ type reconWorld struct {
 	// service, what a `compose run` without --rm whose start failed leaves;
 	// `compose down` does not remove it.
 	oneOffRun bool
+	// priorEpochLabels: the prior image (cfgOld) carries data-epoch labels
+	// 1..priorEpochMax (slice 6a); priorEpochMax 0 means 1.
+	priorEpochLabels bool
+	priorEpochMax    int
+	// dataEpoch: what `cli --print-data-epoch` reports (0: the command fails,
+	// as on an image that predates it or an install without its sudoers line).
+	dataEpoch  int
+	epochReads int
 }
 
 func (w *reconWorld) idFor(ref string) string {
@@ -99,6 +108,39 @@ func (w *reconWorld) reportedDigest(id string) string {
 		return imgOther
 	}
 	return digestOf(id)
+}
+
+// answerDataEpoch answers `culvert --print-data-epoch` (slice 6a); a zero
+// dataEpoch is a read that fails. Called with w.mu held.
+func (w *reconWorld) answerDataEpoch(cmd *exec.Cmd) {
+	w.epochReads++
+	if w.dataEpoch == 0 {
+		w.failed[cmd] = true
+		return
+	}
+	_, _ = fmt.Fprintf(cmd.Stdout, `{"schema":1,"epoch":%d,"marker_present":%v,"build_min":1,"build_max":%d}`+"\n",
+		w.dataEpoch, w.dataEpoch > 1, w.dataEpoch)
+}
+
+// answerImageInspect answers `docker image inspect ref`; the prior image
+// carries data-epoch labels [1, priorEpochMax or 1] when priorEpochLabels is
+// set. Called with w.mu held.
+func (w *reconWorld) answerImageInspect(cmd *exec.Cmd, ref string) {
+	id := w.idFor(ref)
+	if id == "" {
+		w.failed[cmd] = true
+		return
+	}
+	labels := `null`
+	if w.priorEpochLabels && id == cfgOld {
+		hi := w.priorEpochMax
+		if hi == 0 {
+			hi = 1
+		}
+		labels = fmt.Sprintf(`{"io.culvert.data-epoch.min":"1","io.culvert.data-epoch.max":"%d"}`, hi)
+	}
+	_, _ = cmd.Stdout.Write([]byte(`[{"Id":"sha256:` + id + `","RepoDigests":["` + repo + `@sha256:` + w.reportedDigest(id) +
+		`"],"Config":{"Labels":` + labels + `}}]`))
 }
 
 func (w *reconWorld) start(cmd *exec.Cmd) error {
@@ -148,6 +190,8 @@ func (w *reconWorld) start(cmd *exec.Cmd) error {
 		return nil
 	}
 	switch {
+	case has("--print-data-epoch"):
+		w.answerDataEpoch(cmd)
 	case has("ps") && has("-a"):
 		w.answerPSAll(cmd)
 	case has("ps"):
@@ -157,12 +201,7 @@ func (w *reconWorld) start(cmd *exec.Cmd) error {
 	case has("{{json .Image}}"):
 		_, _ = cmd.Stdout.Write([]byte(`"sha256:` + w.running + `"`))
 	case has("image") && has("inspect"):
-		id := w.idFor(args[len(args)-1])
-		if id == "" {
-			w.failed[cmd] = true
-			return nil
-		}
-		_, _ = cmd.Stdout.Write([]byte(`[{"Id":"sha256:` + id + `","RepoDigests":["` + repo + `@sha256:` + w.reportedDigest(id) + `"]}]`))
+		w.answerImageInspect(cmd, args[len(args)-1])
 	case has("tag"):
 		w.mutating = append(w.mutating, "tag:"+w.idFor(args[len(args)-2]))
 		w.tagRefs = append(w.tagRefs, args[len(args)-2])

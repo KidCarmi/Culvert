@@ -166,6 +166,59 @@ func convergeMutants() []struct {
 				o["reconcile_v2"] = v2Adopt
 			}
 		}}},
+		// Slice 6: runtime recovery.
+		{"restore without proven compatibility (no compatibility gate)", "RT1", compatAs(compatModelOK)},
+		{"a compatible restore is refused anyway", "RT2", compatAs(compatModelUnknown)},
+		{"retire a runtime recovery without restoring", "RT3", convergeMutant{step: after(at(pcRcDecide, evRcDecide),
+			func(s, t *State) {
+				if s.RT && s.JR != "removed" {
+					t.PC, t.RcAct, t.RcOut = pcRcAudit, verdictOf(v2Noop, "x"), ""
+				}
+			})}},
+		{"report a runtime recovery as the upgrade's success", "RT4", convergeMutant{observe: func(s State, o map[string]any) {
+			if s.RT && s.JR == "removed" {
+				o["op"] = "succeeded"
+			}
+		}}},
+	}
+}
+
+// compatAs is a runtime recovery whose decision sees the given compatibility verdict
+// instead of the record's own, everywhere the decision is taken: the start's decide and
+// the pre-change rechecks (which gate the events offered). "ok" removes the gate,
+// "unknown" refuses every restore. Overriding only the decide is not this mutant: the
+// recheck alone then still refuses (it is a second, independent guard).
+func compatAs(c string) convergeMutant {
+	return convergeMutant{
+		events: func(s State) ([]string, bool) {
+			if !s.RT {
+				return nil, false
+			}
+			s.Compat = c
+			return Model{}.Events(s), true
+		},
+		step: func(s State, e string) (State, bool) {
+			if !s.RT {
+				return State{}, false
+			}
+			own := s.Compat
+			s.Compat = c
+			t := Model{}.Step(s, e)
+			t.Compat = own
+			return t, true
+		},
+	}
+}
+
+// TestRuntimeRecover_RecheckAloneStillRefuses: with only the decide ungated, the pre-change
+// recheck refuses every restore without proven compatibility (positive control for the
+// RT1 mutant above).
+func TestRuntimeRecover_RecheckAloneStillRefuses(t *testing.T) {
+	m := compatAs(compatModelOK)
+	m.events = nil
+	res, _, err := Check[State](m, property(t, "RT1"), budgetStates, budgetTime)
+	if err != nil || res[0].Verdict != VerdictPass {
+		t.Fatalf("RT1 with only the decide ungated: %+v err=%v", res, err)
 	}
 }
 

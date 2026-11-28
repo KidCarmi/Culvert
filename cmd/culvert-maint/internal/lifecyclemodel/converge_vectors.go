@@ -26,6 +26,10 @@ var (
 	domV2Running = []string{"", "P", "T", "X"}
 	domV2Tag     = []string{"", "P", "T", "X"}
 	domV2Probe   = []string{probeNotRun, probeReady, probeNotReady}
+	// Slice 6: the record kind and, for runtime.recover, the compatibility verdict, as one
+	// domain: a verdict means nothing for an upgrade record, so it is not crossed with it.
+	domV2KindCompat = [][2]string{{"", ""}, {KindRuntimeRecover, compatModelOK},
+		{KindRuntimeRecover, compatModelUnknown}, {KindRuntimeRecover, compatModelIncompatible}}
 )
 
 // ReconcileV2Vectors is the V2 decision table over the bounded space: Expected holds one
@@ -42,16 +46,18 @@ func reconcileV2Domains() []ReconcileDomain {
 		{"phase", anySlice(domPhase)}, {"attempts", anySlice(domV2Attempts)}, {"ref_valid_target_prior", anySlice(domV2Refs)},
 		{"armed", anySlice(domV2Armed)}, {"target_id", anySlice(domV2TID)}, {"prior_id", anySlice(domV2PID)},
 		{"running_id", anySlice(domV2Running)}, {"tag_id", anySlice(domV2Tag)}, {"probe", anySlice(domV2Probe)},
+		{"kind_compat", anySlice(domV2KindCompat)},
 	}
 }
 
-// ReconcileV2InputAt returns the input at the given per-domain indices (len 9).
+// ReconcileV2InputAt returns the input at the given per-domain indices (len 10).
 func ReconcileV2InputAt(idx []int) ReconcileV2Inputs {
 	refs := domV2Refs[idx[2]]
 	in := ReconcileV2Inputs{Phase: domPhase[idx[0]], Attempts: domV2Attempts[idx[1]],
 		RefValid: refs[0], TargetRefPresent: refs[1], PriorRefPresent: refs[2], Armed: domV2Armed[idx[3]],
 		TargetID: domV2TID[idx[4]], PriorID: domV2PID[idx[5]], RunningID: domV2Running[idx[6]],
 		TagID: domV2Tag[idx[7]], Probe: domV2Probe[idx[8]]}
+	in.Kind, in.Compat = domV2KindCompat[idx[9]][0], domV2KindCompat[idx[9]][1]
 	if in.TargetRefPresent {
 		in.TargetLocal = imgT
 	}
