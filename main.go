@@ -368,9 +368,11 @@ func runStartupSequence(s *startupState) *http.Server {
 	markNodeReady()
 
 	// ── Phase 4: traffic gates and listeners ────────────────────────────────
-	// After the activation, so no listener that enforces policy serves before
-	// a data plane's last-good replay: the SOCKS5 pre-posture gate (its socket
+	// After the activation, so neither SOCKS5 nor the proxy serves before a
+	// data plane's last-good replay: the SOCKS5 pre-posture gate (its socket
 	// has been bound since initSOCKS5), the admin UI, then the proxy listener.
+	// Known exception: the MCP runtime listener (initMCPRuntime, off by
+	// default) binds in phase 2 and enforces its own durable local state.
 	openTrafficGates()
 	startAdminUI(s)
 	return buildAndStartProxyServer(s)

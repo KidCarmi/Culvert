@@ -997,11 +997,12 @@ contracts:
     area: cluster-sync
     status: enforced
     owner_approved: false
-    invariant: "A control plane's cluster listener answers every request with the CULVERT_NODE_STARTING status (gRPC Unavailable, with the start-up phase and elapsed seconds) from the moment its identity is established until the node is ready, and serves a configuration snapshot only when the node is ready and publication is authorized. The listener that answers before the activation has no handler that reads a store, publishes, enrols or leads. A live-state publish is refused before every configuration store has loaded."
-    authority: "Node lifecycle (node_lifecycle.go), the early listener (cp_starting_listener.go) and leadership/publication authority (ha_authority.go)."
+    invariant: "A control plane's cluster listener answers every request with the CULVERT_NODE_STARTING status (gRPC Unavailable, with the start-up phase and elapsed seconds) from the moment its identity is established until the node is ready, and serves a configuration snapshot only when the node is ready and publication is authorized. The listener that answers before the activation has no handler that reads a store, publishes, enrols or leads. A live-state publish is refused before every configuration store has loaded. A legacy-mode standby treats the starting answer as proof that its leader is alive — not counted toward failover, not a sync — for a bounded grace; a lease-mode standby counts it."
+    authority: "Node lifecycle (node_lifecycle.go), the early listener (cp_starting_listener.go), the standby's reading of it (ha_leader_answer.go) and leadership/publication authority (ha_authority.go)."
     code:
       - "node_lifecycle.go"
       - "cp_starting_listener.go"
+      - "ha_leader_answer.go"
       - "ha_authority.go"
     configs: []
     transitions:
@@ -1019,14 +1020,17 @@ contracts:
       - {file: "node_lifecycle_test.go", name: TestNodeLifecycle_WireStatusesAreDistinct}
       - {file: "node_lifecycle_test.go", name: TestNodeLifecycle_PublishIsRefusedBeforeStoresLoadAndWithoutLeadership}
       - {file: "node_lifecycle_test.go", name: TestNodeLifecycle_Lease_PeerTookTheLeaseDuringSlowStoreLoad}
+      - {file: "ha_starting_leader_test.go", name: TestLegacyStandby_SlowLeaderStartDoesNotPromote}
+      - {file: "ha_starting_leader_test.go", name: TestLegacyStandby_LeaderHungInStartupPromotesAfterTheGrace}
+      - {file: "ha_starting_leader_test.go", name: TestLeaseStandby_StartingAnswerStillCounts}
     validation: integration
-    compatibility: "Unavailable is what every released data plane and standby already retries on. A standby that does not recognise the token counts a starting answer as a failed round, as it counted a closed port."
+    compatibility: "Unavailable is what every released data plane and standby already retries on. A standby on an earlier release does not recognise the marker and counts a starting answer as a failed round, as it counted a closed port: upgrade the standby before the leader."
 
   - id: CLU-006
     area: cluster-sync
     status: enforced
     owner_approved: false
-    invariant: "A data plane validates its cluster identity before loading any store, and replays its last-good snapshot after its own configuration stores have loaded and before any listener that enforces policy opens. When that replay is accepted, the node's default action and every slice the snapshot carries (policy rules included) are the snapshot's, active and persisted, whatever its node-local files and admin settings held. When there is no last-good snapshot, or it is unreadable, over a cap, or refused (identity-provider sync, an unenforceable rule), nothing is replayed and the node keeps its file-loaded state until it next syncs."
+    invariant: "A data plane validates its cluster identity before loading any store, and replays its last-good snapshot after its own configuration stores have loaded and before the SOCKS5 pre-posture gate, the admin UI and the proxy listener open (the default-off MCP runtime listener binds earlier and enforces its own durable local state). When that replay is accepted, the node's default action and every slice the snapshot carries (policy rules included) are the snapshot's, active and persisted, whatever its node-local files and admin settings held. When there is no last-good snapshot, or it is unreadable, over a cap, or refused (identity-provider sync, an unenforceable rule), nothing is replayed and the node keeps its file-loaded state until it next syncs."
     authority: "Start-up sequence (main.go runStartupSequence) and data-plane start-up (dp_enrollment.go)."
     code:
       - "dp_enrollment.go"

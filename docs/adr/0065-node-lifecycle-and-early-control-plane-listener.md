@@ -137,9 +137,9 @@ the epoch.
 | Peer | On `CULVERT_NODE_STARTING` |
 |---|---|
 | Data plane, any release | `Unavailable`: a failed poll. It keeps its last-good configuration, backs off, and after several failures may fail over to another configured control plane. Unchanged behaviour. |
-| Standby, this change alone | `Unavailable`: a failed round, counted toward the failover threshold — exactly what a closed port was. This change alone therefore does NOT stop a failover on a slow leader restart. |
-| Standby with ADR-0064 | An answered round: the leader is alive. Not counted toward the threshold, for a bounded starting grace. |
-| Standby on an older release | Counts it as a failure. Upgrade the standby first. |
+| Standby on this release, legacy mode | An ANSWERED round (`ha_leader_answer.go`): the leader is alive. It does not count toward the failover threshold and does not refresh the last-sync time, for at most `haStartingGrace` (half the promote freshness window, 5 minutes) of an unbroken run of such answers, measured on the standby's own clock from the first one. Past that the answers count as failures again, so a leader hung in start-up cannot block failover forever. |
+| Standby on this release, lease mode | Unchanged: every round that does not apply counts; the lease arbitrates the promotion. |
+| Standby on an older release | Counts it as a failure, as it counted a closed port. Upgrade the standby first. |
 
 ## Consequences
 
@@ -148,5 +148,30 @@ the epoch.
   its stores have loaded.
 - "May this node serve / publish / lead" has one owner and four explicit
   answers; a future listener cannot become an authority by being bound.
-- The standby-side treatment and the legacy restart revalidation are ADR-0064;
-  until it lands the failover-on-slow-restart exposure of the reorder remains.
+- A legacy standby no longer fails over because its leader took more than
+  three ticks to load its stores. This had to ship in the same change: with
+  the reorder and without the standby reading the answer, a slow restart
+  promoted the standby under a live leader, which then resumed as well — two
+  unfenced leaders, worse than before either change. The legacy restart
+  revalidation (a restarting leader proving its authority before resuming) and
+  the publication safety gate remain ADR-0064.
+
+## Known limits
+
+- **The MCP runtime listener is not behind the activation.** `initMCPRuntime`
+  binds it in phase 2, before a data plane's last-good replay. It is off by
+  default and enforces its own durable, node-local distribution state, not the
+  replayed SWG snapshot. "Before any traffic gate opens" in this ADR and in
+  CLU-006 means the SOCKS5 pre-posture gate and the proxy listener (and the
+  admin UI); gating the MCP listener the same way is a separate change.
+- **The health rows cannot read "starting" today.** `/health` and `/ready` are
+  served by the proxy listener and `/healthz` by the admin UI, both of which
+  open after `markNodeReady`. Their `startup` fields therefore always report
+  `ready` in this build; they exist so that a listener opened earlier in a
+  future change cannot report ready by omission. During start-up the phase is
+  visible in the cluster listener's `CULVERT_NODE_STARTING` answer and in the
+  log.
+- **Feed-status label.** A control plane's signed-feed runtime resolves its
+  authority during phase 2, while the node's role is still `standalone` (the
+  role is claimed on an observed bind). The two authorities behave the same;
+  only the label reads `standalone` until the next resolution.

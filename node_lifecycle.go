@@ -237,6 +237,11 @@ func nodeServingRefusal(method string) error {
 // /api/cluster/status — and, while the node is starting and none of those
 // listeners is up yet, by the cluster listener's own CULVERT_NODE_STARTING
 // answer, which carries the phase. No endpoint is added.
+//
+// Those HTTP surfaces are served by listeners that open only after
+// markNodeReady, so in this build their rows always read "ready". They are
+// kept so that a listener opened earlier by a later change cannot report
+// ready by omission (the MCP runtime listener already binds in phase 2).
 
 // startupHealthFieldValue is /health's `startup` field: the phase, or "" for
 // an unmanaged process (the field is then omitted).
