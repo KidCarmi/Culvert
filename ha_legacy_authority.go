@@ -276,24 +276,55 @@ func haLeadershipHeld() bool {
 	return st.Role == "leader" && globalHA.WriteAllowed()
 }
 
-// haNodeStartingMarker is the text a Control Plane listener that is up before
-// the node is ready puts in the gRPC status it refuses requests with (code
-// Unavailable). A standby treats such a refusal as an ANSWERED round: a
-// restarting leader with a live standby must never trigger that standby's
-// promotion. The early-listener work emits it; this is the agreed constant.
-const haNodeStartingMarker = "culvert-node-starting"
+// haLeaderAnswer classifies what a sync round proved about the leader.
+type haLeaderAnswer int
+
+const (
+	haNoAnswer         haLeaderAnswer = iota // nothing: transport failure or an unclassified refusal
+	haAnsweredReply                          // a bundle came back (applied or not), or the leader rejected our token
+	haAnsweredStarting                       // "I am starting" — alive, bounded by haStartingGrace
+	haAnsweredHolding                        // "publication not authorized" — a live leader deliberately holding
+)
+
+// The refusal tokens a Control Plane listener puts in its gRPC status (code
+// Unavailable). They are the interface agreed with the early-listener work,
+// which owns the listener and emits them; this file owns how a standby counts
+// them. Once that branch is underneath this one, its isCPStartingStatus /
+// isCPPublishNotAuthorizedStatus helpers replace the two functions below.
+const (
+	haNodeStartingMarker       = "CULVERT_NODE_STARTING"
+	haPublishNotAuthorizedMark = "CULVERT_PUBLISH_NOT_AUTHORIZED"
+)
+
+// haStartingGrace bounds how long an unbroken run of "starting" answers is
+// taken as proof that the leader is alive. A leader hung in start-up must not
+// block failover forever; half the freshness window keeps a standby that was
+// synced when the leader went down eligible to promote when the grace ends.
+// Safe in legacy mode because a leader that finishes starting later
+// revalidates its authority and joins the promoted peer (part C).
+const haStartingGrace = haPromoteFreshnessWindow / 2
+
+func haUnavailableWith(err error, token string) bool {
+	st, ok := status.FromError(err)
+	return ok && st.Code() == codes.Unavailable && strings.Contains(st.Message(), token)
+}
 
 // haLeaderStartingError reports whether err is a leader's "starting, not
 // ready" refusal.
-func haLeaderStartingError(err error) bool {
-	st, ok := status.FromError(err)
-	return ok && st.Code() == codes.Unavailable && strings.Contains(st.Message(), haNodeStartingMarker)
-}
+func haLeaderStartingError(err error) bool { return haUnavailableWith(err, haNodeStartingMarker) }
 
-// haLeaderAnsweredError reports whether a failed HASync still proves the leader
-// is ALIVE: its "starting" refusal, or PermissionDenied — only a serving leader
-// evaluates the HA token. (A standby's own refusal is Unavailable and stays an
-// unanswered round: that peer does not lead.)
-func haLeaderAnsweredError(err error) bool {
-	return haLeaderStartingError(err) || status.Code(err) == codes.PermissionDenied
+// haLeaderAnswerOf classifies a FAILED HASync. PermissionDenied counts as a
+// reply: only a serving leader evaluates the HA token. A standby's own refusal
+// ("not the HA leader") is Unavailable without a token and stays haNoAnswer:
+// that peer does not lead.
+func haLeaderAnswerOf(err error) haLeaderAnswer {
+	switch {
+	case haLeaderStartingError(err):
+		return haAnsweredStarting
+	case haUnavailableWith(err, haPublishNotAuthorizedMark):
+		return haAnsweredHolding
+	case status.Code(err) == codes.PermissionDenied:
+		return haAnsweredReply
+	}
+	return haNoAnswer
 }

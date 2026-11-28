@@ -171,3 +171,18 @@ decision:
 **Possible future evidence (not built; adopting state from a data plane is a security-boundary change):**
 a whole-snapshot fingerprint and the commit epoch per version in the heartbeat; a data-plane RPC that
 serves its last-good snapshot.
+
+**Standby accounting of a live leader's refusals (interface with the early listener).** A legacy standby
+classifies a failed `HASync` (`haLeaderAnswerOf`): `CULVERT_NODE_STARTING` — alive, does not count toward
+the failover threshold and does not refresh the last-sync time, for at most `haPromoteFreshnessWindow/2`
+of an unbroken run of such answers, after which they count as failures (a leader hung in start-up must
+not block failover; the bound keeps a standby that was synced when the leader went down eligible; the late
+leader then revalidates and joins the promoted peer); `CULVERT_PUBLISH_NOT_AUTHORIZED` — a live leader
+holding, does not count, no bound; `PermissionDenied` — alive. Lease mode counts every failed round, as
+before: `Acquire` decides.
+
+**Open interface point.** The listener must not refuse `GetConfig`, `GetConfigDelta` or `HASync` merely
+because `haPublishAuthorized()` is false: during a hold the gate itself answers each data plane (consistent
+ones are served, ahead ones are told unchanged) and `HASync` stays served so the standby stays eligible and
+inherits the hold. A blanket `CULVERT_PUBLISH_NOT_AUTHORIZED` refusal there would freeze consistent data
+planes, which the owner ruled out.

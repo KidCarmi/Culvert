@@ -64,8 +64,8 @@ func dpGetConfig(t *testing.T, k int64) (unchanged bool, snap ConfigSnapshot, er
 	conn := startBufconnCP(t)(t, clusterClientCallOptions()...)
 	req, _ := json.Marshal(getConfigRequest{KnownVersion: k})
 	var raw json.RawMessage
-	if err = conn.Invoke(context.Background(), methodGetConfig, json.RawMessage(req), &raw); err != nil {
-		return false, snap, err
+	if ierr := conn.Invoke(context.Background(), methodGetConfig, json.RawMessage(req), &raw); ierr != nil {
+		return false, snap, ierr
 	}
 	var probe configUnchangedReply
 	if json.Unmarshal(raw, &probe) == nil && probe.ConfigUnchanged {
@@ -223,12 +223,11 @@ func TestPublishGate_HoldSurvivesRestart(t *testing.T) {
 	}
 }
 
-func postPublishRelease(t *testing.T, body string) (int, map[string]any) {
+func postPublishRelease(t *testing.T, body string) (code int, resp map[string]any) {
 	t.Helper()
 	ctx := context.WithValue(context.Background(), uiRoleKey{}, RoleAdmin)
 	w := httptest.NewRecorder()
 	apiClusterHAPublishRelease(w, httptest.NewRequestWithContext(ctx, http.MethodPost, "/api/cluster/ha/publish-release", strings.NewReader(body)))
-	var resp map[string]any
 	_ = json.Unmarshal(w.Body.Bytes(), &resp)
 	return w.Code, resp
 }

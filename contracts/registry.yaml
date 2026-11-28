@@ -1038,6 +1038,8 @@ contracts:
       - {file: "ha_legacy_authority_test.go", name: TestLegacyRestart_OperatorAssertsLeadership}
       - {file: "ha_legacy_authority_test.go", name: TestLegacyRestart_LeaseModeIsNotSubjectToIt}
       - {file: "ha_legacy_authority_test.go", name: TestLegacyStandby_StartingLeaderIsAnAnsweredRound}
+      - {file: "ha_legacy_authority_test.go", name: TestLegacyStandby_StartingGraceExpiresAndTheLateLeaderJoinsAsStandby}
+      - {file: "ha_legacy_authority_test.go", name: TestLegacyStandby_PublishNotAuthorizedLeaderIsAliveWithoutBound}
     validation: integration
     compatibility: "A legacy HA leader that restarts while its standby is down or partitioned no longer leads until the standby polls it again (automatic) or an operator promotes it. An older standby build is recognised by its poll. Lease mode is unchanged."
 

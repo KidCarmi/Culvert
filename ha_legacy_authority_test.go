@@ -286,7 +286,7 @@ func TestLegacyStandby_StartingLeaderIsAnAnsweredRound(t *testing.T) {
 	p.leader.serve(p.good)
 	p.s.guardedSyncOnce() // synced: eligible to promote on a real outage
 	p.s.client = &DataPlaneClient{callForTest: func(context.Context, string, json.RawMessage) (json.RawMessage, error) {
-		return nil, status.Error(codes.Unavailable, "HASync refused: "+haNodeStartingMarker+": stores are loading")
+		return nil, status.Error(codes.Unavailable, haNodeStartingMarker+": control plane is starting (phase=stores, elapsed=1s); HASync is not served until the node is ready")
 	}}
 	for i := 0; i < haStandbyMaxFail*3; i++ {
 		if p.s.guardedTick() || p.h.IsLeader() {
@@ -300,5 +300,67 @@ func TestLegacyStandby_StartingLeaderIsAnAnsweredRound(t *testing.T) {
 	p.s.client = &DataPlaneClient{callForTest: p.leader.call}
 	if !p.outage(haStandbyMaxFail) {
 		t.Fatal("control: a leader that does not answer must still be replaced")
+	}
+}
+
+// The grace is bounded, and what happens after it is the reason it is safe:
+// the leader hangs in start-up beyond the grace, the standby promotes, and the
+// old leader — when it finally finishes starting — must NOT resume leadership.
+func TestLegacyStandby_StartingGraceExpiresAndTheLateLeaderJoinsAsStandby(t *testing.T) {
+	p := newEligPair(t)
+	p.leader.serve(p.good)
+	p.s.guardedSyncOnce()
+	p.s.client = &DataPlaneClient{callForTest: func(context.Context, string, json.RawMessage) (json.RawMessage, error) {
+		return nil, status.Error(codes.Unavailable, haNodeStartingMarker+": control plane is starting (phase=stores, elapsed=3s); HASync is not served until the node is ready")
+	}}
+	for i := 0; i < haStandbyMaxFail+1; i++ {
+		if p.s.guardedTick() {
+			t.Fatalf("round %d: promoted inside the starting grace", i)
+		}
+	}
+	// The leader has now been "starting" for longer than the grace.
+	p.s.startingSince = time.Now().Add(-haStartingGrace - time.Second)
+	for i := 1; i < haStandbyMaxFail; i++ {
+		if p.s.guardedTick() {
+			t.Fatalf("promoted after %d post-grace round(s); the threshold still applies", i)
+		}
+	}
+	if !p.s.guardedTick() || !p.h.IsLeader() {
+		t.Fatal("a leader hung in start-up beyond the grace must not block failover forever")
+	}
+	promotedTerm := p.h.Status().Term
+
+	// The old leader finishes starting. Its file says it leads the old term.
+	f := newRevalFixture(t, revalStandby)
+	f.peerLeads, f.peerTerm = true, promotedTerm
+	cfg, _ := loadHAConfig()
+	cfg.Term = promotedTerm - 1
+	if err := saveHAConfig(cfg); err != nil {
+		t.Fatal(err)
+	}
+	if !resumeLeadershipAttempt() {
+		t.Fatal("the late leader must decide: join the promoted peer")
+	}
+	if st := globalHA.Status(); st.Role != "standby" {
+		t.Fatalf("the late leader resumed as %q: two leaders", st.Role)
+	}
+}
+
+// A live leader that is deliberately holding publication answers; no bound.
+func TestLegacyStandby_PublishNotAuthorizedLeaderIsAliveWithoutBound(t *testing.T) {
+	p := newEligPair(t)
+	p.leader.serve(p.good)
+	p.s.guardedSyncOnce()
+	p.s.client = &DataPlaneClient{callForTest: func(context.Context, string, json.RawMessage) (json.RawMessage, error) {
+		return nil, status.Error(codes.Unavailable, haPublishNotAuthorizedMark+": HASync is not served")
+	}}
+	p.s.startingSince = time.Now().Add(-haStartingGrace * 4) // irrelevant to this answer
+	for i := 0; i < haStandbyMaxFail*3; i++ {
+		if p.s.guardedTick() || p.h.IsLeader() {
+			t.Fatalf("round %d: promoted against a live leader that is holding publication", i)
+		}
+	}
+	if got := p.h.Status().SyncFailCount; got != 0 {
+		t.Errorf("sync_fail_count = %d, want 0", got)
 	}
 }

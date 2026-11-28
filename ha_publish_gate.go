@@ -276,20 +276,21 @@ func recordGateEvidenceLocked(ev publishGateEvidence) {
 	changed := false
 	found := false
 	for i := range st.Evidence {
-		if st.Evidence[i].Node == ev.Node {
-			found = true
-			if st.Evidence[i].Version != ev.Version || st.Evidence[i].SyncedFP != ev.SyncedFP {
-				changed = true
-			}
-			if ev.Epoch == 0 {
-				ev.Epoch = st.Evidence[i].Epoch
-			}
-			if ev.SyncedFP == "" {
-				ev.SyncedFP = st.Evidence[i].SyncedFP
-			}
-			st.Evidence[i] = ev
-			break
+		if st.Evidence[i].Node != ev.Node {
+			continue
 		}
+		found = true
+		if st.Evidence[i].Version != ev.Version || st.Evidence[i].SyncedFP != ev.SyncedFP {
+			changed = true
+		}
+		if ev.Epoch == 0 {
+			ev.Epoch = st.Evidence[i].Epoch
+		}
+		if ev.SyncedFP == "" {
+			ev.SyncedFP = st.Evidence[i].SyncedFP
+		}
+		st.Evidence[i] = ev
+		break
 	}
 	if !found && len(st.Evidence) < maxPublishGateEvidence {
 		st.Evidence = append(st.Evidence, ev)
@@ -412,7 +413,8 @@ func publishGateForBundle() *publishGateState {
 // Idempotent: releasing a gate that is not held changes nothing.
 func releasePublishHold(actor string) (released bool, st publishGateState, err error) {
 	publishGate.mu.Lock()
-	if loadPublishGateLocked(); !publishGate.st.Armed || !publishGate.st.Held {
+	loadPublishGateLocked()
+	if !publishGate.st.Armed || !publishGate.st.Held {
 		st = publishGate.st
 		publishGate.mu.Unlock()
 		return false, st, nil
