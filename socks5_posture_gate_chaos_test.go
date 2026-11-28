@@ -287,11 +287,12 @@ func socks5MetricLinesForTest(body string) string {
 func TestCHAOS102_Wall_NoListenerServesBeforeThePostureIsClosed(t *testing.T) {
 	file := parseMainPkgFileForTest(t, "main.go")
 
-	mainFn := funcDeclForTest(t, file, "main")
+	// The init block is runStartupSequence, the one ordered sequence main() runs.
+	mainFn := funcDeclForTest(t, file, "runStartupSequence")
 	socksAt := callStatementIndexForTest(mainFn, "initSOCKS5")
 	postureAt := callStatementIndexForTest(mainFn, "initPersistentAdminState")
 	if socksAt < 0 || postureAt < 0 {
-		t.Fatalf("main() no longer calls initSOCKS5 (%d) / initPersistentAdminState (%d) directly — "+
+		t.Fatalf("runStartupSequence no longer calls initSOCKS5 (%d) / initPersistentAdminState (%d) directly — "+
 			"re-derive CHAOS-102's window against the new boot shape before editing this wall", socksAt, postureAt)
 	}
 
@@ -319,26 +320,46 @@ func TestCHAOS102_Wall_NoListenerServesBeforeThePostureIsClosed(t *testing.T) {
 
 // TestCHAOS102_Wall_ThePostureRestoreReleasesTheGate pins the other end. A
 // gate that is armed and never released is a permanently dead listener, so
-// this is the gate on the gate: loadPersistentAdminState must release it, and
-// must do so AFTER the LoadAdminSettings call that installs the posture —
-// releasing first would reopen the window it exists to close.
+// this is the gate on the gate: the boot sequence must release it, and must do
+// so AFTER the step that installs the posture (initPersistentAdminState →
+// LoadAdminSettings) — releasing first would reopen the window it exists to
+// close — and AFTER the cluster activation, so a data plane's SOCKS5 listener
+// never serves ahead of its last-good replay.
+//
+// The release used to be the statement after LoadAdminSettings inside
+// loadPersistentAdminState. It moved to openTrafficGates when the cluster
+// activation moved after the store loaders: the gate now also waits for the
+// replay. A release left behind in loadPersistentAdminState would open the
+// listener before the replay, so that is pinned too.
 func TestCHAOS102_Wall_ThePostureRestoreReleasesTheGate(t *testing.T) {
-	file := parseMainPkgFileForTest(t, "persistent_admin_state_startup.go")
-	fn := funcDeclForTest(t, file, "loadPersistentAdminState")
-
-	loadAt := callStatementIndexForTest(fn, "LoadAdminSettings")
-	releaseAt := callStatementIndexForTest(fn, "releaseSOCKS5PostureGate")
-	if loadAt < 0 {
+	file := parseMainPkgFileForTest(t, "main.go")
+	seq := funcDeclForTest(t, file, "runStartupSequence")
+	postureAt := callStatementIndexForTest(seq, "initPersistentAdminState")
+	activateAt := callStatementIndexForTest(seq, "activateClusterRoles")
+	gatesAt := callStatementIndexForTest(seq, "openTrafficGates")
+	if postureAt < 0 || activateAt < 0 {
+		t.Fatalf("runStartupSequence no longer calls initPersistentAdminState (%d) / activateClusterRoles (%d) — re-derive CHAOS-102", postureAt, activateAt)
+	}
+	if gatesAt < 0 || !calleeNames(funcDeclForTest(t, file, "openTrafficGates"))["releaseSOCKS5PostureGate"] {
+		t.Fatal("CHAOS-102 regression: the boot sequence does not release the SOCKS5 pre-posture " +
+			"gate (runStartupSequence → openTrafficGates → releaseSOCKS5PostureGate). initSOCKS5 arms it " +
+			"before binding, so without this call the listener refuses every connection for the life of the process")
+	}
+	if gatesAt < postureAt {
+		t.Fatalf("CHAOS-102 regression: the pre-posture gate is released at stmt %d, BEFORE "+
+			"initPersistentAdminState at stmt %d — that reopens the window the gate exists to close", gatesAt, postureAt)
+	}
+	if gatesAt < activateAt {
+		t.Fatalf("the SOCKS5 gate is released at stmt %d, BEFORE activateClusterRoles at stmt %d: a data "+
+			"plane's SOCKS5 listener would serve on file-loaded state ahead of its last-good replay", gatesAt, activateAt)
+	}
+	admin := funcDeclForTest(t, parseMainPkgFileForTest(t, "persistent_admin_state_startup.go"), "loadPersistentAdminState")
+	if callStatementIndexForTest(admin, "LoadAdminSettings") < 0 {
 		t.Fatal("loadPersistentAdminState no longer calls LoadAdminSettings — re-derive CHAOS-102")
 	}
-	if releaseAt < 0 {
-		t.Fatal("CHAOS-102 regression: loadPersistentAdminState does not release the SOCKS5 pre-posture " +
-			"gate. initSOCKS5 arms it before binding, so without this call the listener refuses every " +
-			"connection for the life of the process")
-	}
-	if releaseAt < loadAt {
-		t.Fatalf("CHAOS-102 regression: the pre-posture gate is released at stmt %d, BEFORE "+
-			"LoadAdminSettings at stmt %d — that reopens the window the gate exists to close", releaseAt, loadAt)
+	if calleeNames(admin)["releaseSOCKS5PostureGate"] {
+		t.Fatal("loadPersistentAdminState releases the SOCKS5 gate again: that opens the listener before " +
+			"the cluster activation (a data plane's last-good replay). The release belongs to openTrafficGates")
 	}
 }
 
@@ -481,17 +502,23 @@ func TestCHAOS102_Wall_PrimaryDataPathHasNoPrePostureWindow(t *testing.T) {
 		}
 	}
 
-	mainFn := funcDeclForTest(t, file, "main")
-	postureAt := callStatementIndexForTest(mainFn, "initPersistentAdminState")
-	for _, late := range []string{"buildAndStartProxyServer", "startAdminUI", "runProxyUntilShutdown"} {
-		at := callStatementIndexForTest(mainFn, late)
+	seq := funcDeclForTest(t, file, "runStartupSequence")
+	postureAt := callStatementIndexForTest(seq, "initPersistentAdminState")
+	for _, late := range []string{"buildAndStartProxyServer", "startAdminUI"} {
+		at := callStatementIndexForTest(seq, late)
 		if at < 0 {
-			t.Fatalf("main() no longer calls %s — re-derive CHAOS-102's negative half", late)
+			t.Fatalf("runStartupSequence no longer calls %s — re-derive CHAOS-102's negative half", late)
 		}
 		if at < postureAt {
 			t.Fatalf("%s now runs at stmt %d, BEFORE initPersistentAdminState at stmt %d: it has acquired "+
 				"the pre-posture accept window CHAOS-102 closed on SOCKS5", late, at, postureAt)
 		}
+	}
+	// The serve loop stays in main(), after the whole sequence.
+	mainFn := funcDeclForTest(t, file, "main")
+	seqAt, serveAt := callStatementIndexForTest(mainFn, "runStartupSequence"), callStatementIndexForTest(mainFn, "runProxyUntilShutdown")
+	if seqAt < 0 || serveAt < seqAt {
+		t.Fatalf("main() must call runStartupSequence (stmt %d) and then runProxyUntilShutdown (stmt %d)", seqAt, serveAt)
 	}
 }
 

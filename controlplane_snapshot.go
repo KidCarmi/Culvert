@@ -1359,8 +1359,30 @@ func (s *ConfigStore) LastPublishError() (msg, ts string) {
 // rejection is logged, alerted, and surfaced via LastPublishError — but the
 // error is returned so an admin handler can also report it inline.
 func publishCurrentConfigSnapshot() error {
+	// Lifecycle: no live-state publish before every store has loaded. Nothing
+	// in the start-up sequence publishes that early; this makes it a property
+	// rather than an ordering accident (a snapshot captured from half-loaded
+	// stores is the defect the activation order exists to prevent).
+	if !nodePublishPhaseReached() {
+		return fmt.Errorf("%w (start-up phase %s)", errPublishBeforeStoresLoaded, currentNodePhase())
+	}
+	// Leadership: publishing is a leadership-dependent operation
+	// (ha_authority.go). Publication AUTHORIZATION — whether what is committed
+	// may be served to the fleet — is a separate question, asked where a
+	// snapshot is handed out (nodeServingRefusal).
+	if !nodeLeadershipHeld() {
+		return globalConfigStore.rejectPublish(publishFull, errPublishWithoutLeadership)
+	}
 	return globalConfigStore.UpdateFrom(CurrentConfigSnapshot)
 }
+
+// errPublishBeforeStoresLoaded: a publish was attempted before the start-up
+// sequence had loaded every configuration store.
+var errPublishBeforeStoresLoaded = fmt.Errorf("config publish refused: the node's configuration stores have not finished loading")
+
+// errPublishWithoutLeadership: a publish was attempted by a node that does not
+// hold leadership.
+var errPublishWithoutLeadership = fmt.Errorf("config publish refused: this node does not hold leadership")
 
 // seedReplicatedSnapshot sets the in-memory snapshot from a replicated HA bundle
 // WITHOUT marking published or notifying subscribers. It gives the delta ring a
@@ -1866,24 +1888,20 @@ func applySnapshotExtendedState(snap ConfigSnapshot) {
 // conditions, and only one of them is a no-op. A nil FIELD is the presence
 // contract: an older or rolled-back CP that omits the slice must leave the
 // node's durable state alone. A nil STORE is a startup-ORDER fact:
-// globalBandwidth and globalNodeGroups are built by initPersistentAdminState
-// (main.go), which runs AFTER initCluster — and initCluster is what calls
-// startDataPlane, whose applyDPLastGoodConfigSnapshot replays the
-// last-known-good snapshot SYNCHRONOUSLY. So on every Data Plane boot the
-// replay reaches the apply with both stores still nil and drops both slices,
-// while the surrounding apply goes on to record a complete, successful,
-// version-advancing apply. The version ratchet then suppresses the next poll
-// (`snap.Version <= lastVersion`), so nothing re-applies them until the CP
-// increments the config version.
+// globalBandwidth and globalNodeGroups are built by initPersistentAdminState.
 //
-// Enforcement normally still converges, because both stores reload the same
-// content from their own node-local JSON moments later (ReplaceAll persists on
-// every apply). That convergence is a property of the local files, not of this
-// apply: a restored, re-imaged or partially-populated volume breaks it, and the
-// node then enforces stale or absent bandwidth/QoS and node-group state with
-// every surface reporting a current config. Until the ordering itself is fixed,
-// a dropped slice is at least REPORTED rather than silent, naming the slice and
-// the version so an operator can correlate it instead of inferring it.
+// The boot order that made this fire on EVERY data-plane start is fixed: the
+// last-good replay used to run from initCluster, before that step, so both
+// slices were dropped while the apply recorded a complete, version-advancing
+// success (and the version ratchet then suppressed the next poll). The replay
+// now runs from activateClusterRoles, after every store is constructed
+// (main.go runStartupSequence; startup_sequence_order_test.go pins it), so on
+// the boot path the stores exist.
+//
+// The report stays as the backstop for any apply that reaches here with a
+// store missing — a future reordering, or a caller outside the boot sequence:
+// a dropped slice is REPORTED, naming the slice and the version, never
+// discarded silently behind a guard that reads like the presence contract.
 func reportDroppedStartupOrderSlices(snap ConfigSnapshot) {
 	if snap.BandwidthPolicies != nil && globalBandwidth == nil {
 		logger.Printf("DataPlane: config v%d bandwidth policies NOT applied (%d policy/policies) — "+

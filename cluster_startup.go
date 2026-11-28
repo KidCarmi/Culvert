@@ -18,11 +18,55 @@ import (
 	"github.com/KidCarmi/Culvert/internal/halease"
 )
 
-// loadCluster applies the resolved cluster config. enrolled is the
+// Cluster start-up runs in TWO halves, with every configuration store loaded
+// in between (main.go runStartupSequence):
+//
+//	loadClusterIdentity   EARLY — who this node is and what it trusts: node
+//	                      identity, the cluster DB, the cluster CA, the HA
+//	                      fencing lease, and (a pure data plane) the role claim
+//	                      with its epoch floor and node-key checks. A control
+//	                      plane also binds its EARLY listener here, which can
+//	                      only answer "starting" (cp_starting_listener.go).
+//	(*clusterActivation).activate
+//	                      LATE — the role starts ACTING: a control plane makes
+//	                      its first publish, binds its listener and resumes HA
+//	                      leadership; a standby joins its leader; a data plane
+//	                      replays its last-good snapshot and starts polling.
+//
+// They used to be one step that ran before the stores loaded. A control plane
+// therefore published — and, once bound, served — a snapshot captured from
+// EMPTY stores (no rules, no blocklist, the zero-state default action) and
+// nothing republished it; a data plane replayed its last-good snapshot into
+// stores that had no file path yet, after which the policy file loaded over
+// the replayed rules and the default action was re-derived over the control
+// plane's. The order INSIDE the activation is unchanged: publish → bind →
+// HA resume (ADR-0005 commit-before-advertise, CHAOS-71 address ownership).
+
+// clusterActivation is the late half loadClusterIdentity leaves to be run once
+// the stores have loaded. activate runs at most once.
+type clusterActivation struct {
+	cfg clusterStartupConfig
+	// ctx is the lifecycle context the activation's goroutines are parented
+	// to, carried from the early half to the late half of one boot.
+	ctx context.Context
+	// starting is the control plane's early listener (cp_starting_listener.go),
+	// bound by the early half and stopped by activate just before the real
+	// listener binds. nil when this node is not a control plane, or the early
+	// bind did not succeed.
+	starting *cpStartingListener
+	// runDP is a pure data plane's late half (prepareDataPlane), nil otherwise.
+	runDP func()
+	// dp is the data-plane wiring of a node ALSO wired as a control plane or
+	// standby. Its role claim is not made early: the control-plane activation
+	// goes first and wins the role, exactly as before the split.
+	dp dpWiring
+}
+
+// loadClusterIdentity is the EARLY half (see above). enrolled is the
 // fresh-enrollment result from THIS run (nil when no enrollment happened) —
 // a runtime input, deliberately not part of the resolved config.
-func loadCluster(cfg clusterStartupConfig, ctx context.Context, enrolled *dpEnrollmentConfig) {
-	// Node identity: standalone until a CP/DP/HA path below claims a role.
+func loadClusterIdentity(cfg clusterStartupConfig, ctx context.Context, enrolled *dpEnrollmentConfig) *clusterActivation {
+	// Node identity: standalone until the activation claims a role.
 	host, _ := os.Hostname()
 	initStandaloneClusterRole(host)
 
@@ -35,15 +79,56 @@ func loadCluster(cfg clusterStartupConfig, ctx context.Context, enrolled *dpEnro
 	}
 
 	// ADR-0005 S5: arm the etcd fencing lease BEFORE any role branch so
-	// every path to leadership below is lease-arbitrated. A requested fence
-	// that cannot be built is FATAL — silently running legacy when the
-	// operator asked for fencing would be an invisible safety downgrade.
+	// every path to leadership is lease-arbitrated. A requested fence that
+	// cannot be built is FATAL — silently running legacy when the operator
+	// asked for fencing would be an invisible safety downgrade.
 	if cfg.HAEtcdEndpoints != "" {
 		if err := armHALease(cfg); err != nil {
 			logFatalf("HA lease: %v", err)
 		}
 	}
 
+	act := &clusterActivation{cfg: cfg, ctx: ctx}
+	cpClass := cfg.haJoinMode() || cfg.cpMode()
+	if cpClass {
+		// The cluster CA stays EARLY. The Root-CA slice (initRootCA, the next
+		// step but two) starts the CA auto-rotation loop, whose immediate
+		// startup round checks the CLUSTER CA as well; a CA initialised only
+		// at activation would make that round a no-op and put the check a full
+		// rotation interval (24 h) after boot. The activation initialises it
+		// again from the same directory — an idempotent reload.
+		initClusterCA(cfg.ClusterDBPath)
+	}
+	if cfg.CPAddr != "" && !cfg.haJoinMode() {
+		// Identity and trust are established: answer peers "starting" from
+		// here on, instead of leaving the port closed while the stores load.
+		act.starting = startCPStartingListener(cpListenerConfig{addr: cfg.CPAddr, certFile: cfg.CPCert, keyFile: cfg.CPKey, caFile: cfg.CPCA})
+	}
+	dp := resolveDPWiring(cfg, enrolled)
+	switch {
+	case dp.addr == "":
+	case cpClass:
+		act.dp = dp
+	default:
+		// A pure data plane claims its role NOW: the steps between here and
+		// the activation classify the node by it (the signed-feed authority,
+		// the MCP distribution node id).
+		act.runDP = prepareDataPlane(ctx, dp.addr, dp.nodeID, dp.certFile, dp.keyFile, dp.caFile)
+	}
+	return act
+}
+
+// activate is the LATE half (see above). A nil receiver (no cluster wiring at
+// all cannot produce one; a test that skipped the early half can) is a no-op.
+func (a *clusterActivation) activate() {
+	if a == nil {
+		return
+	}
+	cfg, ctx := a.cfg, a.ctx
+	// Hand the address over: the early listener stops, then the unchanged
+	// activation publishes and binds the real one.
+	a.starting.stopEarlyListener()
+	a.starting = nil
 	switch {
 	case cfg.haJoinMode():
 		// Fresh HA standby joining a leader (--ha-join from the deploy command).
@@ -51,10 +136,17 @@ func loadCluster(cfg clusterStartupConfig, ctx context.Context, enrolled *dpEnro
 	case cfg.cpMode():
 		startControlPlaneWithHAResume(cfg, ctx)
 	}
-
-	// Data Plane wiring (independent of the CP/HA paths above).
-	dp := resolveDPWiring(cfg, enrolled)
-	if dp.addr != "" {
+	switch {
+	case a.runDP != nil:
+		run := a.runDP
+		a.runDP = nil
+		run()
+	case a.dp.addr != "":
+		// Also wired as a control plane or standby: the claim is made here,
+		// after the control-plane activation, which is refused or wins as it
+		// always did (cluster_posture).
+		dp := a.dp
+		a.dp = dpWiring{}
 		startDataPlane(ctx, dp.addr, dp.nodeID, dp.certFile, dp.keyFile, dp.caFile)
 	}
 }

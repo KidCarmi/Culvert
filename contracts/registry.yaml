@@ -966,6 +966,93 @@ contracts:
     validation: integration
     compatibility: "Data planes apply a published snapshot whole; an edit that was waiting for a publish is delivered by the first policy edit after upgrade."
 
+  - id: CLU-005
+    area: cluster-sync
+    status: enforced
+    owner_approved: false
+    invariant: "A control plane's first publish at start-up, and so everything it serves once its listener is bound, is captured after every configuration store has loaded; before the bind a poller is refused, never served a partially loaded configuration."
+    authority: "Start-up sequence (main.go runStartupSequence) and cluster activation (cluster_startup.go)."
+    code:
+      - "cluster_startup.go"
+      - "main.go"
+    configs: []
+    transitions:
+      permitted:
+        - "adding a store loader or reconciliation before activateClusterRoles"
+        - "adding a traffic gate or listener after activateClusterRoles"
+      forbidden:
+        - "activating a cluster role (publish, listener bind, HA resume, standby join) before the configuration stores have loaded"
+        - "changing the publish, bind, HA-resume order inside the control-plane activation"
+    tests:
+      - {file: "startup_sequence_order_test.go", name: TestStartupSequence_PhasesNeverGoBackwards}
+      - {file: "startup_sequence_order_test.go", name: TestStartupSequence_NothingBeforeTheActivationActivates}
+      - {file: "startup_sequence_order_test.go", name: TestStartupSequence_NothingAfterTheActivationLoadsAStore}
+      - {file: "startup_sequence_order_test.go", name: TestStartupSequence_MainRunsTheOneSequence}
+      - {file: "startup_sequence_order_test.go", name: TestClusterHalves_ControlPlane_IdentityEarly_ServesOnlyLoadedConfig}
+      - {file: "startup_sequence_order_test.go", name: TestClusterHalves_ControlPlane_LeaseLeaderResumeCommitsItsEpoch}
+    validation: integration
+    compatibility: "The control-plane listener binds later in the boot; data planes see connection refused until then and keep their last-good configuration. The real-binary form of these tests is TestBinaryStartup_* (build tag proxybinload)."
+
+  - id: CLU-007
+    area: cluster-sync
+    status: enforced
+    owner_approved: false
+    invariant: "A control plane's cluster listener answers every request with the CULVERT_NODE_STARTING status (gRPC Unavailable, with the start-up phase and elapsed seconds) from the moment its identity is established until the node is ready, and serves a configuration snapshot only when the node is ready and publication is authorized. The listener that answers before the activation has no handler that reads a store, publishes, enrols or leads. A live-state publish is refused before every configuration store has loaded. A legacy-mode standby treats the starting answer as proof that its leader is alive — not counted toward failover, not a sync — for a bounded grace; a lease-mode standby counts it."
+    authority: "Node lifecycle (node_lifecycle.go), the early listener (cp_starting_listener.go), the standby's reading of it (ha_leader_answer.go) and leadership/publication authority (ha_authority.go)."
+    code:
+      - "node_lifecycle.go"
+      - "cp_starting_listener.go"
+      - "ha_leader_answer.go"
+      - "ha_authority.go"
+    configs: []
+    transitions:
+      permitted:
+        - "replacing ha_authority.go's stub answers with real leadership and publication-gate answers"
+      forbidden:
+        - "inferring readiness, leadership or publication authority from a listener being bound"
+        - "registering a real handler on the early listener"
+        - "serving a snapshot before the node is ready, or publishing before the stores have loaded"
+        - "changing the status code or the leading token of the starting answer (released peers classify on them)"
+    tests:
+      - {file: "node_lifecycle_test.go", name: TestCPStartingListener_EveryMethodAnswersStartingAndNothingElse}
+      - {file: "node_lifecycle_test.go", name: TestNodeLifecycle_RealServerServesNothingUntilReady}
+      - {file: "node_lifecycle_test.go", name: TestNodeLifecycle_HandOver_PollerNeverSeesConfigBeforeReady}
+      - {file: "node_lifecycle_test.go", name: TestNodeLifecycle_WireStatusesAreDistinct}
+      - {file: "node_lifecycle_test.go", name: TestNodeLifecycle_PublishIsRefusedBeforeStoresLoadAndWithoutLeadership}
+      - {file: "node_lifecycle_test.go", name: TestNodeLifecycle_Lease_PeerTookTheLeaseDuringSlowStoreLoad}
+      - {file: "ha_starting_leader_test.go", name: TestLegacyStandby_SlowLeaderStartDoesNotPromote}
+      - {file: "ha_starting_leader_test.go", name: TestLegacyStandby_LeaderHungInStartupPromotesAfterTheGrace}
+      - {file: "ha_starting_leader_test.go", name: TestLeaseStandby_StartingAnswerStillCounts}
+    validation: integration
+    compatibility: "Unavailable is what every released data plane and standby already retries on. A standby on an earlier release does not recognise the marker and counts a starting answer as a failed round, as it counted a closed port: upgrade the standby before the leader."
+
+  - id: CLU-006
+    area: cluster-sync
+    status: enforced
+    owner_approved: false
+    invariant: "A data plane validates its cluster identity before loading any store, and replays its last-good snapshot after its own configuration stores have loaded and before the SOCKS5 pre-posture gate, the admin UI and the proxy listener open (the default-off MCP runtime listener binds earlier and enforces its own durable local state). When that replay is accepted, the node's default action and every slice the snapshot carries (policy rules included) are the snapshot's, active and persisted, whatever its node-local files and admin settings held. When there is no last-good snapshot, or it is unreadable, over a cap, or refused (identity-provider sync, an unenforceable rule), nothing is replayed and the node keeps its file-loaded state until it next syncs."
+    authority: "Start-up sequence (main.go runStartupSequence) and data-plane start-up (dp_enrollment.go)."
+    code:
+      - "dp_enrollment.go"
+      - "cluster_startup.go"
+      - "main.go"
+    configs: []
+    transitions:
+      permitted: []
+      forbidden:
+        - "replaying the last-good snapshot before the stores it writes into are loaded and bound to their files"
+        - "re-deriving or reloading the default action or policy rules over the replayed snapshot later in start-up"
+        - "opening the SOCKS5 pre-posture gate, the admin UI or the proxy listener before the replay"
+    tests:
+      - {file: "startup_sequence_order_test.go", name: TestStartupSequence_PhasesNeverGoBackwards}
+      - {file: "startup_sequence_order_test.go", name: TestClusterHalves_DataPlane_ReplayAfterStores_KeepsControlPlaneState}
+      - {file: "startup_sequence_order_test.go", name: TestClusterHalves_DataPlane_FirstEnrolmentNoLastGood}
+      - {file: "startup_sequence_order_test.go", name: TestClusterHalves_DataPlane_IdentityIsValidatedInTheEarlyHalf}
+      - {file: "startup_sequence_order_test.go", name: TestStartupSequence_NothingAfterTheActivationLoadsAStore}
+      - {file: "socks5_posture_gate_chaos_test.go", name: TestCHAOS102_Wall_ThePostureRestoreReleasesTheGate}
+    validation: integration
+    compatibility: "Existing data directories need no migration: the policy file is rewritten from the last-good snapshot at the first start on this build. The node holds no durable record of the configuration version it last APPLIED other than the last-good snapshot itself, so a last-good file whose write failed (and is therefore older than the node's local files) is replayed over them at boot and corrected at the next successful sync."
+
   - id: CLU-004
     area: cluster-sync
     status: enforced

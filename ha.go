@@ -713,10 +713,14 @@ type standbyLoopState struct {
 	client                    *DataPlaneClient
 	failCount                 int
 	manualWarned              bool // warn-once latch for the auto-failover-disabled path
-	// leaderAnswered is set by the production sync path when the LAST round's
-	// HASync RPC returned a bundle, whatever happened to it afterwards. An
-	// injected syncFn leaves it false.
-	leaderAnswered bool
+	// leaderAnswered is set by the production sync path when the LAST round
+	// proved the leader alive (haLeaderAnswer); an injected syncFn leaves it
+	// haNoAnswer.
+	leaderAnswered haLeaderAnswer
+	// startingSince is when the current unbroken run of "the leader says it is
+	// starting" answers began (zero: not in one). It bounds how long such
+	// answers are taken as proof of life (haStartingGrace).
+	startingSince time.Time
 
 	// syncFn overrides the leader-sync call. nil ⇒ the production path
 	// (h.syncFromLeader). It exists so the CHAOS-25 fault-injection tests can
@@ -728,11 +732,14 @@ type standbyLoopState struct {
 // sync performs one leader-sync attempt through the (optionally injected) seam.
 func (s *standbyLoopState) sync() bool {
 	if s.syncFn != nil {
-		s.leaderAnswered = false
+		s.leaderAnswered = haNoAnswer
 		return s.syncFn()
 	}
 	applied, answered := s.h.syncFromLeader(s.ctx, s.client, s.token)
 	s.leaderAnswered = answered
+	if applied {
+		s.startingSince = time.Time{} // a sync ends any run of "starting" answers
+	}
 	return applied
 }
 
@@ -867,14 +874,44 @@ func (h *HAState) noteRefusedRound(leaderAddr string) {
 // round: a leader that answers but has lost the fence (verifyBundleEpoch) is
 // exactly the leader a standby must be able to replace, and Acquire arbitrates.
 func (s *standbyLoopState) countSyncFailure() bool {
-	if s.leaderAnswered && !s.h.leaseConfigured() {
-		s.leaderAnswered = false
-		s.setFail(0)
-		s.h.noteRefusedRound(s.leaderAddr)
+	answer := s.leaderAnswered
+	s.leaderAnswered = haNoAnswer
+	// The starting run — and so its grace clock — ends only when the leader
+	// REPLIES (or a sync applies: sync()). A round with no answer at all does
+	// not end it: a leader hung in start-up that answers "starting" on some
+	// rounds and times out on others is one run, and restarting the clock on
+	// every timeout would let it block failover for ever — the case the grace
+	// exists to bound.
+	if answer == haAnsweredReply {
+		s.startingSince = time.Time{}
+	}
+	if s.h.leaseConfigured() || answer == haNoAnswer || s.startingGraceOver(answer) {
+		s.setFail(s.failCount + 1)
+		return true
+	}
+	s.setFail(0)
+	if answer == haAnsweredStarting {
+		logger.Printf("HA: the leader %q answered that it is still STARTING — it is alive; this round does not "+
+			"count toward the leader-unreachable threshold (for at most %s of such answers)",
+			sanitizeLog(s.leaderAddr), haStartingGrace)
 		return false
 	}
-	s.setFail(s.failCount + 1)
-	return true
+	s.h.noteRefusedRound(s.leaderAddr)
+	return false
+}
+
+// startingGraceOver reports whether a "starting" answer has outlasted the
+// grace: the leader has been starting, without a break, for longer than
+// haStartingGrace, and such answers count as failures again. It also starts
+// the clock on the first one.
+func (s *standbyLoopState) startingGraceOver(answer haLeaderAnswer) bool {
+	if answer != haAnsweredStarting {
+		return false
+	}
+	if s.startingSince.IsZero() {
+		s.startingSince = haStartingNow()
+	}
+	return haStartingNow().Sub(s.startingSince) > haStartingGrace
 }
 
 // onSyncFailed is tick's tail for a round that did not apply: count it, and at
@@ -1046,18 +1083,22 @@ func (h *HAState) warnManualFailoverRequired(leaderAddr string) {
 }
 
 // syncFromLeader calls HASync on the leader and applies the state bundle.
-// applied reports a fully applied bundle. leaderAnswered reports that the RPC
-// returned a reply at all — true for a bundle that was then unparseable,
-// rejected by the epoch check or refused in the apply path; false only when the
-// call itself failed (transport error or a gRPC status).
-func (h *HAState) syncFromLeader(ctx context.Context, client *DataPlaneClient, token string) (applied, leaderAnswered bool) {
+// applied reports a fully applied bundle. leaderAnswered says what the round
+// proved about the leader (haLeaderAnswer): haAnsweredReply for a bundle that
+// came back — even one that was then unparseable, rejected by the epoch check
+// or refused in the apply path; haAnsweredStarting / haAnsweredHolding for the
+// two refusals only a live leader sends (haLeaderAnswerOf); haNoAnswer for any
+// other failure of the call.
+func (h *HAState) syncFromLeader(ctx context.Context, client *DataPlaneClient, token string) (applied bool, leaderAnswered haLeaderAnswer) {
 	// ADR-0005 S0: advertise this standby's own address so the leader can record
 	// it as the failback target (the topology otherwise never tells the leader).
 	reqBytes, _ := json.Marshal(map[string]string{"token": token, "standby_addr": h.advertiseAddr()})
 	raw, err := client.call(ctx, methodHASync, json.RawMessage(reqBytes))
 	if err != nil {
 		logger.Printf("HA: HASync RPC error: %v", err)
-		return false, false
+		// A leader that says it is STARTING answered: it is alive, which is
+		// the opposite of evidence that it is gone (ADR-0065).
+		return false, haLeaderAnswerOf(err)
 	}
 	// Record the HA bundle size so the NEXT HASync poll's deadline scales with
 	// it. An HA-only standby never runs fetchAndApply (the GetConfig path), so
@@ -1069,13 +1110,13 @@ func (h *HAState) syncFromLeader(ctx context.Context, client *DataPlaneClient, t
 	var bundle HAStateBundle
 	if err := json.Unmarshal(raw, &bundle); err != nil {
 		logger.Printf("HA: parse state bundle error: %v", err)
-		return false, true
+		return false, haAnsweredReply
 	}
 	// ADR-0005 S3 (Finding 7): PULLER-side fence — verify the bundle's
 	// epoch against our own lease backend BEFORE any import. A zombie
 	// leader serving stale state must not reach ImportFullState.
 	if !h.verifyBundleEpoch(bundle.Epoch) {
-		return false, true
+		return false, haAnsweredReply
 	}
 	ok := applyHABundle(&bundle, token)
 	if ok {
@@ -1097,7 +1138,7 @@ func (h *HAState) syncFromLeader(ctx context.Context, client *DataPlaneClient, t
 		logger.Printf("HA: leader requested a planned promotion — performing coordinated handoff")
 		h.promote("planned handoff requested by leader")
 	}
-	return ok, true
+	return ok, haAnsweredReply
 }
 
 // seedTermFromLeader raises this standby's epoch to the leader's term (never
@@ -1659,6 +1700,7 @@ func apiHealthz(w http.ResponseWriter, r *http.Request) {
 	// If HA is not enabled, this node is standalone — always healthy.
 	if !status.Enabled {
 		resp := map[string]any{"status": "ok", "role": "standalone", "leader": true, "write_authority": true, "version": version}
+		addLifecycleHealth(resp)
 		addRequestLogHealth(resp)
 		jsonOK(w, resp)
 		return
@@ -1676,6 +1718,7 @@ func apiHealthz(w http.ResponseWriter, r *http.Request) {
 			"version": version,
 		}
 		addLeaseHealth(resp, globalHA)
+		addLifecycleHealth(resp)
 		addRequestLogHealth(resp)
 		jsonOK(w, resp)
 		return
@@ -1688,6 +1731,7 @@ func apiHealthz(w http.ResponseWriter, r *http.Request) {
 		"version": version,
 	}
 	addLeaseHealth(standbyResp, globalHA)
+	addLifecycleHealth(standbyResp)
 	addRequestLogHealth(standbyResp)
 	resp, _ := json.Marshal(standbyResp)
 	_, _ = w.Write(resp)
