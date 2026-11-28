@@ -130,6 +130,7 @@ var stateChangingKinds = map[string]struct{}{
 	KindUpgradeApply:     {},
 	KindRollbackCreate:   {},
 	KindReconcileStartup: {},
+	KindRuntimeRecover:   {},
 }
 
 // SyntheticStateChangingKind is exported for tests that need to

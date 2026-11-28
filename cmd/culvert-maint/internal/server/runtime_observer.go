@@ -288,6 +288,8 @@ func (s *Server) keep(smp runtimehealth.Sample) string {
 		return obsWriteFailed
 	}
 	s.logTransition(smp)
+	// Counting only (runtime_recovery.go): the observer never acts.
+	s.noteRuntimeSample(&smp)
 	return obsRecorded
 }
 

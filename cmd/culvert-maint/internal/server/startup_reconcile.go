@@ -396,6 +396,12 @@ type reconcileCase struct {
 	auditSuffix string
 	// resumeID: the image id a resume_gate verdict gates (resumeIdentity).
 	resumeID string
+	// actor is the audit actor of the per-record entry ("" = the reconcile);
+	// a runtime recovery runs the same plan as itself (runtime_recovery.go).
+	actor string
+	// deferRemoval: retire audits but does not remove the record; the runtime
+	// recovery removes its own record after its terminal audit entry.
+	deferRemoval bool
 }
 
 func (c *reconcileCase) auditKind() string {
@@ -814,6 +820,9 @@ func (s *Server) retire(c *reconcileCase) ReconcileRecord {
 			return s.keepRecord(c, OutcomeConvergedNotRetired)
 		}
 	}
+	if c.deferRemoval {
+		return c.out
+	}
 	if err := s.opts.Journal.Remove(c.rec.OpID); err != nil {
 		return s.keepRecord(c, OutcomeConvergedNotRetired)
 	}
@@ -858,8 +867,12 @@ func (s *Server) auditReconciled(c *reconcileCase, outcome audit.Outcome) error 
 	for _, a := range c.out.Actions {
 		actions = append(actions, a)
 	}
+	actor := c.actor
+	if actor == "" {
+		actor = AuditActorReconcile
+	}
 	ev := audit.Event{
-		Actor: AuditActorReconcile, OpID: c.rec.OpID, Kind: c.auditKind(),
+		Actor: actor, OpID: c.rec.OpID, Kind: c.auditKind(),
 		Params: map[string]interface{}{
 			"reconcile_op_id": c.opID, "decision": c.out.Decision, "reason": c.out.Reason,
 			"actions": actions, "running_image": c.out.RunningImage, "pinned_tag": c.out.PinnedTag,

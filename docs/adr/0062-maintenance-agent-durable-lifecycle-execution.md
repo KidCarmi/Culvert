@@ -489,6 +489,33 @@ gaps and make the #2051 executor the single path every recovery takes.
      restart starts the count again). It begins the operation under the
      maintenance lock (operators get 409), writes the record fail-closed, and
      runs the plan through the startup executor's steps. Status reports it.
+     *As built:* the observer hands each sample it kept to a counter and
+     does nothing else; the worker (`runtime_recovery.go`) checks admission
+     once without the lock, so a steady refusal costs no operation and no
+     audit entry, then begins `runtime.recover` and checks it again under
+     the lock. The attempt counter is
+     `<state_dir>/health/recover_attempts.json`, one count per (source op, X)
+     for every source still in force (installed.json's, or a record still in
+     the journal), written before the record: the cap of 2 outlives a
+     retired record, a new install of the same image starts from zero, and
+     two sources that authorize opposite directions (B replaced A; a kept
+     record of A replacing B) cannot alternate the images past it. A single
+     slot let them alternate forever (Codex review on #2140, reproduced by
+     `TestRuntimeRecovery_NoPingPongBetweenTwoSources`). R's reference is
+     its `gated.json` entry's, validated again (repo-bound exact digest,
+     allowlist) and required local as R. The plan is the startup reconcile's
+     `act`: the decision on fresh facts must be `finish_rollback_retag`.
+     Audit: `runtime.recover` started and succeeded/failed (actor
+     `agent:runtime-recovery`) around the plan's own
+     `runtime.recover:reconciled` entry. The plan does not remove the
+     record: the operation ends with the orchestrator's crash-safe terminal
+     sequence (stamp the outcome on the record, write the terminal entry,
+     then remove it after a success or keep it marked audited after a
+     failure), so a kill at any point is finished at the next start (Codex
+     review on #2140). Status: `runtime_recovery` (policy,
+     threshold, streak, running, last attempt). Contract AGT-010 (open until
+     PR 4); AGT-001 and AGT-009 amended. The main application's pass-through
+     of `runtime_recovery` is a follow-up, as `runtime_health`'s was.
   4. *Real-Docker qualification* in all four cells, with negative controls.
 - **Admission: checked once, on fresh facts, before the record is written.**
   - The policy is on, the lock is free and the settle window is over.
