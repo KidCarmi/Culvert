@@ -264,7 +264,14 @@ func unenrolledConfigPullCleanup() {
 var gcMarshalCache configMarshalCache
 
 type configMarshalCache struct {
-	mu      sync.Mutex
+	mu sync.Mutex
+	// store is the ConfigStore the cached bytes were marshaled from. A version
+	// number identifies one snapshot only within one store: a different store
+	// (a test swapping globalConfigStore; any future code that replaces it)
+	// restarts its versions, and a cache keyed on the number alone then served
+	// the PREVIOUS store's bytes to every enrolled poller as the new store's
+	// snapshot at that version.
+	store   *ConfigStore
 	version int64
 	caFP    string
 	bytes   json.RawMessage
@@ -279,18 +286,19 @@ type configMarshalCache struct {
 func (c *configMarshalCache) serve(fp string) (json.RawMessage, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	snap := globalConfigStore.Get()
+	store := globalConfigStore
+	snap := store.Get()
 	if fp != "" {
 		snap.CAFingerprint = fp
 	}
-	if c.bytes != nil && c.version == snap.Version && c.caFP == fp {
+	if c.bytes != nil && c.store == store && c.version == snap.Version && c.caFP == fp {
 		return c.bytes, nil
 	}
 	b, err := json.Marshal(snap)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "marshal: %v", err)
 	}
-	c.version, c.caFP, c.bytes = snap.Version, fp, b
+	c.store, c.version, c.caFP, c.bytes = store, snap.Version, fp, b
 	return b, nil
 }
 
@@ -299,7 +307,7 @@ func (c *configMarshalCache) serve(fp string) (json.RawMessage, error) {
 // version number reused by a fresh store cannot serve a prior store's bytes.
 func (c *configMarshalCache) reset() {
 	c.mu.Lock()
-	c.version, c.caFP, c.bytes = 0, "", nil
+	c.store, c.version, c.caFP, c.bytes = nil, 0, "", nil
 	c.mu.Unlock()
 }
 

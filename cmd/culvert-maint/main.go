@@ -486,19 +486,20 @@ func reportInterrupted(jnl *journal.Journal, al *audit.Logger, rec *journal.Reco
 // newServer wires the agent HTTP server from its already-constructed
 // dependencies. Extracted from run() to keep that function within the funlen
 // budget; no behavior change.
-func newServer(cfg *config.Config, pol *auth.Policy, al *audit.Logger, mgr *ops.Manager, stp server.StatusProvider, r *runner.Runner, auditPath string, jnl *journal.Journal, lock *journal.ReconcileLock, rh *runtimehealth.Store) (*server.Server, error) {
+func newServer(cfg *config.Config, pol *auth.Policy, al *audit.Logger, mgr *ops.Manager, stp server.StatusProvider, r *runner.Runner, auditPath string, jnl *journal.Journal, lock *journal.ReconcileLock, rh runtimeEvidence) (*server.Server, error) {
 	return server.New(server.Options{
-		RuntimeHealth: rh,
-		InstanceLock:  lock,
-		Cfg:           cfg,
-		Auth:          pol,
-		Audit:         al,
-		Ops:           mgr,
-		Status:        stp,
-		StateDir:      cfg.StateDir,
-		AuditPath:     auditPath,
-		Journal:       jnl,
-		Runner:        r,
+		RuntimeHealth:   rh.store,
+		RuntimeRecovery: rh.recovery,
+		InstanceLock:    lock,
+		Cfg:             cfg,
+		Auth:            pol,
+		Audit:           al,
+		Ops:             mgr,
+		Status:          stp,
+		StateDir:        cfg.StateDir,
+		AuditPath:       auditPath,
+		Journal:         jnl,
+		Runner:          r,
 		HealthProbeFactory: func() health.Probe {
 			return health.Probe{
 				BaseURL:    cfg.HealthBaseURL,
@@ -510,23 +511,37 @@ func newServer(cfg *config.Config, pol *auth.Policy, al *audit.Logger, mgr *ops.
 	})
 }
 
+// runtimeEvidence is the runtime health store and, when runtime_recovery is
+// on, the recovery's tracker (both nil when off).
+type runtimeEvidence struct {
+	store    *runtimehealth.Store
+	recovery *server.RuntimeRecoveryTracker
+}
+
 // openRuntimeHealth opens the runtime health evidence store when
 // runtime_health_interval is on (ADR-0062 slice 5) and has the status report
 // it. Like the idempotency store, a store that cannot be opened does not stop
 // the agent: the observer then does not run, and status says nothing about
-// runtime health, exactly as when it is off.
-func openRuntimeHealth(cfg *config.Config, stp *status.Provider) *runtimehealth.Store {
+// runtime health, exactly as when it is off. Without the store there is no
+// runtime recovery either (slice 6): its trigger and its evidence are there.
+func openRuntimeHealth(cfg *config.Config, stp *status.Provider) runtimeEvidence {
 	if cfg.RuntimeHealthInterval <= 0 {
-		return nil
+		return runtimeEvidence{}
 	}
 	st, err := runtimehealth.Open(cfg.StateDir)
 	if err != nil {
 		log.Printf("culvert-maint: WARN: the runtime health store could not be opened, so the observer does not run: %q", err.Error())
-		return nil
+		return runtimeEvidence{}
 	}
 	stp.WithRuntimeHealth(st, cfg.RuntimeHealthInterval)
 	log.Printf("culvert-maint: runtime health observer on, every %s", cfg.RuntimeHealthInterval)
-	return st
+	ev := runtimeEvidence{store: st}
+	if cfg.RuntimeRecovery == config.RecoveryRestoreLastGated {
+		ev.recovery = server.NewRuntimeRecoveryTracker()
+		stp.WithRuntimeRecovery(ev.recovery, string(cfg.RuntimeRecovery))
+		log.Printf("culvert-maint: runtime recovery on (%s)", cfg.RuntimeRecovery)
+	}
+	return ev
 }
 
 // opLogRetentionInterval is how often the per-op transcript sweep runs after the

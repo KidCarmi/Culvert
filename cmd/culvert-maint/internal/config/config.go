@@ -142,7 +142,28 @@ type Config struct {
 	// ReconcileOnStartup; its result is surfaced read-only in GET /v1/status
 	// `runtime_health` (absent when off).
 	RuntimeHealthInterval time.Duration
+
+	// RuntimeRecovery lets the agent put back the image an upgrade it
+	// installed replaced, when that upgrade's image keeps failing its health
+	// check at runtime (ADR-0062 slice 6; owner decision 2026-11-28: only
+	// images this agent installed). Default RecoveryOff. RecoveryRestoreLastGated
+	// is accepted only with RuntimeHealthInterval on: the observer's samples
+	// are its only trigger and gated.json its only source of a restore image.
+	// Same GUI-parity deferral as ReconcileOnStartup; its state is surfaced
+	// read-only in GET /v1/status `runtime_recovery` (absent when off).
+	RuntimeRecovery RecoveryMode
 }
+
+// RecoveryMode is the closed set of runtime_recovery values.
+type RecoveryMode string
+
+const (
+	// RecoveryOff never acts at runtime (the default).
+	RecoveryOff RecoveryMode = "off"
+	// RecoveryRestoreLastGated restores, under every admission condition of
+	// ADR-0062 slice 6, the gated image an install of this agent replaced.
+	RecoveryRestoreLastGated RecoveryMode = "restore_last_gated"
+)
 
 // ReconcileMode is the closed set of reconcile_on_startup values.
 type ReconcileMode string
@@ -198,6 +219,7 @@ type rawConfig struct {
 	ReconcileOnStartup  string   `toml:"reconcile_on_startup"`
 	ResumeInterrupted   bool     `toml:"resume_interrupted_gate"`
 	RuntimeHealth       string   `toml:"runtime_health_interval"`
+	RuntimeRecovery     string   `toml:"runtime_recovery"`
 }
 
 const (
@@ -522,8 +544,28 @@ func validate(raw *rawConfig) (*Config, error) {
 	if cfg.RuntimeHealthInterval, err = parseRuntimeHealthInterval(raw.RuntimeHealth); err != nil {
 		return nil, err
 	}
+	if cfg.RuntimeRecovery, err = parseRuntimeRecovery(raw.RuntimeRecovery, cfg.RuntimeHealthInterval); err != nil {
+		return nil, err
+	}
 
 	return cfg, nil
+}
+
+// parseRuntimeRecovery reads runtime_recovery. Absent or empty is off; any
+// other value outside the closed set fails Load, and so does a recovery
+// without the observer that triggers it (a switch silently ignored misleads
+// whoever set it).
+func parseRuntimeRecovery(raw string, healthEvery time.Duration) (RecoveryMode, error) {
+	switch RecoveryMode(raw) {
+	case "", RecoveryOff:
+		return RecoveryOff, nil
+	case RecoveryRestoreLastGated:
+		if healthEvery <= 0 {
+			return "", fmt.Errorf(`config: runtime_recovery = %q requires runtime_health_interval on`, RecoveryRestoreLastGated)
+		}
+		return RecoveryRestoreLastGated, nil
+	}
+	return "", fmt.Errorf("config: runtime_recovery must be %q or %q, got %q", RecoveryOff, RecoveryRestoreLastGated, raw)
 }
 
 // Bounds of runtime_health_interval when it is on. The lower bound keeps a

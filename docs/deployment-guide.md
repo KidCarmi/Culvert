@@ -420,7 +420,9 @@ priority when both are set, and `docker-compose.ha.yml` already passes the
 value by environment. By
 default, a lost leader requires **manual** promotion of the standby
 (`-ha-auto-failover` is off by default — a 2-node pair alone can't safely
-tell "leader is dead" apart from "network partition"). For **safe automatic**
+tell "leader is dead" apart from "network partition"; with the flag on, the
+standby still promotes itself only if it synced the leader's configuration
+within the last 10 minutes). For **safe automatic**
 failover, add an etcd fencing lease (`-ha-etcd-endpoints ...`) — see
 [`docs/operator/ha-lease-failover.md`](operator/ha-lease-failover.md) for the
 full setup and behavior.

@@ -29,6 +29,11 @@ import (
 // panicStandby builds a legacy-mode (no fencing lease) standby with
 // auto-failover ON — the configuration in which an unwanted promotion is
 // genuinely unfenced, i.e. the split-brain-capable one.
+//
+// The standby has SYNCED (lastSyncOK is fresh): it models a previously healthy
+// pair. That is what makes it eligible for automatic promotion at all
+// (haSyncIneligibility), so "must not promote" below is a statement about the
+// panic guard, not about a standby that could never have promoted anyway.
 func panicStandby(t *testing.T) *HAState {
 	t.Helper()
 	tempHADir(t)
@@ -37,6 +42,7 @@ func panicStandby(t *testing.T) *HAState {
 	h.role = "standby"
 	h.token = "test-token"
 	h.autoFailover = true
+	h.lastSyncOK = time.Now()
 	h.peerAddr = "live-leader:50051"
 	h.pc = promoteContext{set: true, onPromote: func() error { return nil }}
 	h.mu.Unlock()
@@ -303,7 +309,8 @@ func TestChaos25_FailedPromoteKeepsTheLoopAlive(t *testing.T) {
 	h.mu.Lock()
 	h.role = "standby"
 	h.token = "test-token"
-	h.autoFailover = true // legacy unfenced auto-failover
+	h.autoFailover = true     // legacy unfenced auto-failover
+	h.lastSyncOK = time.Now() // a synced standby: eligible for automatic promotion
 	h.pc = promoteContext{set: true, onPromote: func() error {
 		attempts++
 		switch attempts {
