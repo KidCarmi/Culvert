@@ -1209,11 +1209,18 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   previous image when the container still runs that image (the kill landed
   between `docker tag` and `compose up`); it finishes an inline rollback whose
   journal record says it was armed and whose tag is already on the previous
-  image (`compose up`, health gate, verify by image id); or it accepts,
+  image (`compose up`, health gate, verify by image id), or, when the agent
+  was killed before that rollback moved the tag back, first moves the tag to
+  the recorded previous image and then does the same (Docker is re-read before
+  each change, and anything the recovery did not cause itself stops it); or it accepts,
   without touching Docker, an upgrade recorded as verified whose image runs
   under the tag and answers `/ready`. Everything else, including a new image
   that is running but never passed the health gate, is reported as
-  `recovery_required` and left alone; with Docker unreadable it defers. It
+  `recovery_required` and left alone; so is a previous image that fails the
+  health gate after a finished rollback, until it answers `/ready` (a record
+  of an armed rollback is never removed before the previous image answers
+  `/ready`, even when only the tag had to move back); with Docker
+  unreadable it defers. It
   never pulls, never runs `down`, and tries an action at most twice per
   record. The interrupted operation stays `failed(agent_restart_interrupted)`;
   the recovery is a separate `reconcile.startup` operation, and a record is

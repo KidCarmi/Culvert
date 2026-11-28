@@ -131,10 +131,68 @@ proxy_repo = "ghcr.io/kidcarmi/culvert"
 #              back to the recorded previous image when the container still
 #              runs it; finish a rollback the journal proves was armed; or
 #              accept an upgrade the journal proves passed its health gate and
-#              digest check and that answers /ready now. Anything else is
-#              reported as recovery_required and nothing is changed. It never
-#              pulls, never runs `down`, and never starts an image that has not
-#              passed the health gate. If Docker cannot be read it defers.
+#              digest check and that answers /ready now; or, when no proxy
+#              container is running because the previous agent process died
+#              inside that upgrade's own `compose up` (and Docker still lists
+#              the never-started container that death leaves, read with
+#              `compose ps -a`), put the tag back on the image that was
+#              serving before, start it, and require it to answer /ready. Anything else is reported as recovery_required;
+#              so is an action that fails its check, with what it changed left
+#              in place. It never pulls, never runs `down`, and never starts an
+#              image that has not passed the health gate (the target is never
+#              started here). If Docker cannot be read it defers.
+#              A `compose down` run by hand after that crash removes the
+#              never-started container, so it is not undone. Left as the crash
+#              left it, the stack is restored. The restore needs the sudoers
+#              rule for `compose ps -a` shipped with this version; without it
+#              nothing is restored and the entry is reported.
 # An agent older than this setting refuses to start with it present: remove
 # it before downgrading.
 #reconcile_on_startup = "off"
+
+# Resume an upgrade's interrupted health gate (contract AGT-900, ADR-0062
+# slice 7). Startup-only; there is no API to change it. Accepted only with
+# reconcile_on_startup = "converge"; with any other mode the agent refuses to
+# start.
+#   false (default) an upgrade whose agent died while health-checking the new
+#         image, or after starting it and before checking it, is reported
+#         (recovery_required, target_live_ungated) and the new image keeps
+#         serving unchecked until you act.
+#   true  the next start runs that health check itself, once: only when
+#         container, tag and the pinned upgrade reference are on one image
+#         that carries the pinned digest (and, if the restart recorded the
+#         new image's id, it is that one), no rollback was armed, and no
+#         other start has seen the entry since the check began. If the agent
+#         died inside that upgrade's `compose up`, also only when the proxy
+#         runs and `docker compose ps -a` shows Compose finished (no
+#         never-started proxy container; needs that command's sudoers rule). It first records
+#         that it is checking (if it cannot, nothing runs), then checks
+#         /ready, then container, tag and the running digest. Passed: the new
+#         image is accepted with nothing changed in Docker (audit
+#         upgrades.apply:resumed). Failed: the rollback is recorded and run
+#         in the same start, as for an armed rollback. The upgrade itself
+#         stays failed (agent_restart_interrupted); it is not replayed.
+# An agent older than this setting refuses to start with it present: remove
+# it before downgrading.
+#resume_interrupted_gate = false
+
+# Watch the running proxy and record its health (ADR-0062 slice 5, contract
+# AGT-007). Startup-only; there is no API to change it. "0s" or absent (the
+# default) is off; otherwise between "1m" and "24h".
+# Every interval, unless an operation holds the maintenance lock or the
+# interrupted_settle window is open, the agent reads the proxy container and
+# culvert/proxy:pinned (the same read-only commands status uses), runs the
+# health check (/ready, as every upgrade does), and reads both again. If
+# anything changed in between, the reading is dropped. It never starts an
+# operation, never changes Docker, and writes only <state_dir>/health:
+#   latest.json     the last reading: gated, unhealthy or unknown;
+#   last_good.json  the last image that passed the check with nothing changing
+#                   around it, and that has a <proxy_repo>@sha256 reference
+#                   the image_allowlist admits. A failed or unreadable check
+#                   never removes it.
+# GET /v1/status then reports runtime_health: gated, ungated (the running
+# image has not passed the check yet), unhealthy, unknown, or stale (no
+# reading for 3 intervals), plus last_good.
+# An agent older than this setting refuses to start with it present: remove
+# it before downgrading.
+#runtime_health_interval = "0s"

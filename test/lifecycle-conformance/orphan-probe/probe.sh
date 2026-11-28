@@ -11,6 +11,7 @@
 #   --only-converge  run nothing but the convergence part.
 #   --quick      a reduced matrix (smoke run; not evidence).
 #   ORPHAN_PROBE_OUT=<dir>  copy the per-trial records (JSONL) there.
+#   ORPHAN_PROBE_DOWN=<k,...>  kill points of the converge B1 control (default 9,10; empty skips).
 #
 # Needs root, a running Docker daemon with the compose plugin, Go, python3, curl, openssl,
 # and a host with systemd and sudo installed under /usr (the systemd it runs is the host's
@@ -484,6 +485,15 @@ if [ "$CONVERGE" = 1 ]; then
     run converge-slow converge "$SLOW" "$MID"
     PROBE_DRAIN=notready run converge-slow-notready converge "$SLOW" "$MID"
     judge converge --trials=$(( $(n "$ALL") + 2 * $(n "$MID") )); worse $?
+  fi
+  # B1 control (ADR-0062 slice 4): killed inside `up` with the proxy down, then the
+  # operator's deliberate `compose down` before the new agent decides. The journal
+  # still attributes the outage to the death; nothing may be started.
+  # ORPHAN_PROBE_DOWN: the kill points of this slice (empty skips it).
+  DOWN="${ORPHAN_PROBE_DOWN-9,10}"
+  if [ -n "$DOWN" ]; then
+    run converge-down converge-down 0 "$DOWN"
+    judge converge-operator-down --trials=$(n "$DOWN"); worse $?
   fi
 fi
 

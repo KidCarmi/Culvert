@@ -35,6 +35,7 @@ import (
 	"culvert-maint/internal/journal"
 	"culvert-maint/internal/ops"
 	"culvert-maint/internal/runner"
+	"culvert-maint/internal/runtimehealth"
 )
 
 // Version is the agent version string. Overridable at link time:
@@ -97,6 +98,42 @@ type Status struct {
 	// needs an operator; Reconcile is what the reconcile did, per record.
 	RecoveryRequired *bool            `json:"recovery_required,omitempty"`
 	Reconcile        *ReconcileStatus `json:"reconcile,omitempty"`
+
+	// RuntimeHealth is what the runtime health observer last saw (ADR-0062
+	// slice 5). Set only when runtime_health_interval is on.
+	RuntimeHealth *RuntimeHealthStatus `json:"runtime_health,omitempty"`
+}
+
+// RuntimeHealthStatus reports the runtime health evidence. State is one of
+// gated, ungated, unhealthy, unknown or stale (runtimehealth.Classify): the
+// latest sample as it relates to the image running now. Like RunningImage it
+// carries image ids and digests only, never a container id.
+type RuntimeHealthStatus struct {
+	State  string `json:"state"`
+	Reason string `json:"reason,omitempty"`
+	// ObservedAt and ImageID describe the latest kept sample; absent when
+	// there is none.
+	ObservedAt *time.Time `json:"observed_at,omitempty"`
+	ImageID    string     `json:"image_id,omitempty"`
+	Detail     string     `json:"detail,omitempty"`
+	// IntervalSeconds is the configured sampling interval.
+	IntervalSeconds int64 `json:"interval_seconds"`
+	// Error says why the evidence could not be read: State is then unknown.
+	Error string `json:"error,omitempty"`
+	// LastGood is the last image the production gate passed with its
+	// container and image unchanged across the probe. Absent when there is
+	// none. No unhealthy, unknown or stale observation removes it.
+	LastGood      *RuntimeLastGood `json:"last_good,omitempty"`
+	LastGoodError string           `json:"last_good_error,omitempty"`
+}
+
+// RuntimeLastGood is the last-known-good image.
+type RuntimeLastGood struct {
+	ImageID  string    `json:"image_id"`
+	Ref      string    `json:"ref"`
+	Digest   string    `json:"digest"`
+	PassedAt time.Time `json:"passed_at"`
+	Gate     string    `json:"gate"`
 }
 
 // PinnedTagStatus is the live state of the fixed proxy tag
@@ -187,6 +224,11 @@ type Options struct {
 	// HealthProbeFactory builds a fresh health.Probe per restore
 	// operation. May be nil in tests that don't exercise restore.
 	HealthProbeFactory func() health.Probe
+
+	// RuntimeHealth is the runtime health evidence store (ADR-0062 slice 5).
+	// The observer runs only when it is set, HealthProbeFactory and Runner
+	// are set, and Cfg.RuntimeHealthInterval is positive.
+	RuntimeHealth *runtimehealth.Store
 }
 
 // DefaultOpDrainTimeout is the shutdown drain window for in-flight orchestrator
@@ -215,7 +257,32 @@ type Server struct {
 	// startHazard is whether the previous agent process may have left one
 	// unfinished; startSettled is set once Docker showed that it is over
 	// (settle.go, mutation.go). settlePoll is how often Docker is asked.
-	mutations    *journal.MutationLog
+	mutations *journal.MutationLog
+	// attribution: op id → the docker command the previous agent process
+	// died inside, as THIS start found it (main.go takeCommandIntents), until
+	// the startup reconcile takes it. Guarded by attributionMu.
+	attributionMu sync.Mutex
+	attribution   map[string]string
+
+	// failGen / clearedGen: whether a command intent's close could not be
+	// written and is being retried (Server.staleIntents in mutation.go).
+	// intentRetryEvery is the retry period (0: default).
+	failGen            atomic.Uint64
+	clearedGen         atomic.Uint64
+	sweepMu            sync.Mutex // one sweep at a time
+	intentRetryRunning atomic.Bool
+	intentRetryEvery   time.Duration
+	intentRetryStop    chan struct{}
+	intentRetryMu      sync.Mutex    // guards intentRetryDone and the start/stop decision
+	intentRetryDone    chan struct{} // closed when the loop last started has ended
+	intentRetryOnce    sync.Once
+	// intentRetryExitHook, when set (tests only), runs as the retry loop ends,
+	// between its last check and marking itself stopped.
+	intentRetryExitHook func()
+	// intentSweepClearHook, when set (tests only), runs in a sweep that closed
+	// everything, just before it publishes that.
+	intentSweepClearHook func()
+
 	startHazard  bool
 	startOnlyUp  bool // a readable marker was found and names only `compose up`
 	startSettled atomic.Bool
@@ -249,6 +316,9 @@ type Server struct {
 	reconcileTracker *ReconcileTracker
 	reconcileLock    *journal.ReconcileLock
 	startupWork      func()
+
+	// observer is the runtime health observer's state (runtime_observer.go).
+	observer runtimeObserver
 }
 
 // New constructs a Server. Returns an error if any required option is
@@ -292,7 +362,8 @@ func New(opts Options) (*Server, error) {
 		log.Printf("culvert-maint: WARN: the mutation marker could not be set up; treating this start as following an unfinished compose command, and compose up/down will be refused until the state directory is writable")
 	}
 	srv := &Server{
-		opts: opts, startedAt: time.Now(), opDrainTimeout: drain, opSem: make(chan struct{}, maxRO),
+		intentRetryStop: make(chan struct{}),
+		opts:            opts, startedAt: time.Now(), opDrainTimeout: drain, opSem: make(chan struct{}, maxRO),
 		mutations: mutations, startHazard: atOpen.Pending, startOnlyUp: atOpen.OnlyUp, settlePoll: defaultSettlePoll,
 		reconcileLock: opts.InstanceLock,
 	}
@@ -413,6 +484,11 @@ func (s *Server) Serve(ctx context.Context) error {
 		// goOp makes it part of the shutdown drain like any op.
 		s.goOp(work)
 	}
+	// The runtime health observer stops before the drain on either exit path
+	// below, so the drain never waits on it.
+	obsCtx, stopObserver := context.WithCancel(ctx)
+	defer stopObserver()
+	s.startRuntimeObserver(obsCtx)
 
 	// Shutdown on ctx done. The shutdown grace timer must be detached
 	// from ctx (which is already cancelled when this fires), so we
@@ -431,6 +507,7 @@ func (s *Server) Serve(ctx context.Context) error {
 	}()
 
 	drain := func() {
+		stopObserver()
 		if !s.drainOps() {
 			log.Printf("culvert-maint: shutdown drain deadline (%s) elapsed with ops still running; leaving for restart recovery", s.opDrainTimeout)
 		}
@@ -460,6 +537,23 @@ func (s *Server) Serve(ctx context.Context) error {
 // Close stops the server and removes the socket file. Safe to call
 // multiple times.
 func (s *Server) Close() error {
+	// Stop the intent retry loop and make one last attempt to say "that
+	// command returned" before the process goes.
+	s.intentRetryMu.Lock()
+	s.intentRetryOnce.Do(func() {
+		if s.intentRetryStop != nil {
+			close(s.intentRetryStop)
+		}
+	})
+	done := s.intentRetryDone
+	s.intentRetryMu.Unlock()
+	// Wait for a loop that was started: nothing of it may touch the journal
+	// after this function has released the instance lock. No new loop can
+	// start once the stop channel is closed.
+	if done != nil {
+		<-done
+	}
+	s.sweepStaleIntents()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.httpSrv != nil {

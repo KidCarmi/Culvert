@@ -74,11 +74,31 @@ compose)
   shift 3
   case "$1" in
   ps)
-    blk ps
-    if [ -f "$S/running" ]; then
-      printf '{"Service":"proxy","State":"running","ID":"c0ffee000001"}\n'
+    if [ "$2" = "-a" ]; then
+      # Every state (restore_prior's evidence). Its own counter, so the ps:N
+      # points of the other tests do not move. psa_denied: an install whose
+      # sudoers file predates the rule.
+      blk psa
+      if [ -f "$S/psa_denied" ]; then
+        echo "sudo: a password is required" >&2; exit 1
+      fi
+      if [ -f "$S/running" ]; then
+        printf '{"Service":"proxy","State":"running","ID":"c0ffee000001"}\n'
+      fi
+      if [ -f "$S/leftover" ]; then
+        printf '{"Service":"proxy","State":"created","ID":"c0ffee000002","Labels":"com.docker.compose.oneoff=False,com.docker.compose.service=proxy"}\n'
+      fi
+    else
+      blk ps
+      if [ -f "$S/running" ]; then
+        printf '{"Service":"proxy","State":"running","ID":"c0ffee000001"}\n'
+      fi
     fi ;;
   up)
+    # leftover: the "created" container real Compose has made by the time a
+    # recreate can be cut; it lasts until this 'up' finishes (measured on real
+    # Docker at every kill point that leaves no proxy running).
+    : > "$S/leftover"
     blk up_before
     # up_cleanup_only: real Compose, after a recreate interrupted between its stop and
     # its delete, spends one pass tidying up and exits 0 with nothing started. The file
@@ -89,11 +109,12 @@ compose)
     else
       cp "$S/pinned" "$S/running.tmp" && mv "$S/running.tmp" "$S/running"
     fi
+    rm -f "$S/leftover"
     blk up_after ;;
   down)
     # The restore flow's stop. Inert for every test that never restores.
     blk down_before
-    rm -f "$S/running"
+    rm -f "$S/running" "$S/leftover"
     blk down_after ;;
   --profile)
     # The cli service: a restore dry-run (the preflight) or a restore commit.
@@ -190,6 +211,7 @@ type crashRig struct {
 
 	healthMu   sync.Mutex
 	healthHang bool
+	healthDown bool // the proxy answers 503: every health gate fails
 	healthHit  chan struct{}
 }
 
@@ -236,7 +258,7 @@ func newCrashRig(t *testing.T) *crashRig {
 
 	hs := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		r.healthMu.Lock()
-		hang := r.healthHang
+		hang, down := r.healthHang, r.healthDown
 		r.healthMu.Unlock()
 		if hang {
 			select {
@@ -244,6 +266,10 @@ func newCrashRig(t *testing.T) *crashRig {
 			default:
 			}
 			time.Sleep(4 * time.Second) // longer than the probe's per-request timeout
+		}
+		if down {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
 		}
 		w.WriteHeader(http.StatusOK)
 	}))
@@ -505,10 +531,20 @@ func (r *crashRig) waitJournal(want ...string) []string {
 }
 
 // journalFiles lists the op ids with a live journal record.
+// intentFenceFile stands in the journal while an operation is inside a docker
+// compose command and, if the agent dies there, until an agent of this version
+// has started (journal/intent.go). It is not an operation record.
+const intentFenceFile = "00000000000000000000000001.json"
+
+// journalFiles lists the OPERATION records in the journal (not the intent
+// fence; TestCommandIntent_DiedInsideUp asserts when that is and is not there).
 func (r *crashRig) journalFiles() []string {
 	ents, _ := os.ReadDir(filepath.Join(r.state, "reconcile"))
 	var out []string
 	for _, e := range ents {
+		if e.Name() == intentFenceFile {
+			continue
+		}
 		if strings.HasSuffix(e.Name(), ".json") {
 			out = append(out, strings.TrimSuffix(e.Name(), ".json"))
 		}

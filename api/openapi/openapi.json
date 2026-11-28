@@ -2661,9 +2661,81 @@
         ],
         "type": "object"
       },
+      "MaintAgentRuntimeHealth": {
+        "additionalProperties": false,
+        "description": "What the maintenance agent's non-mutating runtime health observer last saw (ADR-0062 slice 5, contract AGT-007), relative to the image running now. A state this build does not know is reported as unknown. Image ids and digests only; never a container id.",
+        "properties": {
+          "error": {
+            "type": "string"
+          },
+          "image_id": {
+            "type": "string"
+          },
+          "interval_seconds": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "last_good": {
+            "additionalProperties": false,
+            "description": "The last image the production health gate passed with its container and image unchanged across the probe; no failed or unknown observation removes it.",
+            "properties": {
+              "digest": {
+                "type": "string"
+              },
+              "image_id": {
+                "type": "string"
+              },
+              "passed_at": {
+                "format": "date-time",
+                "type": "string"
+              },
+              "ref": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "image_id",
+              "ref",
+              "digest",
+              "passed_at"
+            ],
+            "type": "object"
+          },
+          "last_good_error": {
+            "type": "string"
+          },
+          "observed_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "reason": {
+            "type": "string"
+          },
+          "state": {
+            "enum": [
+              "gated",
+              "ungated",
+              "unhealthy",
+              "unknown",
+              "stale"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "state",
+          "interval_seconds"
+        ],
+        "type": "object"
+      },
       "MaintAgentStatus": {
         "additionalProperties": true,
-        "description": "Health of the CP-local maintenance agent, read from its GET /v1/status. `available:false` means the agent could not be reached or is not configured, with `reason` carrying the cause; otherwise carries agent_version, privilege_mode(+privilege_warning), and compose_stack_up(+compose_error).",
+        "description": "Health of the CP-local maintenance agent, read from its GET /v1/status. `available:false` means the agent could not be reached or is not configured, with `reason` carrying the cause; otherwise carries agent_version, privilege_mode(+privilege_warning), and compose_stack_up(+compose_error), and `runtime_health` when the agent's runtime health observer is on.",
+        "properties": {
+          "runtime_health": {
+            "$ref": "#/components/schemas/MaintAgentRuntimeHealth"
+          }
+        },
         "type": "object"
       },
       "MetricsConfig": {

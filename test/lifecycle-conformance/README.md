@@ -78,7 +78,9 @@ or observed behaviour differs from what was last reviewed".
 |---|---|
 | The agent's own Go logic behaves as the model says on every modelled path | Yes — executed against the real code |
 | Docker behaves as the fake exec layer assumes | **No** — an assumption; validate against real Docker (`test/e2e/maint-agent`) |
-| Startup crash recovery works end to end | **No** — the model's agent-restart step is not executed |
+| Startup crash recovery works end to end | **No** — the model's agent-restart steps are not executed against the real code |
+| The converge decision (V2) the model uses is the real one | Yes — at every crash point under both image stores, and on its whole bounded symbolic space (`TestModelConformance_ReconcileDecision`) |
+| The converge execution (write-ahead, recheck before each tag/`up`, gate, verify, audit once, retire) is right | **Only as modelled** — the model checks the properties below; the real executor is covered by the Go tests (`startup_reconcile*_test.go`), not replayed from the model |
 | The agent's reports stay true when the in-flight docker command outlives the agent | **Measured on the process-level Docker model only**; findings pinned as `open` (below) |
 | Standalone/data rollback, migration, timeouts, concurrency are correct | **No** — not modelled |
 | The properties are Culvert's contract | **No** — every property is `proposed` or `open`; none is owner-approved |
@@ -137,6 +139,31 @@ stores' observations are pinned in `observed.json`; containerd lines carry the
   which real Docker did not exhibit. The other 8 are real residue: `up` failed
   without recreating and the prior image has no allow-listed registry
   reference (4), or the stack was down before the upgrade (4).
+- **Converge (AGT-900, owner decision 1 of 2026-11-23).** After a crash the
+  model has two restarts: `restart_agent` (the default "off": report only, T4)
+  and `restart_converge` (`converge.go`): decide with the V2 table, count the
+  attempt durably, run the verdict's steps with a recheck before each `docker
+  tag`/`compose up`, gate after `up`, verify, audit once, retire; every step can
+  be killed (`rc_crash`) and restarted. The journal's `rollback_armed` marker is
+  modelled (`armed=` in every crash line; the conformance suite compares it and
+  the V2 verdict with the real code). R1-R14 state the converge guarantees,
+  including R13: an armed rollback killed before its own tag move (container
+  and tag on the target, real-Docker e2e finding 2) can be finished. S7, T2 and
+  T3 were scoped to the apply flow when converge was added: unscoped they read
+  PASS -> FAIL on converge-only traces (adopting a verified target and retiring
+  its record; the converge retag; the converge `up`), which are R-properties.
+  Each R property has a negative control (`converge_test.go`).
+- **O3 (open, AGT-900)**: converge leaves the tag ahead where it cannot act on
+  proof: the prior image has no allow-listed registry reference, or the stack
+  was down (reported `recovery_required`).
+- **O4 (open, now holds)**: no converge retirement of an armed record without
+  a prior that answers ready, including a realign (retag only, no restart, no
+  gate). It failed when first added: an armed realign retired without a probe
+  (reachable only through the injected `ok_stale` outcome, which real Docker
+  did not exhibit). Under owner decision 1 ("a fresh health gate" before an
+  armed rollback counts as finished) the armed realign now ends with a fresh
+  probe (`rc_probe`; `stepProbe` in the code), and O4 went FAIL -> PASS. It
+  stays `open` until the owner approves it.
 - **Reported running image: resolved (contract AGT-006).** The agent used to
   infer `final_running_digest`, and 48 of 172 apply vectors (84 across both
   image stores) reported an image that was not running. It now reports only an

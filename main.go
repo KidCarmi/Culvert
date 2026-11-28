@@ -152,6 +152,7 @@ type startupState struct {
 	cleanupKeepLast          *int
 	listBackups              *bool
 	listBackupsDir           *string
+	printDataEpoch           *bool
 	cdrEnabledFlag           *bool
 	cdrEndpointFlag          *string
 	cdrFailModeFlag          *string
@@ -253,6 +254,7 @@ func main() {
 	initUIExtras(s)
 	initLogger(s)
 	logDataDirWriterLockNotice() // CHAOS-103: an undetermined single-writer lock, now loggable
+	checkDataEpochAtBoot()       // ADR-0062 slice 6a: before any store loads; never lowers the marker
 	if dataDirOverridden() {
 		logger.Printf("DataDir: persisted-state root set by %s: %s", dataDirEnv, dataDir)
 	}
@@ -444,6 +446,7 @@ func parseFlags(s *startupState) {
 	s.cleanupKeepLast = flag.Int("keep-last", 0, "Cleanup filter: always keep the N newest .bak directories; .staging is unaffected (D1.3c)")
 	s.listBackups = flag.Bool("list-backups", false, "List backup archives in --backup-dir (default /backup) as a JSON array on stdout and exit (D1.6b)")
 	s.listBackupsDir = flag.String("backup-dir", "/backup", "Directory scanned by --list-backups; must be an absolute path (D1.6b)")
+	s.printDataEpoch = flag.Bool("print-data-epoch", false, "Print the data directory's data epoch and this build's readable range as JSON and exit (ADR-0062 slice 6a)")
 	// CDR / Sluice integration (Phase 1: single-instance client with TOFU pinning).
 	s.cdrEnabledFlag = flag.Bool("cdr-enabled", false, "Enable Sluice CDR integration (strip macros/JS/OLE from downloads)")
 	s.cdrEndpointFlag = flag.String("cdr-endpoint", "", "Sluice gRPC endpoint (e.g. sluice:8443)")
@@ -562,6 +565,15 @@ func handleOneShotCommands(s *startupState) {
 	if *s.listBackups {
 		if err := runListBackups(*s.listBackupsDir, os.Stdout); err != nil {
 			fmt.Fprintf(os.Stderr, "List backups error: %v\n", err)
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
+	// ── One-shot: data epoch (ADR-0062 slice 6a) — read-only ───────────────
+	if *s.printDataEpoch {
+		refuseOneShotOnUnfinishedRestore("data epoch")
+		if err := runPrintDataEpoch(os.Stdout); err != nil {
+			fmt.Fprintf(os.Stderr, "Data epoch error: %v\n", err)
 			os.Exit(1)
 		}
 		os.Exit(0)

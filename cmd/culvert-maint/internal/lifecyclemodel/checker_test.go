@@ -136,7 +136,7 @@ func replays(trace []string, violates func(State) bool) bool {
 }
 
 func TestCheck_TransitionAndBoundedCounterexamples(t *testing.T) {
-	r := checkOne(t, `[{"id":"T","status":"approved","kind":"transition","then":[["tag","==",{"prev":"tag"}]]}]`)
+	r := checkOne(t, `[{"id":"T","status":"approved","kind":"transition","if":[["rt","==",false]],"then":[["tag","==",{"prev":"tag"}]]}]`)
 	if want := []string{"ok", "ok", "skip", "ok", "ok"}; r.Verdict != VerdictFail || !reflect.DeepEqual(r.Trace, want) || r.State["tag"] != "T" {
 		t.Errorf("transition: %s %v tag=%v, want FAIL %v ending with tag=T", r.Verdict, r.Trace, r.State["tag"], want)
 	}

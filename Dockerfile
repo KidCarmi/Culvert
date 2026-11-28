@@ -184,6 +184,14 @@ COPY --chown=proxy:proxy docker-compose.yml docker-compose.maint-agent.yml ./dep
 COPY --chown=proxy:proxy packaging/ ./deploy/packaging/
 COPY --from=maintbuilder --chown=proxy:proxy /culvert-maint ./deploy/bin/culvert-maint
 
+# Data epochs this image reads (ADR-0062 slice 6a, contract UPG-003,
+# internal/dataepoch). The maintenance agent puts an earlier image back only
+# onto data whose epoch lies in [min, max]; an image without these labels is
+# never put back. Kept equal to dataepoch.OldestReadable / dataepoch.Current
+# by TestDockerfile_DataEpochLabelsMatchTheBuild.
+LABEL io.culvert.data-epoch.min="1" \
+      io.culvert.data-epoch.max="1"
+
 # /data is the persistent volume for the Root CA bundle, policy rules, and
 # other state that must survive container restarts.
 # Mount with: docker run -v culvert_data:/data ...
