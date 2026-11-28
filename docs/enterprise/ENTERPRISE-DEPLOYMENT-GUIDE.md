@@ -61,7 +61,7 @@ See the companion **[ENTERPRISE-PREREQUISITES.md](ENTERPRISE-PREREQUISITES.md)**
 |---|---|---|---|
 | 8080/tcp | Forward proxy (HTTP/HTTPS CONNECT) + `/health` `/ready` `/metrics` `/proxy.pac` | Proxy clients, LB probes | `-port` |
 | 9090/tcp | Admin UI/API (HTTPS) + `/healthz` + `/api/events` (SSE) | Admins, LB probes | `-ui-port` |
-| 1080/tcp | SOCKS5 (default **disabled**, `socks5_port: 0`) | SOCKS5 clients | `-socks5-port` |
+| 1080/tcp | SOCKS5 (default **disabled**, `socks5_port: 0`). **Policy is not enforced on SOCKS5** (legacy mode, SWG-901) | SOCKS5 clients | `-socks5-port` |
 | 50051/tcp | Control-Plane gRPC (cluster only, mTLS) | Data Plane nodes | `-cp-grpc-addr` |
 
 All listeners bind `0.0.0.0`; there is no bind-interface flag (GAP-NET-04). Restrict the admin UI with `-ui-allow-ip <cidrs>` **and** a host firewall / management VLAN.
@@ -218,6 +218,6 @@ Hand operators: [OPERATIONS-RUNBOOK.md](OPERATIONS-RUNBOOK.md), the Diagnostics 
 - No GUI/API or scheduled backup (GAP-BAK-01/02).
 - No support bundle (GAP-MON-01).
 - No turnkey air-gapped update; no customer-triggered rollback via GUI (GAP-UPD-01/02).
-- OCSP-only revocation (no CRL); SOCKS5 CONNECT-only (README limitations).
+- OCSP-only revocation (no CRL); SOCKS5 CONNECT-only, and SOCKS5 traffic is not policy-enforced - no policy rules, default action, threat-feed check, authentication rules or inspection (legacy mode, SWG-901; README limitations).
 
 Every item above is a tracked gap with a workaround and a recommended fix in the [Gap Register](../engineering/ENTERPRISE-IMPLEMENTATION-GAP-REGISTER.md).

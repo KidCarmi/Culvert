@@ -21,6 +21,40 @@ its surfaces goes non-green.
 
 ---
 
+## Policy enforcement: legacy mode (not enforced)
+
+SOCKS5 runs in **legacy mode** (contract SWG-901): its connections never reach
+the policy engine. Enabling the listener does not change how HTTP/HTTPS traffic
+is handled, but SOCKS5 clients get a different, smaller set of controls.
+
+| Applied to SOCKS5 | Not applied to SOCKS5 |
+|---|---|
+| Per-IP connection limit | Policy rules (FQDN, category, group, identity, source, geo, schedule) |
+| IP filter | Default action - SOCKS5 allows even where HTTP/CONNECT would default-deny |
+| Rate limit | Threat-feed domain check |
+| Username/password when authentication is enabled - local admin credential or a legacy single provider only | Stage-1 authentication rules and the IdP registry (LDAP/OIDC/SAML profiles) |
+| Destination-name length and IDNA checks | SSL inspection, CDR, AV, DLP |
+| Blocklist, including allow-list mode | Identity, rule ID and auth source in request-log entries |
+| Plugin chain | Rule hit counters |
+| Private-destination (SSRF) guard | |
+
+While the listener is configured Culvert makes this visible in two places,
+neither of which changes how SOCKS5 traffic is handled:
+
+- **Startup log**: one `WARNING: SOCKS5 listener on port N runs in legacy
+  mode ...` line.
+- **`/api/diagnostics`**: a `socks5_policy_enforcement` row with status `warn`
+  ("SOCKS5 policy enforcement: legacy (not enforced)"). It is report-only. It is
+  deliberately **not** a `/readyz` row: `/readyz` is unauthenticated on the
+  proxy port, and both the default and the `?strict=1` verdicts are unchanged.
+
+Leave SOCKS5 off (`-socks5-port 0`, the default) unless you need it. If you
+enable it, restrict who can reach the port (IP filter allowlist, blocklist allow
+mode, host firewall) and send traffic that must follow policy through the
+HTTP/HTTPS proxy.
+
+---
+
 ## The two states, and why they are different
 
 | State | Meaning | Recovers by itself? | What you do |
@@ -44,6 +78,10 @@ enforcing policy.
 **`/api/diagnostics`** — the `socks5_listener` row (viewer role). `warn` while
 degraded, `fail` while down, and it carries the consecutive-error count, the
 reason class and a suggested action.
+
+**`/api/diagnostics`** — the `socks5_policy_enforcement` row (`warn`,
+report-only) while the listener is configured; see
+[Policy enforcement](#policy-enforcement-legacy-mode-not-enforced).
 
 **`/readyz`** — a `socks5` row. **Report-only**: a node whose SOCKS5 listener is
 dead still proxies HTTP, HTTPS and PAC perfectly, so it does not fail the

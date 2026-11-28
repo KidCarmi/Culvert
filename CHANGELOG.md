@@ -954,6 +954,21 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Added
 
+- **The legacy SOCKS5 policy posture is now disclosed (SWG-901, stage 1).**
+  The optional SOCKS5 listener has never called the policy engine: no policy
+  rules, no default action, no threat-feed check, no Stage-1 authentication
+  rules or IdP registry, and no inspection. Nothing said so - the README listed
+  only "CONNECT only", the enterprise prerequisites table gave its auth as
+  "Policy", and the deployment guide's copy-paste examples enable
+  `-socks5-port 1080`. A node with the listener configured now logs one
+  startup `WARNING` and shows a report-only `socks5_policy_enforcement` WARN
+  row on `/api/diagnostics`; the README "Limitations & Known Gaps", the
+  enterprise guides, the deployment guide and the SOCKS5 operator page state
+  what SOCKS5 does and does not enforce. Visibility only: SOCKS5 traffic
+  handling is unchanged, nothing appears on a node without SOCKS5, and
+  `/ready` (default and `?strict=1`) is unchanged - it is unauthenticated, so
+  it carries no posture row (`TestSOCKS5LegacyPolicyPosture_*`).
+
 - **Adding to the blocklist now reports what the gateway actually stored
   (Product Experience).** The admin UI's "Added N host(s)" / "Imported N hosts"
   toast counted the lines it sent, not what `POST /api/blocklist` did with them.
