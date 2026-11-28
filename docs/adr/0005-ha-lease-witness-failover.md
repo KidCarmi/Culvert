@@ -108,6 +108,84 @@ Recorded so implementation cannot forget them:
 
 ## Implementation log
 
+### 2026-11-24 — Addendum (owner decision): the S4 synchronization gate also governs legacy auto-failover
+
+**Owner decision:** "Legacy auto-failover — approved as a separate PR. Enforce equivalent synchronization
+eligibility guarantees across legacy and lease-based failover paths."
+
+**What was wrong.** S4's freshness gate (Finding 8) lived inside `leaseAutoPromote` only. The legacy path
+(`--ha-auto-failover`, no lease) promoted after three failed sync rounds with no synchronization check: a
+standby that had never completed a sync — or whose every bundle had been refused (POL-005, IdP sync,
+over-cap, CA decrypt) — became leader on its own empty state, and its activation publish handed every
+data plane a configuration with no policy rules and an empty blocklist at a fresh version. Reproduced
+through the real loop (`ha_failover_sync_eligibility_test.go`, negative control against the previous code).
+
+**Decision.** One predicate, `haSyncIneligibility(lastSync, now)` in `ha_failover.go`, called by both
+automatic paths through `refuseAutoPromoteUnsynced` — the lease path's check was extracted, not copied,
+so the guarantee is equal by construction. Eligible ⇔ `lastSyncOK` is set **and** not older than
+`haPromoteFreshnessWindow` (10 min, the existing S4 constant; no second threshold). `lastSyncOK` is
+written only after `applyHABundle` returned true for a bundle that passed the puller-side epoch check.
+
+**Unchanged.** Every lease-path decision (same checks, same order, same log lines), ADR-0005 commit
+semantics (`promote()`, `commitGrant`, `exposeGrantLocked` are untouched), the planned handoff (already
+honoured only in a round that applied), and manual promotion's bypass of the gate.
+
+**Changed for legacy mode.** An ineligible standby stays a read-only standby and keeps retrying the sync.
+It logs the refusal each round on the lease path's line, fires `ha_manual_failover_required` once per
+outage (the operator action is the same: decide whether to promote), and `GET /api/cluster/ha` /
+`/api/cluster/status` carry `auto_promote_blocked` with the reason — evaluated live, so a standby that is
+not failover-ready says so *before* the leader is lost (both modes). Data planes get no configuration from
+it — a standby that was never promoted runs no Control Plane listener, so their polls fail to connect
+(a demoted ex-leader's listener stays up and answers `Unavailable`) — and keep their last applied
+configuration.
+
+**Manual promotion** stays the break-glass and is never refused on these grounds. It was silent about
+what it promoted on (the S4 comment claimed it "logs the staleness"; it did not). It now logs the
+override, returns a `warning` field and records it in the `cluster.ha-promote` audit detail when the
+standby is ineligible. No request field, status code or precondition changed.
+
+**Availability trade-off, accepted.** A legacy pair whose standby has not synced within 10 minutes — or
+at all, or since the standby's last restart — no longer fails over automatically. The evidence is
+in-memory only: `ha_config.json` records no sync, so a healthy standby that restarts and loses its
+leader before its first post-restart sync waits for an operator. Lease mode has always behaved this way.
+Persisting the last-sync instant would shorten that window in **both** modes and is therefore a
+lease-path change — left for a separate owner decision.
+
+**Follow-up 1, same day — a round the leader answered is not an unreachable round (legacy mode).**
+The standby loop counted every round that did not apply toward the three-failure threshold, including a
+round in which the leader *answered* and the standby refused or failed to apply the bundle. A standby
+that synced at T and then met a ruleset it refuses promoted three ticks later (its sync was seconds old),
+against a live leader that nothing fences in legacy mode. `syncFromLeader` now reports whether the RPC
+returned a reply; in legacy mode `countSyncFailure` does not count such a round, resets the streak (it
+means *consecutive rounds without contact*) and reports the stall through `noteRefusedRound` — the same
+decision, for the same reason, as the CHAOS-25 contained-panic round, and the same fire-once
+`ha_sync_panic` alert, plus `sync_refused` on the HA status and a failing cluster diagnosis.
+**Lease mode is unchanged and still counts every failed round**: a leader that answers after losing the
+fence is the one a standby must replace, and `Acquire` arbitrates. Limit: only a returned reply counts
+as an answer; a leader that answers with a gRPC status (for example a rejected token) is still counted
+as unreachable.
+
+**Known limit — very large bundles.** Staleness is measured when the threshold is reached, not when the
+outage began. The HASync deadline scales with the last bundle size up to 300 s, so against a leader
+that accepts connections and never answers, three rounds can take up to 15 minutes and a standby that
+was synced when the outage began can be past the 10-minute window at the threshold; it then waits for
+a manual promotion. Not changed here (it needs the outage start tracked, and moves the lease path too).
+
+**Follow-up 2, same day — sync evidence is per standby stint (a LEASE-PATH behaviour change, one case).**
+`StartAsStandbyWithUndo` reset the failure streak but not `lastSyncOK`. A node that synced at T0, was
+promoted, self-fenced and re-entered standby against the new leader B stayed "eligible" until T0+10 min
+without having applied anything from B; if B died in that window (after the 30 s cooldown) it re-promoted
+on its pre-fence state, without B's writes. Entering standby now clears `lastSyncOK`, so eligibility
+always refers to the leader the node currently stands by for. This changes what S4 decides in exactly
+that case: a demoted ex-leader no longer auto-promotes until it has applied one bundle from its new
+leader. All three callers of `enterStandbyResync` (self-fence, foreign holder observed while unfenced,
+unfenced resume with a foreign holder) are demotions whose own log lines say the node's state may be
+stale; none expects immediate promotability, and the fresh-process entry (`startHAStandby`) already
+started from zero. Availability cost: if the new leader dies before the demoted node's first sync from
+it, failover is manual. Outside the 10-minute window that was already the behaviour.
+
+Contract: `CLU-004` (`contracts/registry.yaml`).
+
 ### 2026-10-17 — Implementation note (owner decision): the role-less epoch floor (CHAOS-71, #1645)
 This note amends S3's stamping in one case and leaves the S3 rule itself unchanged.
 - **Problem (Codex P1 4302435329 on #1645):** an authority-gaining transition commits a
