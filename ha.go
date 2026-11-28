@@ -916,7 +916,13 @@ func (s *standbyLoopState) countSyncFailure() bool {
 // haStartingGrace, and such answers count as failures again. It also starts
 // the clock on the first one.
 func (s *standbyLoopState) startingGraceOver(answer haLeaderAnswer) bool {
-	if answer != haAnsweredStarting {
+	// A HOLDING answer (CULVERT_PUBLISH_NOT_AUTHORIZED) shares the grace and
+	// its clock (ADR-0064). The only node that sends it holds the leader role
+	// WITHOUT the fencing lease — as far as anyone else can tell, a stale
+	// leader. A legacy standby must not treat that as proof of a live,
+	// authoritative leader for ever: it would never fail over. Lease-mode
+	// standbys never reach here (every failed round counts; Acquire decides).
+	if answer != haAnsweredStarting && answer != haAnsweredHolding {
 		return false
 	}
 	if s.startingSince.IsZero() {

@@ -346,21 +346,33 @@ func TestLegacyStandby_StartingGraceExpiresAndTheLateLeaderJoinsAsStandby(t *tes
 	}
 }
 
-// A live leader that is deliberately holding publication answers; no bound.
-func TestLegacyStandby_PublishNotAuthorizedLeaderIsAliveWithoutBound(t *testing.T) {
+// A leader that answers CULVERT_PUBLISH_NOT_AUTHORIZED holds the leader role
+// without the fencing lease: alive, but possibly stale. A legacy standby
+// treats it as alive only for the same bounded grace as a starting leader —
+// unbounded, a stale holder would block failover for ever.
+func TestLegacyStandby_HoldingLeaderIsAliveOnlyForTheGrace(t *testing.T) {
 	p := newEligPair(t)
 	p.leader.serve(p.good)
 	p.s.guardedSyncOnce()
 	p.s.client = &DataPlaneClient{callForTest: func(context.Context, string, json.RawMessage) (json.RawMessage, error) {
-		return nil, cpPublishNotAuthorizedStatus("HASync", "held")
+		return nil, cpPublishNotAuthorizedStatus("HASync", "this node holds the HA leader role without the fencing lease")
 	}}
-	p.s.startingSince = time.Now().Add(-haStartingGrace * 4) // irrelevant to this answer
 	for i := 0; i < haStandbyMaxFail*3; i++ {
 		if p.s.guardedTick() || p.h.IsLeader() {
-			t.Fatalf("round %d: promoted against a live leader that is holding publication", i)
+			t.Fatalf("round %d: promoted inside the grace against a leader that answers", i)
 		}
 	}
 	if got := p.h.Status().SyncFailCount; got != 0 {
-		t.Errorf("sync_fail_count = %d, want 0", got)
+		t.Errorf("sync_fail_count = %d inside the grace, want 0", got)
+	}
+	// The stale holder keeps answering past the grace: failover is not blocked.
+	p.s.startingSince = time.Now().Add(-haStartingGrace - time.Second)
+	for i := 1; i < haStandbyMaxFail; i++ {
+		if p.s.guardedTick() {
+			t.Fatalf("promoted after %d post-grace round(s); the threshold still applies", i)
+		}
+	}
+	if !p.s.guardedTick() || !p.h.IsLeader() {
+		t.Fatal("a stale leader that only ever answers 'not authorized' blocked failover for ever")
 	}
 }

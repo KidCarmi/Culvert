@@ -209,8 +209,10 @@ classifies a failed `HASync` (`haLeaderAnswerOf`): `CULVERT_NODE_STARTING` — a
 the failover threshold and does not refresh the last-sync time, for at most `haPromoteFreshnessWindow/2`
 of an unbroken run of such answers, after which they count as failures (a leader hung in start-up must
 not block failover; the bound keeps a standby that was synced when the leader went down eligible; the late
-leader then revalidates and joins the promoted peer); `CULVERT_PUBLISH_NOT_AUTHORIZED` — a live leader
-holding, does not count, no bound; `PermissionDenied` — alive. Lease mode counts every failed round, as
+leader then revalidates and joins the promoted peer); `CULVERT_PUBLISH_NOT_AUTHORIZED` — sent only by a node that holds the
+leader role without the lease, so possibly a stale leader: does not count, within the same bounded grace
+and clock as a starting answer (unbounded, a stale holder would block a legacy standby's failover for
+ever; a legacy leader never sends it, so the bound costs a healthy pair nothing); `PermissionDenied` — alive. Lease mode counts every failed round, as
 before: `Acquire` decides.
 
 **Open interface point.** The listener must not refuse `GetConfig`, `GetConfigDelta` or `HASync` merely
