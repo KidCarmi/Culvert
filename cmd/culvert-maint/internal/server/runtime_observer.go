@@ -226,26 +226,7 @@ func (id observedIdentity) sample(state, reason, detail string) runtimehealth.Sa
 // image has a validated, allow-listed reference.
 func (s *Server) keepGated(id observedIdentity, hr *health.Result) string {
 	now := s.observerNow()
-	ref, digest := s.validatedRef(id.repoDigests)
-	reason := obsReasonGateOK
-	wroteGood := false
-	if ref == "" {
-		reason = obsReasonGateOKNoRef
-	} else {
-		lg := runtimehealth.LastGood{ImageID: id.imageID, Ref: ref, Digest: digest, ContainerID: id.containerID,
-			PassedAt: now, Gate: runtimehealth.GateRuntimeObserver, GateDetail: hr.ReadyDetail}
-		if err := s.opts.RuntimeHealth.WriteLastGood(lg); err != nil {
-			log.Printf("culvert-maint: WARN: the last-known-good image could not be recorded: %q", err.Error())
-			reason = obsReasonGateOKGoodUnwritable
-		} else {
-			wroteGood = true
-			// The two-entry history slice 6 restores from (ADR-0062).
-			ge := runtimehealth.GatedEntry{ImageID: id.imageID, Ref: ref, Digest: digest, GatedAt: now}
-			if err := s.opts.RuntimeHealth.NoteGated(ge); err != nil {
-				log.Printf("culvert-maint: WARN: the gated-image history could not be updated: %q", err.Error())
-			}
-		}
-	}
+	reason, wroteGood := s.recordGood(id, hr, now)
 	smp := id.sample(runtimehealth.StateGated, reason, hr.ReadyDetail)
 	smp.ObservedAt = now
 	if out := s.keep(smp); out != obsRecorded {
@@ -255,6 +236,28 @@ func (s *Server) keepGated(id observedIdentity, hr *health.Result) string {
 		return obsRecordedAndGood
 	}
 	return obsRecorded
+}
+
+// recordGood writes last_good.json and the gated history for a passed gate on
+// an image with a validated, allow-listed reference, and returns the sample's
+// reason and whether last_good was written.
+func (s *Server) recordGood(id observedIdentity, hr *health.Result, now time.Time) (reason string, wroteGood bool) {
+	ref, digest := s.validatedRef(id.repoDigests)
+	if ref == "" {
+		return obsReasonGateOKNoRef, false
+	}
+	lg := runtimehealth.LastGood{ImageID: id.imageID, Ref: ref, Digest: digest, ContainerID: id.containerID,
+		PassedAt: now, Gate: runtimehealth.GateRuntimeObserver, GateDetail: hr.ReadyDetail}
+	if err := s.opts.RuntimeHealth.WriteLastGood(lg); err != nil {
+		log.Printf("culvert-maint: WARN: the last-known-good image could not be recorded: %q", err.Error())
+		return obsReasonGateOKGoodUnwritable, false
+	}
+	// The two-entry history slice 6 restores from (ADR-0062).
+	ge := runtimehealth.GatedEntry{ImageID: id.imageID, Ref: ref, Digest: digest, GatedAt: now}
+	if err := s.opts.RuntimeHealth.NoteGated(ge); err != nil {
+		log.Printf("culvert-maint: WARN: the gated-image history could not be updated: %q", err.Error())
+	}
+	return obsReasonGateOK, true
 }
 
 // validatedRef returns the image's first reference that passes the same gate
