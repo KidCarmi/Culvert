@@ -242,7 +242,9 @@ func (s *Server) recoverUnderLock(ctx context.Context, opID string, trig runtime
 		att.Outcome, att.Reason = RecoveryRefused, "journal_write_failed"
 		return att
 	}
-	c := &reconcileCase{opID: opID, rec: &rec, in: s.reconcileInputsFor(&rec), actor: AuditActorRuntimeRecovery}
+	// deferRemoval: the record is removed by this operation's own terminal
+	// sequence, after its terminal audit entry (finishRuntimeRecovery).
+	c := &reconcileCase{opID: opID, rec: &rec, in: s.reconcileInputsFor(&rec), actor: AuditActorRuntimeRecovery, deferRemoval: true}
 	c.out = ReconcileRecord{OpID: rec.OpID, Kind: reportKind(rec.Kind)}
 	s.readReconcileFacts(ctx, &rec, &c.in, true)
 	if reconcileNeedsProbe(c.in) {
@@ -277,21 +279,40 @@ func runtimeRecoverRecord(opID string, adm *runtimeAdmission) journal.Record {
 }
 
 // finishRuntimeRecovery ends the operation and writes its outcome entry.
+//
+// It is the orchestrator's crash-safe terminal sequence (terminal_record.go):
+// the outcome is stamped on the operation's record, the terminal audit entry
+// is written, and only then is the record settled: removed after a success,
+// kept marked audited after a failure (it is then reported and decided like
+// any kept record). A kill between any two steps is finished at the next start
+// (SettleTerminalAtStartup writes a missing terminal entry from the stamp). The
+// lock is released last.
 func (s *Server) finishRuntimeRecovery(opID string, att *RuntimeRecoveryAttempt) {
-	state, reason, outcome := ops.StateSucceeded, ops.FailureReason(""), audit.OutcomeSucceeded
+	now := time.Now().UTC()
+	tm := ops.Terminal{State: ops.StateSucceeded, At: now, Safe: true}
+	outcome := audit.OutcomeSucceeded
 	if att.Outcome != RecoveryRecovered {
-		state, reason, outcome = ops.StateFailed, ops.ReasonRecoveryRequired, audit.OutcomeFailed
+		tm = ops.Terminal{State: ops.StateFailed, Reason: ops.ReasonRecoveryRequired, At: now}
+		outcome = audit.OutcomeFailed
 	}
 	result := map[string]interface{}{"outcome": att.Outcome, "reason": att.Reason, "image_id": att.ImageID,
 		"restore_image_id": att.RestoreImageID}
-	_ = s.opts.Ops.Finish(opID, state, reason, result)
-	now := time.Now().UTC()
+	tj := terminalJournal{j: s.opts.Journal}
+	if err := tj.RecordTerminal(opID, tm); err != nil {
+		log.Printf("culvert-maint: WARN: runtime recovery %s: could not stamp its outcome on the record: %q", opID, err.Error())
+	}
 	ev := audit.Event{Actor: AuditActorRuntimeRecovery, OpID: opID, Kind: ops.KindRuntimeRecover, Params: result,
 		Outcome: outcome, OutcomeAt: &now}
-	if state == ops.StateFailed {
-		ev.FailureReason = string(reason)
+	if tm.State == ops.StateFailed {
+		ev.FailureReason = string(tm.Reason)
 	}
-	_ = s.opts.Audit.Write(ev)
+	if err := s.opts.Audit.Write(ev); err != nil {
+		// Not durable: the record stays, stamped, for the next start to finish.
+		log.Printf("culvert-maint: WARN: runtime recovery %s: terminal audit entry not written; record kept: %q", opID, err.Error())
+	} else if _, err := tj.SettleTerminal(opID, tm); err != nil {
+		log.Printf("culvert-maint: WARN: runtime recovery %s: could not settle its record: %q", opID, err.Error())
+	}
+	_ = s.opts.Ops.Finish(opID, tm.State, tm.Reason, result)
 }
 
 // reportRecovery records the attempt for status and logs it when it differs

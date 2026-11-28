@@ -399,6 +399,9 @@ type reconcileCase struct {
 	// actor is the audit actor of the per-record entry ("" = the reconcile);
 	// a runtime recovery runs the same plan as itself (runtime_recovery.go).
 	actor string
+	// deferRemoval: retire audits but does not remove the record; the runtime
+	// recovery removes its own record after its terminal audit entry.
+	deferRemoval bool
 }
 
 func (c *reconcileCase) auditKind() string {
@@ -816,6 +819,9 @@ func (s *Server) retire(c *reconcileCase) ReconcileRecord {
 		if err := s.auditReconciled(c, audit.OutcomeSucceeded); err != nil {
 			return s.keepRecord(c, OutcomeConvergedNotRetired)
 		}
+	}
+	if c.deferRemoval {
+		return c.out
 	}
 	if err := s.opts.Journal.Remove(c.rec.OpID); err != nil {
 		return s.keepRecord(c, OutcomeConvergedNotRetired)

@@ -842,6 +842,7 @@ contracts:
         - "acting while the settle window is open or another operation holds the lock, or when the fixed tag is not on the running image"
         - "moving anything before the attempt is counted and the armed record written, or beyond 2 recoveries begun for one install"
         - "forgetting the count of a source still in force when another is counted, or trimming the counter instead of refusing at its bound"
+        - "removing its record before the operation's terminal audit entry is durable (the orchestrator's terminal sequence: stamp the outcome, audit, then settle)"
         - "retiring any record but its own"
     tests:
       - {file: "cmd/culvert-maint/internal/server/runtime_recovery_test.go", name: TestRuntimeRecovery_RestoresTheReplacedImage}
@@ -850,6 +851,7 @@ contracts:
       - {file: "cmd/culvert-maint/internal/server/runtime_recovery_test.go", name: TestRuntimeRecovery_TheCapIsDurable}
       - {file: "cmd/culvert-maint/internal/server/runtime_recovery_test.go", name: TestRuntimeRecovery_FromAKeptUpgradeRecord}
       - {file: "cmd/culvert-maint/internal/server/runtime_recovery_test.go", name: TestRuntimeRecovery_NoPingPongBetweenTwoSources}
+      - {file: "cmd/culvert-maint/internal/server/runtime_recovery_test.go", name: TestRuntimeRecovery_TerminalAuditBeforeTheRecordGoes}
       - {file: "cmd/culvert-maint/internal/runtimehealth/recover_attempts_test.go", name: TestRecoverAttempts_KeepsEverySourceInForce}
       - {file: "cmd/culvert-maint/internal/server/runtime_recovery_test.go", name: TestRuntimeRecovery_TriggerCountsConsecutiveNotReady}
       - {file: "cmd/culvert-maint/internal/server/runtime_recovery_test.go", name: TestRuntimeRecovery_ObserverTicksTrigger}

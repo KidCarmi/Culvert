@@ -507,7 +507,12 @@ gaps and make the #2051 executor the single path every recovery takes.
      `act`: the decision on fresh facts must be `finish_rollback_retag`.
      Audit: `runtime.recover` started and succeeded/failed (actor
      `agent:runtime-recovery`) around the plan's own
-     `runtime.recover:reconciled` entry. Status: `runtime_recovery` (policy,
+     `runtime.recover:reconciled` entry. The plan does not remove the
+     record: the operation ends with the orchestrator's crash-safe terminal
+     sequence (stamp the outcome on the record, write the terminal entry,
+     then remove it after a success or keep it marked audited after a
+     failure), so a kill at any point is finished at the next start (Codex
+     review on #2140). Status: `runtime_recovery` (policy,
      threshold, streak, running, last attempt). Contract AGT-010 (open until
      PR 4); AGT-001 and AGT-009 amended. The main application's pass-through
      of `runtime_recovery` is a follow-up, as `runtime_health`'s was.

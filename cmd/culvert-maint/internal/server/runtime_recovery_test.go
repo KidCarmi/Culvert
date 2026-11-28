@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"culvert-maint/internal/audit"
 	"culvert-maint/internal/config"
 	"culvert-maint/internal/journal"
 	"culvert-maint/internal/ops"
@@ -459,5 +460,50 @@ func TestRuntimeRecovery_NoPingPongBetweenTwoSources(t *testing.T) {
 	}
 	if begun == 0 {
 		t.Fatal("vacuous: no recovery was begun")
+	}
+}
+
+// Codex review on #2140: the operation's terminal audit entry is durable before
+// its record goes. With the plan converged and the terminal entry unwritable,
+// the record stays, stamped succeeded; the next start's terminal repair writes
+// the entry from the stamp and only then removes the record.
+func TestRuntimeRecovery_TerminalAuditBeforeTheRecordGoes(t *testing.T) {
+	r := newRecoveryRig(t)
+	op, err := r.mgr.Begin(ops.KindRuntimeRecover, AuditActorRuntimeRecovery, "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	att := r.srv.recoverUnderLock(t.Context(), op.ID, r.trig())
+	if att.Outcome != RecoveryRecovered {
+		t.Fatalf("attempt = %+v", att)
+	}
+	if _, found, _ := r.jnl.Read(op.ID); !found {
+		t.Fatal("the plan removed the record before the operation's terminal audit entry")
+	}
+	_ = r.al.Close() // the terminal entry cannot be written
+	r.srv.finishRuntimeRecovery(op.ID, &att)
+	rec, found, err := r.jnl.Read(op.ID)
+	if err != nil || !found || rec.TerminalOutcome != ops.TerminalOutcomeSucceeded || rec.TerminalAudited {
+		t.Fatalf("record after an unwritable terminal entry = %+v, found=%v err=%v", rec, found, err)
+	}
+	al2, err := audit.New(r.opts.AuditPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = al2.Close() }()
+	if _, report, handled := SettleTerminalAtStartup(r.jnl, al2, rec, repo, 3); !handled || report {
+		t.Fatalf("startup settle: handled=%v report=%v", handled, report)
+	}
+	if _, found, _ := r.jnl.Read(op.ID); found {
+		t.Fatal("the record was not removed once its terminal entry was written")
+	}
+	n := 0
+	for _, k := range r.auditKinds(t) {
+		if k == "runtime.recover/succeeded/"+AuditActorRuntimeRecovery {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Fatalf("%d terminal entries, want exactly 1: %v", n, r.auditKinds(t))
 	}
 }
