@@ -239,6 +239,11 @@ func (s *Server) keepGated(id observedIdentity, hr *health.Result) string {
 			reason = obsReasonGateOKGoodUnwritable
 		} else {
 			wroteGood = true
+			// The two-entry history slice 6 restores from (ADR-0062).
+			ge := runtimehealth.GatedEntry{ImageID: id.imageID, Ref: ref, Digest: digest, GatedAt: now}
+			if err := s.opts.RuntimeHealth.NoteGated(ge); err != nil {
+				log.Printf("culvert-maint: WARN: the gated-image history could not be updated: %q", err.Error())
+			}
 		}
 	}
 	smp := id.sample(runtimehealth.StateGated, reason, hr.ReadyDetail)

@@ -722,6 +722,35 @@ contracts:
     validation: unit
     compatibility: "New, off by default: with runtime_health_interval unset nothing runs, nothing is written and the GET /v1/status payload is unchanged. When on, it adds state_dir/health/{latest,last_good}.json (schema 1; a reader refuses any other schema, an unknown field or a file over 16 KiB) and the additive status key runtime_health. An older agent ignores the directory; a downgrade leaves it in place unread."
 
+  - id: AGT-009
+    area: agent-lifecycle
+    status: enforced
+    owner_approved: false
+    invariant: "<state_dir>/health/installed.json is written only by an upgrade this agent ran, after its health gate and digest verify passed, and names the image it installed and the image it replaced; an upgrade that failed its gate or was already current writes nothing. <state_dir>/health/gated.json holds at most two distinct images, newest first, and is changed only by a passed runtime gate on an image with a repo-bound, allow-listed digest reference. Both are written only when the runtime health store is on, and nothing in this build acts on them."
+    authority: "Maintenance agent (cmd/culvert-maint, separate module). Design: docs/adr/0062-maintenance-agent-durable-lifecycle-execution.md slice 6 (PR 1); owner decision 2026-11-28 (runtime recovery acts only on images this agent installed)."
+    code:
+      - "cmd/culvert-maint/internal/runtimehealth/provenance.go"
+      - "cmd/culvert-maint/internal/server/runtime_provenance.go"
+    configs: []
+    transitions:
+      permitted:
+        - "replacing installed.json with a later verified upgrade"
+        - "moving an image already in gated.json to the front when it is gated again"
+      forbidden:
+        - "writing installed.json for an upgrade that failed, was already current, or did not pass its digest verify"
+        - "writing installed.json for an image rollback"
+        - "changing gated.json from an unhealthy, unknown, stale or discarded observation"
+        - "keeping more than two images, or the same image twice, in gated.json"
+    tests:
+      - {file: "cmd/culvert-maint/internal/server/runtime_provenance_test.go", name: TestProvenance_VerifiedUpgradeRecordsInstalled}
+      - {file: "cmd/culvert-maint/internal/server/runtime_provenance_test.go", name: TestProvenance_OnlyAVerifiedUpgradeWithTheStoreOn}
+      - {file: "cmd/culvert-maint/internal/server/runtime_provenance_test.go", name: TestObserver_KeepsTheGatedHistory}
+      - {file: "cmd/culvert-maint/internal/runtimehealth/provenance_test.go", name: TestNoteGated_KeepsTwoDistinctNewestFirst}
+      - {file: "cmd/culvert-maint/internal/runtimehealth/provenance_test.go", name: TestInstalled_Refusals}
+      - {file: "cmd/culvert-maint/internal/runtimehealth/provenance_test.go", name: TestReadGated_Refusals}
+    validation: unit
+    compatibility: "Additive files under <state_dir>/health (schema 1), written only with runtime_health_interval on. An older agent ignores them; nothing reads them until slice 6's executor."
+
   - id: CFG-001
     area: config-compatibility
     status: enforced
