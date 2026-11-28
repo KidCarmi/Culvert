@@ -959,6 +959,17 @@ func realReconcileV2Inputs(m lifecyclemodel.ReconcileV2Inputs) reconcileInputsV2
 	case "not_ready":
 		in.Probe = probeNotReady
 	}
+	if m.Kind == lifecyclemodel.KindRuntimeRecover {
+		in.Kind = ops.KindRuntimeRecover
+		switch m.Compat {
+		case "ok":
+			in.Compat = compatOK
+		case "incompatible":
+			in.Compat = compatIncompatible
+		default:
+			in.Compat = compatUnknown
+		}
+	}
 	return in
 }
 

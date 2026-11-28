@@ -354,7 +354,7 @@ func (w *walker) crashPoint(s State, e string, script []ScriptStep, cmds []strin
 // distinctApplyInputs is the number of distinct concrete apply inputs the walk reaches.
 func distinctApplyInputs() int {
 	w := &walker{seenApply: map[string]bool{}, seenCrash: map[string]bool{}, inputs: map[string]bool{}}
-	inits := (Model{}).Inits()
+	inits := applyInits()
 	for i := range inits {
 		w.rec(inits[i], nil, nil, nil, counts{})
 	}
@@ -364,7 +364,7 @@ func distinctApplyInputs() int {
 // Vectors walks the model and returns the apply-flow and crash-point vectors.
 func Vectors() ([]ApplyVector, []CrashVector) {
 	w := &walker{seenApply: map[string]bool{}, seenCrash: map[string]bool{}, inputs: map[string]bool{}}
-	inits := (Model{}).Inits()
+	inits := applyInits()
 	for i := range inits {
 		w.rec(inits[i], nil, nil, nil, counts{})
 	}

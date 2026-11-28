@@ -109,7 +109,14 @@ type ReconcileV2Inputs struct {
 	TargetLocal      string // what the record's TargetRef resolves to locally
 	PriorLocal       string // what the record's PriorRef resolves to locally
 	Probe            string
+	// Kind is "" for an upgrade record, KindRuntimeRecover for a runtime.recover one;
+	// Compat is that record's data-compatibility verdict ("" for an upgrade).
+	Kind   string
+	Compat string
 }
+
+// KindRuntimeRecover is the model's name for a runtime.recover record (slice 6).
+const KindRuntimeRecover = "runtime.recover"
 
 // ReconcileV2InputsForState is what the real startup reconcile reads for s: the record the
 // model expects at s, plus Docker truth. The probe is not run (the caller decides).
@@ -118,6 +125,9 @@ func ReconcileV2InputsForState(s State, attempts int) ReconcileV2Inputs {
 	in := ReconcileV2Inputs{Phase: s.JR, Attempts: attempts, RefValid: r.PriorRef || r.TargetRef,
 		TargetRefPresent: r.TargetRef, PriorRefPresent: r.PriorRef, TargetID: r.TargetID, PriorID: r.PriorID,
 		Armed: r.Armed, TagID: s.Tag}
+	if s.RT {
+		in.Kind, in.Compat = KindRuntimeRecover, s.Compat
+	}
 	if s.Running != imgNone {
 		in.RunningID = s.Running
 	}
@@ -136,9 +146,37 @@ func ReconcileV2Spec(i ReconcileV2Inputs) (action, reason string) {
 	if i.Attempts >= rcMaxTries {
 		return v2RR, "reconcile_exhausted"
 	}
+	if i.Kind == KindRuntimeRecover {
+		return v2RuntimeRecover(i)
+	}
 	if isSafePhase(i.Phase) {
 		return v2SafePhase(i)
 	}
+	return v2Danger(i)
+}
+
+// v2RuntimeRecover: a runtime.recover record is only ever written armed at restarted;
+// it is then decided as an armed upgrade record in the danger window, and every verdict
+// that tags or starts the prior needs proven compatibility (slice 6, PR 2).
+func v2RuntimeRecover(i ReconcileV2Inputs) (action, reason string) {
+	switch {
+	case !i.Armed:
+		return v2RR, "runtime_recover_not_armed"
+	case i.Phase != "restarted":
+		return v2RR, "runtime_recover_unexpected_phase"
+	}
+	a, r := v2Danger(i)
+	if (a == v2Realign || a == v2Finish || a == v2FinishRetag) && i.Compat != compatModelOK {
+		if i.Compat == compatModelIncompatible {
+			return v2RR, "restore_incompatible"
+		}
+		return v2RR, "restore_compatibility_unknown"
+	}
+	return a, r
+}
+
+// v2Danger is the decision for a record in the danger window (decideDangerPhaseV2).
+func v2Danger(i ReconcileV2Inputs) (action, reason string) {
 	if !i.RefValid {
 		return v2RR, "invalid_record_ref"
 	}

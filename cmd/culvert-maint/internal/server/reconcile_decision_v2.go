@@ -209,6 +209,13 @@ type reconcileInputsV2 struct {
 	Seen          int
 	Ck            ckFacts
 	ResumeAudited bool
+
+	// Compat is dataCompat for the record's prior (the restore target) on the
+	// data the running image may have migrated (ADR-0062 slice 6a). Read for a
+	// runtime.recover record only; every plan of one that tags or starts the
+	// prior requires compatOK.
+	Compat       compatVerdict
+	CompatReason string
 }
 
 // upEvidence is the Docker-side evidence of a death inside `compose up`.
@@ -255,8 +262,6 @@ func idsOf(in *reconcileInputsV2) v2ids {
 
 // reconcileDecisionV2 is the total, pure V2 decision. Ordered first match.
 func reconcileDecisionV2(in reconcileInputsV2) reconcileVerdictV2 {
-	imageKind := (in.Kind == ops.KindUpgradeApply && in.Mode == "") ||
-		(in.Kind == ops.KindRollbackCreate && in.Mode == "image")
 	switch {
 	case in.Kind == ops.KindRollbackCreate && in.Mode == "data":
 		// Never touches Docker; the existing manual data-recovery report applies.
@@ -270,14 +275,27 @@ func reconcileDecisionV2(in reconcileInputsV2) reconcileVerdictV2 {
 		// deliberately leaves alone" is not reported as "a kind it does not
 		// know". Decided before DockerReadable: Docker is never read for it.
 		return rr("restore_window_manual")
-	case !imageKind:
+	case !isImageKind(in.Kind, in.Mode):
 		return rr("unknown_kind_or_mode")
 	case !in.DockerReadable:
 		return reconcileVerdictV2{actV2Defer, "docker_unavailable"}
 	case in.MaxAttempts > 0 && in.Attempts >= in.MaxAttempts:
 		return rr("reconcile_exhausted")
 	}
-	ids := idsOf(&in)
+	return decideImageRecordV2(&in, idsOf(&in))
+}
+
+// isImageKind reports whether a record of this kind and mode is an image
+// change the converge reconcile decides from Docker: an upgrade, an image
+// rollback, or a runtime recovery (slice 6).
+func isImageKind(kind, mode string) bool {
+	return (kind == ops.KindUpgradeApply && mode == "") ||
+		(kind == ops.KindRollbackCreate && mode == "image") ||
+		(kind == ops.KindRuntimeRecover && mode == "")
+}
+
+// decideImageRecordV2 decides an image-change record once Docker was read.
+func decideImageRecordV2(in *reconcileInputsV2, ids v2ids) reconcileVerdictV2 {
 	// A container that is listed but not running: paused or restarting.
 	// `compose ps` (without -a) does not list an exited or created one, so a
 	// proxy stopped with `docker stop` reads as no container at all and is
@@ -286,13 +304,15 @@ func reconcileDecisionV2(in reconcileInputsV2) reconcileVerdictV2 {
 	if ids.run != "" && !in.ContainerRunning {
 		return rr("container_not_running")
 	}
-	if in.Kind == ops.KindRollbackCreate {
-		return decideStandaloneRollbackV2(&in, ids)
-	}
-	if safeBoundary(in.Phase) {
+	switch {
+	case in.Kind == ops.KindRollbackCreate:
+		return decideStandaloneRollbackV2(in, ids)
+	case in.Kind == ops.KindRuntimeRecover:
+		return decideRuntimeRecoverV2(in, ids)
+	case safeBoundary(in.Phase):
 		return decideSafePhaseV2(ids)
 	}
-	return decideDangerPhaseV2(&in, ids)
+	return decideDangerPhaseV2(in, ids)
 }
 
 // decideSafePhaseV2: the fsynced write-ahead barrier precedes every tag move, so

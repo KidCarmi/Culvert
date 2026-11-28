@@ -469,6 +469,18 @@ gaps and make the #2051 executor the single path every recovery takes.
      audit-first retire), entered only when every condition below holds on
      fresh facts. The lifecycle model and its properties gain the kind before
      the executor relies on it.
+     *As built:* `decideRuntimeRecoverV2` reports a record that is not armed
+     (`runtime_recover_not_armed`) or not at `restarted`
+     (`runtime_recover_unexpected_phase`); otherwise it takes the upgrade's
+     danger-window decision and refuses every verdict that tags or starts the
+     prior unless `dataCompat` is compatible (`restore_incompatible`,
+     `restore_compatibility_unknown`). Compatibility is read with the Docker
+     facts, so every pre-change recheck reads it again, the one before `up`
+     included. Model properties RT1–RT4 (no move without proven
+     compatibility; a compatible healthy restore completes, also after a
+     crash; a retired recovery leaves the restore image running, tagged and
+     ready; the recovery is its own operation), each with a mutant it kills.
+     Contract: AGT-900 amendment.
   3. *Executor, trigger, policy and status.* `runtime_recovery = "off"`
      (default) or `"restore_last_gated"`, startup-only, valid only with
      `runtime_health_interval` on. A separate loop (the observer stays
