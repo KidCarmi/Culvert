@@ -2,6 +2,7 @@ package server
 
 import (
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -11,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -32,11 +34,50 @@ type reconWorld struct {
 	running  string // image id hex; "" = no proxy container
 	pinned   string
 	mutating []string
+	tagRefs  []string // the exact reference of every `docker tag`
 	failed   map[*exec.Cmd]bool
 	psCount  int
 	onPS     func(n int)
-	down     bool   // Docker does not answer: every command fails
-	onUp     func() // called while `up` runs (outside the lock)
+	upStale  bool // `compose up` exits 0 without recreating the proxy
+	// priorRefGone: the prior's registry reference no longer resolves locally
+	// (an operator removed it); the image stays under the fixed tag.
+	priorRefGone bool
+	// failCmd ("tag" or "up") makes that command fail without effect;
+	// failedCalls counts how often it was issued.
+	failCmd     string
+	failedCalls int
+	down        bool   // Docker does not answer: every command fails
+	onUp        func() // called while `up` runs (outside the lock)
+	onDown      func() // called while `down` runs (outside the lock)
+	// wrongDigest, when set, is an image id whose `image inspect` reports a
+	// digest it does not carry (models a running image that is not the pinned
+	// target although its id matches the record).
+	wrongDigest string
+	// upNoop: this many `up` calls exit 0 having only tidied up, as Compose
+	// does after a recreate interrupted between its stop and its delete.
+	upNoop int
+	// onTag is called (under the world's lock) right after a `docker tag`.
+	onTag func(w *reconWorld)
+	// leftover: `compose ps -a` lists a "created" proxy container, what a
+	// death inside `compose up` leaves behind. Any `up` consumes it (a full
+	// one recreates, a tidy-only one removes it).
+	leftover bool
+	// psAllFail: `compose ps -a` fails (an install whose sudoers file does
+	// not allow it); psAllCount counts how often it was issued.
+	psAllFail  bool
+	psAllCount int
+	// oneOffRun: `compose ps -a` also lists a "created" one-off of the proxy
+	// service, what a `compose run` without --rm whose start failed leaves;
+	// `compose down` does not remove it.
+	oneOffRun bool
+	// priorEpochLabels: the prior image (cfgOld) carries data-epoch labels
+	// 1..priorEpochMax (slice 6a); priorEpochMax 0 means 1.
+	priorEpochLabels bool
+	priorEpochMax    int
+	// dataEpoch: what `cli --print-data-epoch` reports (0: the command fails,
+	// as on an image that predates it or an install without its sudoers line).
+	dataEpoch  int
+	epochReads int
 }
 
 func (w *reconWorld) idFor(ref string) string {
@@ -45,7 +86,7 @@ func (w *reconWorld) idFor(ref string) string {
 		return w.pinned
 	case strings.HasPrefix(ref, "sha256:"):
 		return strings.TrimPrefix(ref, "sha256:")
-	case strings.HasSuffix(ref, "@sha256:"+digOld):
+	case strings.HasSuffix(ref, "@sha256:"+digOld) && !w.priorRefGone:
 		return cfgOld
 	case strings.HasSuffix(ref, "@sha256:"+digNew):
 		return cfgNew
@@ -60,6 +101,48 @@ func digestOf(id string) string {
 	return digNew
 }
 
+// reportedDigest is the digest `image inspect` reports for id: its own, or
+// imgOther for the wrongDigest image. Called with w.mu held.
+func (w *reconWorld) reportedDigest(id string) string {
+	if w.wrongDigest != "" && id == w.wrongDigest {
+		return imgOther
+	}
+	return digestOf(id)
+}
+
+// answerDataEpoch answers `culvert --print-data-epoch` (slice 6a); a zero
+// dataEpoch is a read that fails. Called with w.mu held.
+func (w *reconWorld) answerDataEpoch(cmd *exec.Cmd) {
+	w.epochReads++
+	if w.dataEpoch == 0 {
+		w.failed[cmd] = true
+		return
+	}
+	_, _ = fmt.Fprintf(cmd.Stdout, `{"schema":1,"epoch":%d,"marker_present":%v,"build_min":1,"build_max":%d}`+"\n",
+		w.dataEpoch, w.dataEpoch > 1, w.dataEpoch)
+}
+
+// answerImageInspect answers `docker image inspect ref`; the prior image
+// carries data-epoch labels [1, priorEpochMax or 1] when priorEpochLabels is
+// set. Called with w.mu held.
+func (w *reconWorld) answerImageInspect(cmd *exec.Cmd, ref string) {
+	id := w.idFor(ref)
+	if id == "" {
+		w.failed[cmd] = true
+		return
+	}
+	labels := `null`
+	if w.priorEpochLabels && id == cfgOld {
+		hi := w.priorEpochMax
+		if hi == 0 {
+			hi = 1
+		}
+		labels = fmt.Sprintf(`{"io.culvert.data-epoch.min":"1","io.culvert.data-epoch.max":"%d"}`, hi)
+	}
+	_, _ = cmd.Stdout.Write([]byte(`[{"Id":"sha256:` + id + `","RepoDigests":["` + repo + `@sha256:` + w.reportedDigest(id) +
+		`"],"Config":{"Labels":` + labels + `}}]`))
+}
+
 func (w *reconWorld) start(cmd *exec.Cmd) error {
 	args := cmd.Args
 	has := func(tok string) bool { return argvHas(args, tok) }
@@ -70,6 +153,14 @@ func (w *reconWorld) start(cmd *exec.Cmd) error {
 		w.mu.Unlock()
 		if hook != nil {
 			hook(n)
+		}
+	}
+	if has("down") {
+		w.mu.Lock()
+		hook := w.onDown
+		w.mu.Unlock()
+		if hook != nil {
+			hook()
 		}
 	}
 	if has("up") {
@@ -93,7 +184,16 @@ func (w *reconWorld) start(cmd *exec.Cmd) error {
 		w.failed[cmd] = true
 		return nil
 	}
+	if w.failCmd != "" && has(w.failCmd) && !has("ps") && !has("inspect") {
+		w.failedCalls++
+		w.failed[cmd] = true
+		return nil
+	}
 	switch {
+	case has("--print-data-epoch"):
+		w.answerDataEpoch(cmd)
+	case has("ps") && has("-a"):
+		w.answerPSAll(cmd)
 	case has("ps"):
 		if w.running != "" {
 			_, _ = cmd.Stdout.Write([]byte(`{"Service":"proxy","State":"running","ID":"abcdef012345"}`))
@@ -101,20 +201,47 @@ func (w *reconWorld) start(cmd *exec.Cmd) error {
 	case has("{{json .Image}}"):
 		_, _ = cmd.Stdout.Write([]byte(`"sha256:` + w.running + `"`))
 	case has("image") && has("inspect"):
-		id := w.idFor(args[len(args)-1])
-		if id == "" {
-			w.failed[cmd] = true
-			return nil
-		}
-		_, _ = cmd.Stdout.Write([]byte(`[{"Id":"sha256:` + id + `","RepoDigests":["` + repo + `@sha256:` + digestOf(id) + `"]}]`))
+		w.answerImageInspect(cmd, args[len(args)-1])
 	case has("tag"):
 		w.mutating = append(w.mutating, "tag:"+w.idFor(args[len(args)-2]))
+		w.tagRefs = append(w.tagRefs, args[len(args)-2])
 		w.pinned = w.idFor(args[len(args)-2])
+		if w.onTag != nil {
+			w.onTag(w)
+		}
 	case has("up"):
 		w.mutating = append(w.mutating, "up")
-		w.running = w.pinned
+		w.leftover = false
+		if w.upNoop > 0 {
+			w.upNoop--
+			break
+		}
+		if !w.upStale {
+			w.running = w.pinned
+		}
 	}
 	return nil
+}
+
+// answerPSAll answers `compose ps -a` (called under the world's lock): the
+// running proxy and the "created" leftover, or a failure with psAllFail.
+func (w *reconWorld) answerPSAll(cmd *exec.Cmd) {
+	w.psAllCount++
+	if w.psAllFail {
+		w.failed[cmd] = true
+		return
+	}
+	var lines []string
+	if w.running != "" {
+		lines = append(lines, `{"Service":"proxy","State":"running","ID":"abcdef012345"}`)
+	}
+	if w.leftover {
+		lines = append(lines, `{"Service":"proxy","State":"created","ID":"0123456789ab","Labels":"com.docker.compose.oneoff=False,com.docker.compose.service=proxy"}`)
+	}
+	if w.oneOffRun {
+		lines = append(lines, `{"Service":"proxy","State":"created","ID":"d0c4cf477b2d","Name":"culvert-proxy-run-33918bcd22bd","Labels":"com.docker.compose.oneoff=True,com.docker.compose.service=proxy"}`)
+	}
+	_, _ = cmd.Stdout.Write([]byte(strings.Join(lines, "\n")))
 }
 
 func (w *reconWorld) wait(cmd *exec.Cmd) error {
@@ -139,6 +266,24 @@ type reconRig struct {
 	al    *audit.Logger
 	world *reconWorld
 	rt    *ReconcileTracker
+	opts  Options      // to build the next agent process's server (restart)
+	ready *atomic.Bool // what /ready answers
+}
+
+// restart models the next agent start on the same state_dir, audit log and
+// Docker: the old server is closed (its instance lock released) and a new one,
+// with a fresh in-memory op manager and reconcile tracker, is built.
+func (r *reconRig) restart(t *testing.T) {
+	t.Helper()
+	_ = r.srv.Close()
+	r.mgr = ops.NewManager(nil)
+	r.opts.Ops = r.mgr
+	srv, err := New(r.opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = srv.Close() })
+	r.srv, r.rt = srv, NewReconcileTracker()
 }
 
 func newReconRig(t *testing.T, ready bool) *reconRig {
@@ -165,8 +310,10 @@ func newReconRig(t *testing.T, ready bool) *reconRig {
 	}
 	w := &reconWorld{running: cfgOld, pinned: cfgOld, failed: map[*exec.Cmd]bool{}}
 	rn.SetExecHooksForTest(w.start, w.wait)
+	rdy := &atomic.Bool{}
+	rdy.Store(ready)
 	hs := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, _ *http.Request) {
-		if !ready {
+		if !rdy.Load() {
 			rw.WriteHeader(http.StatusServiceUnavailable)
 			return
 		}
@@ -175,19 +322,20 @@ func newReconRig(t *testing.T, ready bool) *reconRig {
 	t.Cleanup(hs.Close)
 	hu, _ := url.Parse(hs.URL)
 	mgr := ops.NewManager(nil)
-	srv, err := New(Options{
+	opts := Options{
 		Cfg: &config.Config{ComposeProjectDir: tmp, ComposeFile: "docker-compose.yml", SocketPath: filepath.Join(tmp, "s.sock"),
 			StateDir: tmp, PrivilegeMode: config.PrivilegeSudoers, OperationTimeout: 30 * time.Second, StageTimeout: 5 * time.Second, ProxyRepo: repo},
 		Auth: pol, Audit: al, Ops: mgr, Status: &fakeStatus{}, StateDir: tmp, AuditPath: auditPath, Journal: jnl, Runner: rn,
 		HealthProbeFactory: func() health.Probe {
 			return health.Probe{BaseURL: hu, HealthPath: "/health", ReadyPath: "/ready", Budget: 300 * time.Millisecond, PollInterval: 50 * time.Millisecond}
 		},
-	})
+	}
+	srv, err := New(opts)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = srv.Close(); _ = al.Close() })
-	return &reconRig{srv: srv, jnl: jnl, mgr: mgr, al: al, world: w, rt: NewReconcileTracker()}
+	return &reconRig{srv: srv, jnl: jnl, mgr: mgr, al: al, world: w, rt: NewReconcileTracker(), opts: opts, ready: rdy}
 }
 
 // seed writes an interrupted upgrade record from cfgOld (digOld) to cfgNew (digNew).

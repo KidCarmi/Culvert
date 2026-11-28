@@ -25,6 +25,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/oklog/ulid/v2"
@@ -138,7 +139,8 @@ type Record struct {
 	// immediately BEFORE its rollback_restart stage moves the fixed tag back to
 	// the prior image. It is the durable evidence that the agent had already
 	// decided the target failed its gate, so a startup reconcile must never
-	// adopt the target of such a record. If it cannot be written the rollback
+	// adopt the target of such a record; in converge mode it is the only
+	// evidence on which the reconcile finishes that rollback. If it cannot be written the rollback
 	// still runs and the record stays unarmed, which the reconcile never acts on.
 	// It is an optional key, not a new Phase:
 	// an agent that predates it ignores the key (encoding/json drops unknown
@@ -150,7 +152,8 @@ type Record struct {
 	// before). Optional keys an older agent ignores.
 	//
 	// ReconcileAttempts counts the reconcile actions that changed Docker
-	// (realign, finish_rollback). It is written FAIL-CLOSED before the action
+	// (realign, finish_rollback, finish_rollback_retag; one per start however
+	// many steps the action has). It is written FAIL-CLOSED before the action
 	// (write-ahead): no durable count, no action. A deferred or report-only
 	// verdict does not count. It is content from an unauthenticated file: the
 	// reconciler treats a negative value as exhausted.
@@ -166,6 +169,19 @@ type Record struct {
 	// Omitted when empty, so an upgrade or image-rollback record is
 	// byte-identical to what it was before the key existed.
 	RestoreStage RestoreStage `json:"restore_stage,omitempty"`
+
+	// Checkpoint is the most recent health gate's begin and end
+	// (checkpoint.go, ADR-0062 slice 3b). Absent on every record whose
+	// operation has not begun a gate, so such a record is byte-identical to
+	// before. An optional key, like RollbackArmed: an agent that predates it
+	// drops or carries it and never decides on it.
+	Checkpoint *Checkpoint `json:"checkpoint,omitempty"`
+
+	// Intent and Cut attribute an interruption to one docker command of this
+	// operation (intent.go). Absent on every record whose operation has not
+	// begun such a command.
+	Intent *CommandIntent `json:"intent,omitempty"`
+	Cut    *CommandCut    `json:"cut,omitempty"`
 
 	// Terminal bookkeeping (ADR-0062 slice 1). Written by the operation's own
 	// process when it ends, never by a running stage: TerminalOutcome and
@@ -222,6 +238,19 @@ var ErrCorruptRecord = errors.New("journal: corrupt record")
 // Journal reads and writes op records under <stateDir>/reconcile/.
 type Journal struct {
 	dir string
+	// writeErrForTest, when set, is returned by Write (SetWriteErrorForTest).
+	writeErrForTest error
+	// mu serialises every change to the journal directory made through this
+	// Journal: Write, Remove, and the read-modify-writes of intent.go
+	// (BeginCommand, EndCommand, CloseStaleIntents, the intent fence). So a
+	// close cannot overwrite a newer write of the same record or bring back a
+	// removed one, and the fence cannot be released between being raised and
+	// the intent it is for being written. Reads take no lock.
+	mu sync.Mutex
+	// inFlight: operations of THIS process that are inside a compose command
+	// (BeginCommand .. EndCommand). Guarded by flightMu.
+	flightMu sync.Mutex
+	inFlight map[string]struct{}
 }
 
 // New creates the reconcile directory (0750) and returns a Journal rooted there.
@@ -259,6 +288,13 @@ func (j *Journal) pathFor(opID string) (string, error) {
 // skipped write-ahead barrier would reopen the RISK-022 window under exactly the
 // disk-full condition the journal exists to survive.
 func (j *Journal) Write(rec Record) error {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	return j.writeLocked(rec)
+}
+
+// writeLocked is Write with j.mu held.
+func (j *Journal) writeLocked(rec Record) error {
 	if rec.FromNewerAgent() {
 		return fmt.Errorf("%w (op %s, schema %d > %d)", ErrNewerSchema, rec.OpID, rec.Schema, SchemaCurrent)
 	}
@@ -272,6 +308,14 @@ func (j *Journal) Write(rec Record) error {
 	if err != nil {
 		return err
 	}
+	dropped := false
+	if rec.Intent != nil && !j.commandInFlight(rec.OpID) {
+		// An intent this process is not inside: its close could not be written
+		// earlier, and a read-modify-write is now carrying it. It must not
+		// reach disk again as "in flight" (intent.go). An agent START never
+		// gets here with one: it takes the intent before it writes.
+		rec.Intent, dropped = nil, true
+	}
 	data, err := json.MarshalIndent(rec, "", "  ")
 	if err != nil {
 		return fmt.Errorf("journal: marshal: %w", err)
@@ -283,7 +327,25 @@ func (j *Journal) Write(rec Record) error {
 			return ferr
 		}
 	}
-	return atomicWrite(path, data, fileMode)
+	if j.writeErrForTest != nil {
+		return j.writeErrForTest
+	}
+	if err := atomicWrite(path, data, fileMode); err != nil {
+		return err
+	}
+	if dropped {
+		j.releaseIntentFenceLocked()
+	}
+	return nil
+}
+
+// SetWriteErrorForTest makes every later Write fail with err (nil restores
+// normal writes). Tests only: a disk that fills up between two writes cannot
+// be produced with file modes when the tests run as root.
+func (j *Journal) SetWriteErrorForTest(err error) {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	j.writeErrForTest = err
 }
 
 // Read returns the record for opID. found=false (nil error) when no file exists;
@@ -346,8 +408,8 @@ func (j *Journal) List() ([]Record, error) {
 			continue
 		}
 		opID := strings.TrimSuffix(e.Name(), fileExt)
-		if opID == fenceOpID {
-			continue // the downgrade fence is not an operation (schema.go)
+		if opID == fenceOpID || opID == intentFenceOpID {
+			continue // a downgrade fence is not an operation (schema.go, intent.go)
 		}
 		rec, found, rerr := j.Read(opID)
 		if rerr != nil {
@@ -365,6 +427,8 @@ func (j *Journal) List() ([]Record, error) {
 // op's record and make the reconciler roll back a healthy, finished upgrade.
 // Removing an absent record is not an error (idempotent terminal cleanup).
 func (j *Journal) Remove(opID string) error {
+	j.mu.Lock()
+	defer j.mu.Unlock()
 	path, err := j.pathFor(opID)
 	if err != nil {
 		return err
@@ -383,6 +447,7 @@ func (j *Journal) Remove(opID string) error {
 	// The record is gone either way; a fence that could not be released stays,
 	// which only keeps older agents out a little longer.
 	_ = j.releaseFenceIfUnused()
+	j.releaseIntentFenceLocked()
 	return nil
 }
 

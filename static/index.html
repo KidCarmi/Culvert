@@ -16600,6 +16600,23 @@ function renderMaintAgentStatus(data) {
   if (data.last_operation_kind) {
     rows.push(['Last operation', escHtml(String(data.last_operation_kind)) + (data.last_operation_state ? ' (' + escHtml(String(data.last_operation_state)) + ')' : '')]);
   }
+  // ADR-0062 slice 5: the agent's runtime health observer (absent when its
+  // runtime_health_interval is off).
+  const rh = data.runtime_health;
+  if (rh && rh.state) {
+    const color = rh.state === 'gated' ? 'var(--green)' : (rh.state === 'unhealthy' ? 'var(--red)' : 'var(--orange, var(--red))');
+    let txt = '<span style="color:' + color + ';font-weight:600">' + escHtml(String(rh.state)) + '</span>';
+    if (rh.reason) txt += ' (' + escHtml(String(rh.reason)) + ')';
+    if (rh.observed_at) txt += ' - observed ' + escHtml(String(rh.observed_at));
+    if (rh.error) txt += ' - ' + escHtml(String(rh.error));
+    rows.push(['Runtime health', txt]);
+    if (rh.last_good) {
+      rows.push(['Last known good', escHtml(String(rh.last_good.ref || rh.last_good.image_id || '')) +
+        (rh.last_good.passed_at ? ' (passed ' + escHtml(String(rh.last_good.passed_at)) + ')' : '')]);
+    } else if (rh.last_good_error) {
+      rows.push(['Last known good', escHtml(String(rh.last_good_error))]);
+    }
+  }
   let warning = '';
   if (data.privilege_warning) {
     warning = '<p class="hint" style="color:var(--red);font-weight:600">' + escHtml(String(data.privilege_warning)) + '</p>';

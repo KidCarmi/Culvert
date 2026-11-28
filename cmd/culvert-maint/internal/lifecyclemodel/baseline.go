@@ -60,6 +60,9 @@ type Baseline struct {
 	Stats       Stats                `json:"stats"`
 	Properties  []BaselineProperty   `json:"properties"`
 	Reconcile   ReconcileFingerprint `json:"reconcile"`
+	// ReconcileV2 pins the converge decision table (converge_vectors.go). Not required by
+	// ParseBaseline, so a baseline from before it existed still compares (as drift).
+	ReconcileV2 ReconcileFingerprint `json:"reconcile_v2"`
 	Apply       []string             `json:"apply"`
 	Crash       []string             `json:"crash"`
 }
@@ -90,6 +93,7 @@ func ComputeBaseline(propsSHA string, stats Stats, results []Result) Baseline {
 		b.Crash = append(b.Crash, CrashLine(&crash[i]))
 	}
 	b.Reconcile = reconcileFingerprint(GenReconcileVectors())
+	b.ReconcileV2 = reconcileV2Fingerprint(GenReconcileV2Vectors())
 	return b
 }
 
@@ -168,9 +172,10 @@ func CrashLine(v *CrashVector) string {
 	if v.Block.AfterUp {
 		block += "+up"
 	}
-	return fmt.Sprintf("%s | %s | block=%s | phase=%s tag=%s running=%s rec_phase=%s prior_ref=%t prior_id=%s target_ref=%t target_id=%s | %s/%s | %s | %s",
+	return fmt.Sprintf("%s | %s | block=%s | phase=%s tag=%s running=%s rec_phase=%s prior_ref=%t prior_id=%s target_ref=%t target_id=%s armed=%t | %s/%s | v2=%s/%s | %s | %s",
 		paramsLine(v.Params), faultsLine(v.Script), block, e.Phase, e.Tag, e.Running, r.Phase, r.PriorRef, r.PriorID,
-		r.TargetRef, r.TargetID, e.ReconcileAction, e.ReconcileReason, strings.Join(e.CmdsBeforeBlock, ","), planLine(v.Plan))
+		r.TargetRef, r.TargetID, r.Armed, e.ReconcileAction, e.ReconcileReason, e.ReconcileV2Action, e.ReconcileV2Reason,
+		strings.Join(e.CmdsBeforeBlock, ","), planLine(v.Plan))
 }
 
 // ParseBaseline decodes a baseline file. An empty or unparsable baseline is an error,
@@ -209,6 +214,12 @@ func CompareBaseline(want, got Baseline) []string {
 		d = append(d, fmt.Sprintf("reconcile decision table changed: baseline %d inputs sha256 %.16s, now %d sha256 %.16s; verdict counts %v -> %v",
 			want.Reconcile.Inputs, want.Reconcile.SHA256, got.Reconcile.Inputs, got.Reconcile.SHA256,
 			want.Reconcile.VerdictCounts, got.Reconcile.VerdictCounts))
+	}
+	if want.ReconcileV2.Inputs != got.ReconcileV2.Inputs || want.ReconcileV2.SHA256 != got.ReconcileV2.SHA256 ||
+		!sameCounts(want.ReconcileV2.VerdictCounts, got.ReconcileV2.VerdictCounts) {
+		d = append(d, fmt.Sprintf("converge (V2) decision table changed: baseline %d inputs sha256 %.16s, now %d sha256 %.16s; verdict counts %v -> %v",
+			want.ReconcileV2.Inputs, want.ReconcileV2.SHA256, got.ReconcileV2.Inputs, got.ReconcileV2.SHA256,
+			want.ReconcileV2.VerdictCounts, got.ReconcileV2.VerdictCounts))
 	}
 	d = append(d, compareLines("apply vector", want.Apply, got.Apply)...)
 	d = append(d, compareLines("crash vector", want.Crash, got.Crash)...)

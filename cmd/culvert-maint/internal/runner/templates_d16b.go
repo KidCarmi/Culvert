@@ -211,6 +211,14 @@ func d16bTemplates() []Template {
 			StateChanging: false,
 		},
 		{
+			ID:       TemplateComposeCLIDataEpoch,
+			BaseArgv: []string{"docker", "compose", "-f", "{compose_path}", "--profile", "cli", "run", "--rm", "cli", "--print-data-epoch"},
+			SudoersLines: []string{
+				"/usr/bin/docker compose -f {compose_path} --profile cli run --rm cli --print-data-epoch",
+			},
+			StateChanging: false,
+		},
+		{
 			ID:            TemplateComposeCLIRestoreDryRun,
 			BaseArgv:      []string{"docker", "compose", "-f", "{compose_path}", "--profile", "cli", "run", "--rm", "-e", EnvCulvertBackupPassphrase, "cli", "--restore"},
 			WrapperArgv:   []string{"restore"},

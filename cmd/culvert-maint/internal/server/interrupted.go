@@ -122,6 +122,20 @@ type InterruptedOperation struct {
 	InterruptedAt  *time.Time `json:"interrupted_at,omitempty"`
 	// AgentStartsSeen counts the agent starts that found this record.
 	AgentStartsSeen int `json:"agent_starts_seen"`
+	// DiedInCommand is the docker command ("compose up", "compose down") of
+	// this operation that the agent process died inside, as found by the
+	// agent process that is answering (set by GET /v1/status from that
+	// process's memory, never from the record). Absent when the last command
+	// had returned, when no command had been begun, and once the agent has
+	// restarted: by then the state of the stack can no longer be put down to
+	// that command.
+	DiedInCommand string `json:"died_in_command,omitempty"`
+
+	// GateCheckpoint is the record's most recent health gate (ADR-0062 slice
+	// 3b): which gate, on which image, how often begun, and how it ended ("" =
+	// it had not ended). Information only. Absent when the operation had not
+	// begun a gate.
+	GateCheckpoint *GateCheckpointReport `json:"gate_checkpoint,omitempty"`
 
 	// TerminalOutcome is set when the operation did NOT die: it ended
 	// ("failed:<failure_reason>") and its record was kept because it could not
@@ -222,6 +236,7 @@ func DescribeInterrupted(rec *journal.Record, proxyRepo string) InterruptedOpera
 		out.TerminalOutcome, out.TerminalAt = rec.TerminalOutcome, rec.TerminalAt
 	}
 	out.DockerState = dockerStateOf(out.Kind, out.Mode, rec.Phase)
+	out.GateCheckpoint = reportGateCheckpoint(rec.Checkpoint)
 	if isRestoreRecord(out.Kind, out.Mode) {
 		out.setRestoreFacts(rec.RestoreStage)
 	}

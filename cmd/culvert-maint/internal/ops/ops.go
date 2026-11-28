@@ -110,6 +110,12 @@ const (
 	// an operator's state-changing request gets 409 naming it (AGT-001). It is
 	// not journaled: it never creates a record, it only acts on existing ones.
 	KindReconcileStartup = "reconcile.startup"
+	// KindRuntimeRecover is the agent's own runtime recovery (ADR-0062 slice
+	// 6): it puts back the image an upgrade this agent installed replaced,
+	// when that upgrade's image keeps failing its health check. Its journal
+	// record is written armed, before anything moves, and is decided by the
+	// same armed-rollback branch as an interrupted inline rollback.
+	KindRuntimeRecover = "runtime.recover"
 )
 
 // stateChangingKinds is the production allowlist of operation kinds
@@ -174,6 +180,12 @@ const (
 	// could not be read, an action did not verify, or the deadline elapsed.
 	// Docker was not changed beyond what the op's result lists.
 	ReasonRecoveryRequired FailureReason = "recovery_required"
+	// ReasonCheckpointUnwritable marks an upgrade whose target gate could not
+	// be recorded as begun (ADR-0062 slice 3b): the gate is then treated as
+	// failed and the inline rollback runs. Distinct from health_failed so an
+	// operator can tell an unwritable state directory from an unhealthy
+	// target: the target may have been healthy.
+	ReasonCheckpointUnwritable FailureReason = "checkpoint_unwritable"
 )
 
 // NewID generates a fresh ULID for an op_id. Time-prefixed and
@@ -656,6 +668,7 @@ var journaledKinds = map[string]struct{}{
 	KindUpgradeApply:   {},
 	KindRollbackCreate: {},
 	KindRestoreCommit:  {},
+	KindRuntimeRecover: {},
 }
 
 // IsJournaled reports whether kind's in-flight state is recorded in the
