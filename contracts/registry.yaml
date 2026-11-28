@@ -492,6 +492,37 @@ contracts:
     validation: unit
     compatibility: "The floor file is persisted state on deployed appliances."
 
+  - id: UPG-003
+    area: upgrade
+    status: enforced
+    owner_approved: false
+    invariant: "The data epoch marker <dataDir>/.data-epoch only ever rises: a proxy boot raises it to the build's epoch before any store loads and never lowers it, and a build at the implicit epoch 1 writes nothing (an absent marker in an existing data directory is epoch 1). The final image carries io.culvert.data-epoch.min and .max equal to the build's oldest readable and current epoch. culvert --print-data-epoch reports the marker read-only, and an unreadable marker or a missing data directory is an error, never epoch 1."
+    authority: "Data-compatibility contract (internal/dataepoch, data_epoch.go, Dockerfile). Design: docs/adr/0062-maintenance-agent-durable-lifecycle-execution.md slice 6a; owner decision 2026-11-28 (add the contract before runtime recovery); docs/engineering/data-epoch.md."
+    code:
+      - "internal/dataepoch/*.go"
+      - "data_epoch.go"
+    configs: []
+    transitions:
+      permitted:
+        - "raising the marker to the build's epoch at boot"
+        - "booting on data a newer build wrote, with a warning"
+      forbidden:
+        - "lowering the data epoch marker"
+        - "writing a marker at the implicit epoch"
+        - "reporting an unreadable marker or a missing data directory as epoch 1"
+        - "an image whose data-epoch labels differ from the build's range"
+        - "raising dataepoch.Current before backup carries the marker and restore can never lower it"
+    tests:
+      - {file: "internal/dataepoch/dataepoch_test.go", name: TestRaiseTo_NeverLowersAndWritesOnlyToRaise}
+      - {file: "internal/dataepoch/dataepoch_test.go", name: TestRead_RefusesWhatIsNotAMarker}
+      - {file: "internal/dataepoch/dataepoch_test.go", name: TestRead_AMissingDataDirectoryIsNotTheImplicitEpoch}
+      - {file: "data_epoch_test.go", name: TestDockerfile_DataEpochLabelsMatchTheBuild}
+      - {file: "data_epoch_test.go", name: TestDataEpoch_BumpObligationsTripwire}
+      - {file: "data_epoch_test.go", name: TestCheckDataEpochAtBoot_NeverLowersOrInvents}
+      - {file: "data_epoch_test.go", name: TestPrintDataEpoch}
+    validation: unit
+    compatibility: "New and inert at epoch 1: no build writes the marker, so existing data directories are unchanged, and an image from before this change has no labels (the maintenance agent never puts such an image back on data). The one-shot is additive."
+
   - id: BKP-001
     area: backup-restore
     status: enforced
