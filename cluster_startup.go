@@ -24,7 +24,9 @@ import (
 //	loadClusterIdentity   EARLY — who this node is and what it trusts: node
 //	                      identity, the cluster DB, the cluster CA, the HA
 //	                      fencing lease, and (a pure data plane) the role claim
-//	                      with its epoch floor and node-key checks.
+//	                      with its epoch floor and node-key checks. A control
+//	                      plane also binds its EARLY listener here, which can
+//	                      only answer "starting" (cp_starting_listener.go).
 //	(*clusterActivation).activate
 //	                      LATE — the role starts ACTING: a control plane makes
 //	                      its first publish, binds its listener and resumes HA
@@ -47,6 +49,11 @@ type clusterActivation struct {
 	// ctx is the lifecycle context the activation's goroutines are parented
 	// to, carried from the early half to the late half of one boot.
 	ctx context.Context
+	// starting is the control plane's early listener (cp_starting_listener.go),
+	// bound by the early half and stopped by activate just before the real
+	// listener binds. nil when this node is not a control plane, or the early
+	// bind did not succeed.
+	starting *cpStartingListener
 	// runDP is a pure data plane's late half (prepareDataPlane), nil otherwise.
 	runDP func()
 	// dp is the data-plane wiring of a node ALSO wired as a control plane or
@@ -92,6 +99,11 @@ func loadClusterIdentity(cfg clusterStartupConfig, ctx context.Context, enrolled
 		// again from the same directory — an idempotent reload.
 		initClusterCA(cfg.ClusterDBPath)
 	}
+	if cfg.CPAddr != "" && !cfg.haJoinMode() {
+		// Identity and trust are established: answer peers "starting" from
+		// here on, instead of leaving the port closed while the stores load.
+		act.starting = startCPStartingListener(cpListenerConfig{addr: cfg.CPAddr, certFile: cfg.CPCert, keyFile: cfg.CPKey, caFile: cfg.CPCA})
+	}
 	dp := resolveDPWiring(cfg, enrolled)
 	switch {
 	case dp.addr == "":
@@ -113,6 +125,10 @@ func (a *clusterActivation) activate() {
 		return
 	}
 	cfg, ctx := a.cfg, a.ctx
+	// Hand the address over: the early listener stops, then the unchanged
+	// activation publishes and binds the real one.
+	a.starting.stop()
+	a.starting = nil
 	switch {
 	case cfg.haJoinMode():
 		// Fresh HA standby joining a leader (--ha-join from the deploy command).

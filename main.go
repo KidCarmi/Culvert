@@ -287,6 +287,10 @@ func main() {
 //nolint:funlen // single-pass boot orchestration; splitting hides the startup order
 func runStartupSequence(s *startupState) *http.Server {
 	// ── Phase 1: node services and cluster identity ─────────────────────────
+	// From here until markNodeReady the node is LIVE and NOT READY
+	// (node_lifecycle.go): a control plane's early listener, bound by
+	// initClusterIdentity, answers every peer "starting".
+	enterStartupIdentityPhase()
 	initAuth(s)
 	initSession(s)
 	initObservability(s)
@@ -302,6 +306,7 @@ func runStartupSequence(s *startupState) *http.Server {
 	initClusterIdentity(s)
 
 	// ── Phase 2: configuration stores, then cross-store reconciliation ──────
+	enterStartupStoresPhase()
 	initConnAndRateLimit(s)
 	initBlocklist(s)
 	initRootCA(s)
@@ -335,13 +340,6 @@ func runStartupSequence(s *startupState) *http.Server {
 	initMCPRollout(s)      // PR-11: disabled-by-default rollout composition (Gateway/Management isolated)
 	initMCPDistribution(s) // PR-12: disabled-by-default DP applier composition (after rollout state is restored)
 	loadReleaseManagement(resolveReleaseStartupConfig())
-	// 2F-B (C1): complete the post-commit effects of any PAC publish/rollback
-	// that was proven committed but not fully recorded when the previous
-	// process stopped (config version, cluster publication, success audit,
-	// terminal record). Position is load-bearing: every store the config
-	// version captures is loaded above; the loader itself (initPAC) only
-	// settled the node-local half.
-	pacReconcileAllLifecycles()
 
 	// ── Phase 3: role activation ────────────────────────────────────────────
 	// Every store CurrentConfigSnapshot captures, and every store a snapshot
@@ -350,7 +348,20 @@ func runStartupSequence(s *startupState) *http.Server {
 	// its leader, and a data plane replay its last-good snapshot and start
 	// polling. Nothing may be added between here and the stores that loads or
 	// reconciles configuration (TestStartupSequence_* enforce both directions).
+	enterStartupActivationPhase()
 	activateClusterRoles(s)
+	// 2F-B (C1): complete the post-commit effects of any PAC publish/rollback
+	// that was proven committed but not fully recorded when the previous
+	// process stopped (config version, cluster publication, success audit,
+	// terminal record). It runs AFTER the activation — where it ran before
+	// the activation moved behind the stores — because one of those effects is
+	// a cluster publication, and nothing publishes before the role is active
+	// (publishCurrentConfigSnapshot). Every store the config version captures
+	// is loaded above; the loader itself (initPAC) only settled the
+	// node-local half.
+	pacReconcileAllLifecycles()
+	// Stores loaded, role active, reconciliation complete: the node is READY.
+	markNodeReady()
 
 	// ── Phase 4: traffic gates and listeners ────────────────────────────────
 	// After the activation, so no listener that enforces policy serves before

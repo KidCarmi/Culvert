@@ -421,11 +421,17 @@ publish, then bind, then HA leadership resume.
 
 What this means in operation:
 
-- The listener comes up **later in the boot than it used to**, by however long
-  the stores take to load (typically well under a second; longer with a large
-  category feed database). Until then data planes and standbys get *connection
-  refused*, keep their last-good configuration, back off, and — where a second
-  control plane is configured — fail over to it.
+- The **serving** listener comes up later in the boot than it used to, by
+  however long the stores take to load (typically well under a second; about
+  four seconds with a two-million-host blocklist). The port itself is not
+  closed meanwhile: an **early listener** is bound right after the node's
+  identity and cluster CA are established and answers every request
+  `CULVERT_NODE_STARTING` (gRPC `Unavailable`, with the start-up phase and the
+  seconds since process start). It can do nothing else — it has no handler
+  that serves a configuration, enrols a node, publishes or leads. Data planes
+  keep their last-good configuration and back off, as for any unavailable
+  control plane. Just before the serving listener binds, the early one is
+  stopped; a peer that connects in that instant sees one connection error.
 - The **first thing a poller is served is the loaded configuration**. A
   restarting control plane used to publish before its stores loaded, so data
   planes received a snapshot with an empty blocklist, no rules and the default

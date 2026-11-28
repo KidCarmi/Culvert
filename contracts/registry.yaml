@@ -941,6 +941,35 @@ contracts:
     validation: integration
     compatibility: "The control-plane listener binds later in the boot; data planes see connection refused until then and keep their last-good configuration. The real-binary form of these tests is TestBinaryStartup_* (build tag proxybinload)."
 
+  - id: CLU-007
+    area: cluster-sync
+    status: enforced
+    owner_approved: false
+    invariant: "A control plane's cluster listener answers every request with the CULVERT_NODE_STARTING status (gRPC Unavailable, with the start-up phase and elapsed seconds) from the moment its identity is established until the node is ready, and serves a configuration snapshot only when the node is ready and publication is authorized. The listener that answers before the activation has no handler that reads a store, publishes, enrols or leads. A live-state publish is refused before every configuration store has loaded."
+    authority: "Node lifecycle (node_lifecycle.go), the early listener (cp_starting_listener.go) and leadership/publication authority (ha_authority.go)."
+    code:
+      - "node_lifecycle.go"
+      - "cp_starting_listener.go"
+      - "ha_authority.go"
+    configs: []
+    transitions:
+      permitted:
+        - "replacing ha_authority.go's stub answers with real leadership and publication-gate answers"
+      forbidden:
+        - "inferring readiness, leadership or publication authority from a listener being bound"
+        - "registering a real handler on the early listener"
+        - "serving a snapshot before the node is ready, or publishing before the stores have loaded"
+        - "changing the status code or the leading token of the starting answer (released peers classify on them)"
+    tests:
+      - {file: "node_lifecycle_test.go", name: TestCPStartingListener_EveryMethodAnswersStartingAndNothingElse}
+      - {file: "node_lifecycle_test.go", name: TestNodeLifecycle_RealServerServesNothingUntilReady}
+      - {file: "node_lifecycle_test.go", name: TestNodeLifecycle_HandOver_PollerNeverSeesConfigBeforeReady}
+      - {file: "node_lifecycle_test.go", name: TestNodeLifecycle_WireStatusesAreDistinct}
+      - {file: "node_lifecycle_test.go", name: TestNodeLifecycle_PublishIsRefusedBeforeStoresLoadAndWithoutLeadership}
+      - {file: "node_lifecycle_test.go", name: TestNodeLifecycle_Lease_PeerTookTheLeaseDuringSlowStoreLoad}
+    validation: integration
+    compatibility: "Unavailable is what every released data plane and standby already retries on. A standby that does not recognise the token counts a starting answer as a failed round, as it counted a closed port."
+
   - id: CLU-006
     area: cluster-sync
     status: enforced

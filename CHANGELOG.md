@@ -107,11 +107,27 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
     replayed: the node keeps its file-loaded state until it next syncs. A
     last-good file whose last write failed is older than the node's local
     files and is replayed over them; the next successful sync corrects it.
-  - **High availability:** the control-plane listener now comes up after the
-    stores, so a restarting leader is unreachable for longer than before, and
-    a standby counts an unreachable leader toward failover. This change ships
-    together with the early-listener change that keeps a starting leader
-    reachable; do not deploy it to an HA pair without that change.
+  - **A starting control plane answers instead of being unreachable.** It
+    binds its cluster port right after its identity and cluster CA are
+    established — about 0.1 s after process start, whatever the size of its
+    stores — and answers every request `CULVERT_NODE_STARTING` (gRPC
+    `Unavailable`, carrying the start-up phase and elapsed seconds) until its
+    stores have loaded and its role is active. That early listener is a
+    separate, minimal server: it cannot serve a configuration, enrol a node,
+    publish or lead. Data planes treat the answer as they treat any
+    unavailable control plane (keep last-good, back off). A node's start-up
+    phase, readiness, leadership and publication authority are now reported
+    separately on `/health` (`startup`), `/ready` (a gating `startup` row),
+    `/healthz` and `/api/cluster/status`.
+  - **High availability, upgrade order:** on its own this does not stop a
+    standby from failing over when its leader restarts slowly — a standby on
+    this or an earlier release still counts the starting answer as a failed
+    round, exactly as it counted a closed port. The standby-side change that
+    treats it as "leader alive" ships separately; when it does, upgrade the
+    standby before the leader. In lease mode a starting node holds no lease,
+    so a leader whose store load outlasts the lease TTL comes back as a
+    standby (safe; leadership moves). With a two-million-host blocklist the
+    measured time to ready is about four seconds.
   No data migration is needed; existing data directories start as they are.
 
 - **A policy edit on a control plane now reaches data planes when it is

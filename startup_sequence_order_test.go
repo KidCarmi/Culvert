@@ -56,9 +56,10 @@ var startupStepPhases = map[string]startupPhase{
 	"initAuth": phaseIdentity, "initSession": phaseIdentity, "initObservability": phaseIdentity,
 	"initLogStore": phaseIdentity, "initGeoIP": phaseIdentity, "initUIAccessPolicy": phaseIdentity,
 	"initPAC": phaseIdentity, "initLegacyAuthProviders": phaseIdentity, "initMetricsToken": phaseIdentity,
-	"initClusterIdentity": phaseIdentity,
+	"initClusterIdentity": phaseIdentity, "enterStartupIdentityPhase": phaseIdentity,
 
-	"initConnAndRateLimit": phaseStores, "initBlocklist": phaseStores, "initRootCA": phaseStores,
+	"enterStartupStoresPhase": phaseStores,
+	"initConnAndRateLimit":    phaseStores, "initBlocklist": phaseStores, "initRootCA": phaseStores,
 	"initPolicy": phaseStores, "initURLCategories": phaseStores, "initFileBlocking": phaseStores,
 	"reconcileObjectRefNames": phaseStores, "initSSLBypassAndDPI": phaseStores, "initH2InspectServer": phaseStores,
 	"initRewriteAndDefaultAction": phaseStores, "initScanning": phaseStores, "initUpstreamProxy": phaseStores,
@@ -68,9 +69,11 @@ var startupStepPhases = map[string]startupPhase{
 	"initSOCKS5": phaseStores, "initPersistentAdminState": phaseStores, "initPolicyLearning": phaseStores,
 	"initMCPRuntime": phaseStores, "initMCPToolTrust": phaseStores, "initMCPRollout": phaseStores,
 	"initMCPDistribution": phaseStores, "loadReleaseManagement": phaseStores, "resolveReleaseStartupConfig": phaseStores,
-	"pacReconcileAllLifecycles": phaseStores,
 
-	"activateClusterRoles": phaseActivation,
+	// The activation, then the one reconciliation that publishes (it must
+	// follow the role being active), then the node is marked ready.
+	"enterStartupActivationPhase": phaseActivation, "activateClusterRoles": phaseActivation,
+	"pacReconcileAllLifecycles": phaseActivation, "markNodeReady": phaseActivation,
 
 	"openTrafficGates": phaseTraffic, "startAdminUI": phaseTraffic, "buildAndStartProxyServer": phaseTraffic,
 }
@@ -119,10 +122,14 @@ func TestStartupSequence_PhasesNeverGoBackwards(t *testing.T) {
 	}
 	for name, bad := range map[string][]string{
 		"the old order (activation before the stores)": swap("activateClusterRoles", "initConnAndRateLimit"),
-		"a store loader after the activation":          swap("activateClusterRoles", "pacReconcileAllLifecycles"),
+		"a store loader after the activation":          swap("activateClusterRoles", "loadReleaseManagement"),
 		"the SOCKS5 gate opened before the activation": swap("openTrafficGates", "activateClusterRoles"),
 		"an unclassified new step":                     append(append([]string(nil), calls...), "initSomethingNew"),
 		"a second activation":                          append(append([]string(nil), calls[:len(calls)-3]...), "activateClusterRoles", "openTrafficGates", "startAdminUI", "buildAndStartProxyServer"),
+		"ready marked before the activation":           swap("markNodeReady", "activateClusterRoles"),
+		"a traffic gate opened before ready":           swap("markNodeReady", "openTrafficGates"),
+		"the stores phase entered after a store":       swap("enterStartupStoresPhase", "initBlocklist"),
+		"the activation phase entered after the role":  swap("enterStartupActivationPhase", "activateClusterRoles"),
 	} {
 		if startupPhaseOrderError(bad) == "" {
 			t.Errorf("control: the phase guard accepted %s", name)
@@ -142,13 +149,50 @@ func startupPhaseOrderError(calls []string) string {
 			return fmt.Sprintf("runStartupSequence runs %s (phase %d) after %s (phase %d): the cluster role must not start acting before "+
 				"every configuration store has loaded, and no traffic gate may open before the activation", c, ph, lastName, last)
 		}
-		if ph == phaseActivation {
+		if c == "activateClusterRoles" {
 			activations++
 		}
 		last, lastName = ph, c
 	}
 	if activations != 1 {
 		return fmt.Sprintf("runStartupSequence activates the cluster role %d times, want exactly once", activations)
+	}
+	return startupLifecycleMarkerError(calls)
+}
+
+// startupLifecycleMarkerError pins where the lifecycle (node_lifecycle.go) is
+// advanced relative to the steps: each phase is ENTERED before its first step,
+// and the node is marked ready after the role is active and before any traffic
+// gate opens.
+func startupLifecycleMarkerError(calls []string) string {
+	at := func(name string) int {
+		for i, c := range calls {
+			if c == name {
+				return i
+			}
+		}
+		return -1
+	}
+	for _, pair := range [][2]string{
+		{"enterStartupIdentityPhase", "initAuth"},
+		{"initClusterIdentity", "enterStartupStoresPhase"},
+		{"enterStartupStoresPhase", "initConnAndRateLimit"},
+		{"loadReleaseManagement", "enterStartupActivationPhase"},
+		{"enterStartupActivationPhase", "activateClusterRoles"},
+		{"activateClusterRoles", "pacReconcileAllLifecycles"},
+		{"pacReconcileAllLifecycles", "markNodeReady"},
+		{"markNodeReady", "openTrafficGates"},
+	} {
+		a, b := at(pair[0]), at(pair[1])
+		if a < 0 || b < 0 {
+			return fmt.Sprintf("runStartupSequence no longer calls %s (%d) / %s (%d)", pair[0], a, pair[1], b)
+		}
+		if a > b {
+			return fmt.Sprintf("runStartupSequence calls %s after %s: the lifecycle must be advanced before the steps of the phase it names", pair[0], pair[1])
+		}
+	}
+	if at("enterStartupIdentityPhase") != 0 {
+		return "enterStartupIdentityPhase must be the first statement of runStartupSequence: until it runs the node reads as unmanaged, i.e. ready"
 	}
 	return ""
 }
@@ -387,6 +431,12 @@ type suEnv struct {
 	blockFile  string
 }
 
+func suResetUnenrolledPullThrottle() {
+	unenrolledConfigPull.mu.Lock()
+	unenrolledConfigPull.attempts = map[string][]time.Time{}
+	unenrolledConfigPull.mu.Unlock()
+}
+
 // suClientLoopsStarted counts data-plane client hand-offs (see suIsolate).
 var suClientLoopsStarted atomic.Int32
 
@@ -397,6 +447,14 @@ func suIsolate(t *testing.T) *suEnv {
 	t.Helper()
 	gcMarshalCache.reset()
 	gcDeltaRemainderCache.reset()
+	// These tests drive the halves by hand: the lifecycle is unmanaged unless
+	// a test sets a phase itself, and whatever it leaves is put back.
+	prevPhase := nodeLifecyclePhase.Swap(int32(nodePhaseUnmanaged))
+	t.Cleanup(func() { nodeLifecyclePhase.Store(prevPhase) })
+	// The probes here are unenrolled loopback pollers; the per-IP pull
+	// throttle must not carry one test's polls into the next.
+	suResetUnenrolledPullThrottle()
+	t.Cleanup(suResetUnenrolledPullThrottle)
 	tempHADir(t)
 	env := &suEnv{clusterDB: cpIsolateActivation(t)}
 	cpChaosSetup(t)
@@ -585,8 +643,8 @@ func TestClusterHalves_ControlPlane_IdentityEarly_ServesOnlyLoadedConfig(t *test
 	if cpGRPCListenerState().Configured {
 		t.Error("the early half started the control-plane listener")
 	}
-	if _, err := suPoll(t, addr); err == nil {
-		t.Error("something answers GetConfig before the activation")
+	if _, err := suPoll(t, addr); !isCPStartingStatus(err) {
+		t.Errorf("before the activation a poller must be answered %s by the early listener, got: %v", cpStartingStatusToken, err)
 	}
 
 	env.loadStores(t, "allow")

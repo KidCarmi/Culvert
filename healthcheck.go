@@ -18,9 +18,14 @@ type healthReport struct {
 	ClamAV        string `json:"clamav" redact:"internal"`
 	CAExpiresDays int    `json:"ca_expires_days" redact:"internal"`
 	SSLInspection string `json:"ssl_inspection" redact:"internal"`
-	ClusterCA     string `json:"cluster_ca" redact:"internal"`
-	SOCKS5        string `json:"socks5" redact:"internal"`
-	AdminUI       string `json:"admin_ui" redact:"internal"`
+	// Startup is the start-up lifecycle phase (node_lifecycle.go): "ready" on
+	// a serving node. Liveness does not depend on it — this endpoint answers
+	// "ok" from the moment it is reachable — it says where the node is.
+	// Omitted for a process the start-up sequence does not drive.
+	Startup   string `json:"startup,omitempty" redact:"public"`
+	ClusterCA string `json:"cluster_ca" redact:"internal"`
+	SOCKS5    string `json:"socks5" redact:"internal"`
+	AdminUI   string `json:"admin_ui" redact:"internal"`
 	// CPGRPC is the Control Plane gRPC listener's posture (CHAOS-71), omitted
 	// entirely on a node that is not a Control Plane: an always-present field
 	// would make every standalone proxy and every Data Plane in the fleet look
@@ -87,6 +92,7 @@ func computeHealth() healthReport {
 		Status:        "ok",
 		Uptime:        uptime(),
 		Version:       version,
+		Startup:       startupHealthFieldValue(),
 		ClamAV:        clamStatus,
 		CAExpiresDays: caExpiresDays,
 		SSLInspection: sslInspection,
@@ -468,6 +474,12 @@ func computeReadiness() (report readinessReport, code int) {
 	// shutdownStarted).
 	if shutdownStarted.Load() {
 		checks["shutdown"] = &readinessCheck{Status: "fail", Detail: "shutting down"}
+		allOK = false
+	}
+
+	// 6c. Start-up lifecycle (node_lifecycle.go). Gating: a node that has not
+	// finished starting is live but NOT ready, whatever is already bound.
+	if !appendStartupReadinessCheck(checks) {
 		allOK = false
 	}
 

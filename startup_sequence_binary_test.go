@@ -214,52 +214,77 @@ func suBinUpstream(t *testing.T) *httptest.Server {
 type suBinPoller struct {
 	mu      sync.Mutex
 	replies []ConfigSnapshot
-	refused int
-	stop    context.CancelFunc
-	done    chan struct{}
+	refused int // every failed poll, the starting answers included
+	// starting counts CULVERT_NODE_STARTING answers; firstStarting/firstReply
+	// are when the first one / the first served configuration arrived.
+	starting      int
+	firstStarting time.Time
+	firstReply    time.Time
+	stop          context.CancelFunc
+	done          chan struct{}
 }
 
 func suBinStartPoller(t *testing.T, addr string) *suBinPoller {
 	t.Helper()
 	prev := clusterInsecure
 	clusterInsecure = true // this test process is the "data plane" on a loopback, certificate-less link
-	c, err := NewDataPlaneClient("first-poller", addr, "", "", "")
-	if err != nil {
-		clusterInsecure = prev
-		t.Fatalf("poller client: %v", err)
-	}
 	ctx, cancel := context.WithCancel(context.Background())
 	p := &suBinPoller{stop: cancel, done: make(chan struct{})}
 	go func() {
 		defer close(p.done)
 		for ctx.Err() == nil {
-			callCtx, callCancel := context.WithTimeout(ctx, 2*time.Second)
-			raw, err := c.call(callCtx, methodGetConfig, json.RawMessage(`{}`))
-			callCancel()
-			p.mu.Lock()
-			if err != nil {
-				p.refused++
-			} else {
-				var snap ConfigSnapshot
-				if json.Unmarshal(raw, &snap) == nil {
-					p.replies = append(p.replies, snap)
-				}
-			}
-			p.mu.Unlock()
-			time.Sleep(20 * time.Millisecond)
+			p.pollOnce(ctx, addr)
+			time.Sleep(10 * time.Millisecond)
 		}
 	}()
 	t.Cleanup(func() {
 		cancel()
 		<-p.done
-		c.mu.Lock()
-		if c.conn != nil {
-			_ = c.conn.Close()
-		}
-		c.mu.Unlock()
 		clusterInsecure = prev
 	})
 	return p
+}
+
+// pollOnce is one poll on a FRESH connection. A long-lived connection that
+// met a closed port sits in gRPC's reconnect backoff (a second or more) and
+// would sleep through the very window this poller exists to observe.
+func (p *suBinPoller) pollOnce(ctx context.Context, addr string) {
+	c, err := NewDataPlaneClient("first-poller", addr, "", "", "")
+	if err != nil {
+		return
+	}
+	callCtx, callCancel := context.WithTimeout(ctx, 2*time.Second)
+	raw, err := c.call(callCtx, methodGetConfig, json.RawMessage(`{}`))
+	callCancel()
+	c.mu.Lock()
+	_ = c.conn.Close()
+	c.mu.Unlock()
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if err != nil {
+		p.refused++
+		if isCPStartingStatus(err) {
+			if p.starting == 0 {
+				p.firstStarting = time.Now()
+			}
+			p.starting++
+		}
+		return
+	}
+	var snap ConfigSnapshot
+	if json.Unmarshal(raw, &snap) == nil {
+		if len(p.replies) == 0 {
+			p.firstReply = time.Now()
+		}
+		p.replies = append(p.replies, snap)
+	}
+}
+
+func (p *suBinPoller) startingAnswers() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.starting
 }
 
 func (p *suBinPoller) snapshot() (replies []ConfigSnapshot, refused int) {
@@ -333,8 +358,17 @@ func TestBinaryStartup_ControlPlane_PollerOnlyEverSeesLoadedConfig(t *testing.T)
 		t.Error("control: the poller was never refused, so it was not polling before the listener bound")
 	}
 	suBinWantLoaded(t, "first start", first)
-	n.wantLogOrder("Blocklist loaded: 1 entries", "Policy: 2 rule(s) loaded", "Policy: default action: allow",
-		"ControlPlane: config v", "ControlPlane: enabled (gRPC")
+	// The early listener: while the stores loaded the poller was ANSWERED —
+	// "starting" — not left looking at a closed port; then the address was
+	// handed to the activation, which published before it bound.
+	startingFirst := poller.startingAnswers()
+	if startingFirst == 0 {
+		t.Error("the poller was never answered " + cpStartingStatusToken + ": the control plane's port was closed while its stores loaded, " +
+			"which a standby cannot tell from a dead leader")
+	}
+	n.wantLogOrder("control-plane listener bound in STARTING state", "Blocklist loaded: 1 entries", "Policy: 2 rule(s) loaded",
+		"Policy: default action: allow", "control-plane early listener on", "ControlPlane: config v",
+		"ControlPlane: enabled (gRPC", "Startup: node READY")
 	firstVersion := first[len(first)-1].Version
 
 	// Restart on the same data directory, the poller still polling.
@@ -348,6 +382,9 @@ func TestBinaryStartup_ControlPlane_PollerOnlyEverSeesLoadedConfig(t *testing.T)
 		t.Error("control: the poller was never refused across the restart")
 	}
 	suBinWantLoaded(t, "after restart", after)
+	if poller.startingAnswers() == startingFirst {
+		t.Error("the restarted control plane never answered " + cpStartingStatusToken + " while it loaded its stores")
+	}
 	if after[0].Version <= firstVersion {
 		t.Errorf("the restarted control plane serves v%d, not above the v%d it served before the restart", after[0].Version, firstVersion)
 	}
@@ -548,5 +585,61 @@ func TestBinaryStartup_HAStandby_JoinsAfterItsStoresLoad(t *testing.T) {
 	n.wantLogOrder("Policy: 2 rule(s) loaded", "HA:")
 	if strings.Contains(n.log(), "ControlPlane: config v") {
 		t.Error("a standby published a configuration snapshot at boot")
+	}
+}
+
+// ── measurements ────────────────────────────────────────────────────────────
+
+// TestBinaryStartupMeasure_ControlPlaneBindAndReady measures, on the real
+// binary, how long after process start a control plane's cluster port accepts
+// connections, first answers CULVERT_NODE_STARTING, and first serves its
+// configuration, for growing blocklists. It asserts nothing about durations —
+// it is a measurement, run on demand:
+//
+//	CULVERT_STARTUP_MEASURE=1 go test -tags proxybinload -run TestBinaryStartupMeasure_ -v .
+//
+// With CULVERT_BIN pointing at a build without the early listener the
+// "starting" column is empty and "port open" equals the time to the real bind.
+func TestBinaryStartupMeasure_ControlPlaneBindAndReady(t *testing.T) {
+	if os.Getenv("CULVERT_STARTUP_MEASURE") == "" {
+		t.Skip("measurement; set CULVERT_STARTUP_MEASURE=1")
+	}
+	bin := buildOrFindBinary(t)
+	for _, hosts := range []int{0, 200_000, 2_000_000} {
+		cfgDir := t.TempDir()
+		var sb strings.Builder
+		for i := 0; i < hosts; i++ {
+			fmt.Fprintf(&sb, "host-%07d.blocked.example\n", i)
+		}
+		blockFile := suBinWrite(t, filepath.Join(cfgDir, "blocklist.txt"), sb.String())
+		grpcAddr := fmt.Sprintf("127.0.0.1:%d", suBinPort(t))
+		n, proxyPort := suBinNewNode(t, bin, "-cp-grpc-addr", grpcAddr, "-blocklist", blockFile,
+			"-policy", suBinWrite(t, filepath.Join(cfgDir, "policy.json"), suBinPolicy))
+		poller := suBinStartPoller(t, grpcAddr)
+
+		start := time.Now()
+		n.start()
+		var portOpen time.Duration
+		for deadline := time.Now().Add(120 * time.Second); time.Now().Before(deadline); time.Sleep(2 * time.Millisecond) {
+			if c, err := net.DialTimeout("tcp", grpcAddr, 200*time.Millisecond); err == nil {
+				_ = c.Close()
+				portOpen = time.Since(start)
+				break
+			}
+		}
+		poller.waitReplies(t, 1, 180*time.Second)
+		suBinWaitProxy(t, proxyPort)
+		poller.mu.Lock()
+		firstStarting, firstReply, starting := poller.firstStarting, poller.firstReply, poller.starting
+		poller.mu.Unlock()
+		startingAt := "-"
+		if starting > 0 {
+			startingAt = firstStarting.Sub(start).Round(time.Millisecond).String()
+		}
+		t.Logf("MEASURE hosts=%d port_open=%s first_starting=%s first_config=%s starting_answers=%d",
+			hosts, portOpen.Round(time.Millisecond), startingAt, firstReply.Sub(start).Round(time.Millisecond), starting)
+		poller.stop()
+		<-poller.done
+		n.stop()
 	}
 }

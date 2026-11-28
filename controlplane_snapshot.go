@@ -1359,8 +1359,30 @@ func (s *ConfigStore) LastPublishError() (msg, ts string) {
 // rejection is logged, alerted, and surfaced via LastPublishError — but the
 // error is returned so an admin handler can also report it inline.
 func publishCurrentConfigSnapshot() error {
+	// Lifecycle: no live-state publish before every store has loaded. Nothing
+	// in the start-up sequence publishes that early; this makes it a property
+	// rather than an ordering accident (a snapshot captured from half-loaded
+	// stores is the defect the activation order exists to prevent).
+	if !nodePublishPhaseReached() {
+		return fmt.Errorf("%w (start-up phase %s)", errPublishBeforeStoresLoaded, currentNodePhase())
+	}
+	// Leadership: publishing is a leadership-dependent operation
+	// (ha_authority.go). Publication AUTHORIZATION — whether what is committed
+	// may be served to the fleet — is a separate question, asked where a
+	// snapshot is handed out (nodeServingRefusal).
+	if !nodeLeadershipHeld() {
+		return globalConfigStore.rejectPublish(publishFull, errPublishWithoutLeadership)
+	}
 	return globalConfigStore.UpdateFrom(CurrentConfigSnapshot)
 }
+
+// errPublishBeforeStoresLoaded: a publish was attempted before the start-up
+// sequence had loaded every configuration store.
+var errPublishBeforeStoresLoaded = fmt.Errorf("config publish refused: the node's configuration stores have not finished loading")
+
+// errPublishWithoutLeadership: a publish was attempted by a node that does not
+// hold leadership.
+var errPublishWithoutLeadership = fmt.Errorf("config publish refused: this node does not hold leadership")
 
 // seedReplicatedSnapshot sets the in-memory snapshot from a replicated HA bundle
 // WITHOUT marking published or notifying subscribers. It gives the delta ring a
