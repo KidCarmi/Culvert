@@ -241,6 +241,12 @@ func TestPublishGate_OperatorRelease(t *testing.T) {
 	promotedPair(t)
 	const ahead = gateWatermark + 3
 	dpGetConfig(t, ahead)
+	// A second node, on a version ABOVE everything this node has issued (a
+	// separate lineage): the release must publish above it too.
+	far := globalConfigStore.Version() + 500
+	if unchanged, _, _ := dpGetConfig(t, far); !unchanged {
+		t.Fatal("setup: a node above the current version must be kept")
+	}
 
 	haPreviousLeaderReachable = func() bool { return true }
 	if code, resp := postPublishRelease(t, `{}`); code != http.StatusConflict || resp["code"] != "ha_reconciliation_possible" {
@@ -254,11 +260,11 @@ func TestPublishGate_OperatorRelease(t *testing.T) {
 	if code != http.StatusOK || resp["released"] != true {
 		t.Fatalf("forced release = %d %v", code, resp)
 	}
-	if nodes, _ := resp["rolled_back_nodes"].([]any); len(nodes) != 1 {
+	if nodes, _ := resp["rolled_back_nodes"].([]any); len(nodes) != 1 { // both reports come from the same peer address
 		t.Errorf("the response must show the diff; got %v", resp["rolled_back_nodes"])
 	}
 	entry := findAuditEntry(t, "cluster.ha-publish-release", "self")
-	if !strings.Contains(entry.Detail, "force=true") || !strings.Contains(entry.Detail, `"version":4245`) {
+	if !strings.Contains(entry.Detail, "force=true") || !strings.Contains(entry.Detail, `"version":`) {
 		t.Errorf("audit detail must record the force flag and the diff; got %q", entry.Detail)
 	}
 	if ok, _ := haPublishAuthorized(); !ok {
@@ -271,8 +277,13 @@ func TestPublishGate_OperatorRelease(t *testing.T) {
 	published := globalConfigStore.Version()
 	// The node that was ahead holds DIFFERENT content at its version: it must
 	// be resynced in full, never offered a delta built from this node's content.
-	if reply := dpGetConfigDelta(t, ahead); reply.Mode == "delta" {
-		t.Fatalf("the released node was offered a delta from v%d: it would be applied onto content this node never had", reply.BaseVersion)
+	for _, k := range []int64{ahead, far} {
+		if reply := dpGetConfigDelta(t, k); reply.Mode == "delta" {
+			t.Fatalf("the released node at v%d was offered a delta: it would be applied onto content this node never had", k)
+		}
+	}
+	if published <= far {
+		t.Fatalf("published v%d is not above the highest reported version v%d", published, far)
 	}
 
 	// Idempotent.
