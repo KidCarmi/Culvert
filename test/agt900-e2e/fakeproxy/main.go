@@ -28,6 +28,17 @@
 //	app ... --list-backups ...
 //	                      the `cli` profile's backup list (the agent's data
 //	                      rollback preflight): print one fixed backup entry
+//	app --print-data-epoch
+//	                      the `cli` profile's data-epoch report (ADR-0062 slice
+//	                      6a), read from /data/.data-epoch exactly as the real
+//	                      binary reads it: absent is epoch 1, a marker this
+//	                      build cannot read exits 1. build_max is the epochMax
+//	                      the image was built with (its labels say the same).
+//	app -set-data-epoch <content>
+//	                      write <content> verbatim as /data/.data-epoch (empty:
+//	                      remove it). The harness runs it with `docker exec` in
+//	                      the proxy container: the marker a migrating image
+//	                      would leave, or a malformed one.
 //
 // Any other argument list (the shipped proxy command's -port/-ui-port/... flags)
 // is ignored and the server runs.
@@ -37,6 +48,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"os"
@@ -48,9 +60,35 @@ import (
 )
 
 var (
-	version = "dev"
-	ready   = "ok"
+	version  = "dev"
+	ready    = "ok"
+	epochMax = "1"
 )
+
+const dataEpochMarker = "/data/.data-epoch"
+
+// printDataEpoch is `--print-data-epoch`: the one-line report the agent parses
+// (internal/runner/data_epoch.go), strict like the real binary's.
+func printDataEpoch() {
+	epoch, present := 1, false
+	if b, err := os.ReadFile(dataEpochMarker); err == nil {
+		var m struct {
+			Schema int `json:"schema"`
+			Epoch  int `json:"epoch"`
+		}
+		dec := json.NewDecoder(strings.NewReader(string(b)))
+		dec.DisallowUnknownFields()
+		if err := dec.Decode(&m); err != nil || m.Schema != 1 || m.Epoch < 1 {
+			fmt.Fprintln(os.Stderr, "fakeproxy: unreadable data epoch marker")
+			os.Exit(1)
+		}
+		epoch, present = m.Epoch, true
+	} else if !os.IsNotExist(err) {
+		os.Exit(1)
+	}
+	fmt.Printf("{\"schema\":1,\"epoch\":%d,\"marker_present\":%t,\"build_min\":1,\"build_max\":%s}\n", epoch, present, epochMax)
+	os.Exit(0)
+}
 
 func readyHandler(w http.ResponseWriter, _ *http.Request) {
 	if _, err := os.Stat("/ctl/hang_ready"); err == nil {
@@ -97,6 +135,19 @@ func multiCall() {
 		ch := make(chan os.Signal, 1)
 		signal.Notify(ch, syscall.SIGTERM, syscall.SIGINT)
 		<-ch
+		os.Exit(0)
+	}
+	if len(args) > 0 && args[0] == "--print-data-epoch" {
+		printDataEpoch()
+	}
+	if len(args) == 2 && args[0] == "-set-data-epoch" {
+		if args[1] == "" {
+			_ = os.Remove(dataEpochMarker)
+			os.Exit(0)
+		}
+		if err := os.WriteFile(dataEpochMarker, []byte(args[1]), 0o644); err != nil { // #nosec G306 -- test fixture
+			os.Exit(1)
+		}
 		os.Exit(0)
 	}
 	for _, a := range args {
