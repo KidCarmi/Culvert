@@ -492,6 +492,37 @@ contracts:
     validation: unit
     compatibility: "The floor file is persisted state on deployed appliances."
 
+  - id: UPG-003
+    area: upgrade
+    status: enforced
+    owner_approved: false
+    invariant: "The data epoch marker <dataDir>/.data-epoch only ever rises: a proxy boot raises it to the build's epoch before any store loads and never lowers it, and a build at the implicit epoch 1 writes nothing (an absent marker in an existing data directory is epoch 1). The final image carries io.culvert.data-epoch.min and .max equal to the build's oldest readable and current epoch. culvert --print-data-epoch reports the marker read-only, and an unreadable marker or a missing data directory is an error, never epoch 1."
+    authority: "Data-compatibility contract (internal/dataepoch, data_epoch.go, Dockerfile). Design: docs/adr/0062-maintenance-agent-durable-lifecycle-execution.md slice 6a; owner decision 2026-11-28 (add the contract before runtime recovery); docs/engineering/data-epoch.md."
+    code:
+      - "internal/dataepoch/*.go"
+      - "data_epoch.go"
+    configs: []
+    transitions:
+      permitted:
+        - "raising the marker to the build's epoch at boot"
+        - "booting on data a newer build wrote, with a warning"
+      forbidden:
+        - "lowering the data epoch marker"
+        - "writing a marker at the implicit epoch"
+        - "reporting an unreadable marker or a missing data directory as epoch 1"
+        - "an image whose data-epoch labels differ from the build's range"
+        - "raising dataepoch.Current before backup carries the marker and restore can never lower it"
+    tests:
+      - {file: "internal/dataepoch/dataepoch_test.go", name: TestRaiseTo_NeverLowersAndWritesOnlyToRaise}
+      - {file: "internal/dataepoch/dataepoch_test.go", name: TestRead_RefusesWhatIsNotAMarker}
+      - {file: "internal/dataepoch/dataepoch_test.go", name: TestRead_AMissingDataDirectoryIsNotTheImplicitEpoch}
+      - {file: "data_epoch_test.go", name: TestDockerfile_DataEpochLabelsMatchTheBuild}
+      - {file: "data_epoch_test.go", name: TestDataEpoch_BumpObligationsTripwire}
+      - {file: "data_epoch_test.go", name: TestCheckDataEpochAtBoot_NeverLowersOrInvents}
+      - {file: "data_epoch_test.go", name: TestPrintDataEpoch}
+    validation: unit
+    compatibility: "New and inert at epoch 1: no build writes the marker, so existing data directories are unchanged, and an image from before this change has no labels (the maintenance agent never puts such an image back on data). The one-shot is additive."
+
   - id: BKP-001
     area: backup-restore
     status: enforced
@@ -746,6 +777,35 @@ contracts:
       - {file: "cmd/culvert-maint/internal/runner/data_epoch_test.go", name: TestDataEpochTemplate}
     validation: unit
     compatibility: "Additive: a new read-only template and its fixed-argv sudoers line. An install whose sudoers file predates the line cannot read the data epoch, so every check is unknown and nothing is ever restored (fails closed). No caller acts on it until slice 6."
+
+  - id: AGT-009
+    area: agent-lifecycle
+    status: enforced
+    owner_approved: false
+    invariant: "<state_dir>/health/installed.json is written only by an upgrade this agent ran, after its health gate and digest verify passed, and names the image it installed and the image it replaced; an upgrade that failed its gate or was already current writes nothing. <state_dir>/health/gated.json holds at most two distinct images, newest first, and is changed only by a passed runtime gate on an image with a repo-bound, allow-listed digest reference. Both are written only when the runtime health store is on, and nothing in this build acts on them."
+    authority: "Maintenance agent (cmd/culvert-maint, separate module). Design: docs/adr/0062-maintenance-agent-durable-lifecycle-execution.md slice 6 (PR 1); owner decision 2026-11-28 (runtime recovery acts only on images this agent installed)."
+    code:
+      - "cmd/culvert-maint/internal/runtimehealth/provenance.go"
+      - "cmd/culvert-maint/internal/server/runtime_provenance.go"
+    configs: []
+    transitions:
+      permitted:
+        - "replacing installed.json with a later verified upgrade"
+        - "moving an image already in gated.json to the front when it is gated again"
+      forbidden:
+        - "writing installed.json for an upgrade that failed, was already current, or did not pass its digest verify"
+        - "writing installed.json for an image rollback"
+        - "changing gated.json from an unhealthy, unknown, stale or discarded observation"
+        - "keeping more than two images, or the same image twice, in gated.json"
+    tests:
+      - {file: "cmd/culvert-maint/internal/server/runtime_provenance_test.go", name: TestProvenance_VerifiedUpgradeRecordsInstalled}
+      - {file: "cmd/culvert-maint/internal/server/runtime_provenance_test.go", name: TestProvenance_OnlyAVerifiedUpgradeWithTheStoreOn}
+      - {file: "cmd/culvert-maint/internal/server/runtime_provenance_test.go", name: TestObserver_KeepsTheGatedHistory}
+      - {file: "cmd/culvert-maint/internal/runtimehealth/provenance_test.go", name: TestNoteGated_KeepsTwoDistinctNewestFirst}
+      - {file: "cmd/culvert-maint/internal/runtimehealth/provenance_test.go", name: TestInstalled_Refusals}
+      - {file: "cmd/culvert-maint/internal/runtimehealth/provenance_test.go", name: TestReadGated_Refusals}
+    validation: unit
+    compatibility: "Additive files under <state_dir>/health (schema 1), written only with runtime_health_interval on. An older agent ignores them; nothing reads them until slice 6's executor."
 
   - id: CFG-001
     area: config-compatibility

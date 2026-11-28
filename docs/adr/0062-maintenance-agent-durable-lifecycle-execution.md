@@ -443,6 +443,85 @@ gaps and make the #2051 executor the single path every recovery takes.
 - AGT-900 extension, recorded explicitly: "converge may restore the last
   image this agent gated, at runtime, when policy allows" — new contract
   text, its own tests, model property and real-Docker cases.
+- **Scope (owner decision 2026-11-28): only images this agent installed.**
+  The agent acts only when it put the unhealthy image there itself: a later
+  failure of an upgrade (or image rollback) that passed, or an interrupted
+  upgrade whose target is now unhealthy. It restores the image that was gated
+  before that change. A hand retag or a hand `compose up` is reported, never
+  acted on: a manual change is evidence of state, not authorization.
+- **Design (2026-11-28), in four PRs, each production change separate from
+  its real-Docker qualification:**
+  1. *Provenance and gated history (data only).* When an upgrade or image
+     rollback this agent ran passes its gate and verify, it writes
+     `<state_dir>/health/installed.json`: the op id, the image it installed
+     (id, validated ref, digest) and the image it replaced (id, ref). The
+     observer keeps the last two distinct gated images in
+     `<state_dir>/health/gated.json` (newest first); `last_good.json` is
+     unchanged. Both are best-effort and nothing acts on them yet; a file that
+     is absent or unreadable means "no provenance" and blocks every action.
+  2. *Decision (pure) and lifecycle model.* A new journal kind
+     `runtime.recover` (schema 2, so an agent before slice 2 is fenced off).
+     Its record names the restore target as the prior (`PriorRef`,
+     `PriorDigest`, `PriorImageID`), the unhealthy image as the target, and
+     is written with `RollbackArmed` set before anything moves. The decision
+     for it is the armed-rollback branch the startup reconcile already runs
+     (`finish_rollback_retag`: tag the prior, `up`, gate, verify by id,
+     audit-first retire), entered only when every condition below holds on
+     fresh facts. The lifecycle model and its properties gain the kind before
+     the executor relies on it.
+  3. *Executor, trigger, policy and status.* `runtime_recovery = "off"`
+     (default) or `"restore_last_gated"`, startup-only, valid only with
+     `runtime_health_interval` on. A separate loop (the observer stays
+     non-mutating, AGT-007) acts after **3 consecutive kept `not_ready`
+     samples** of the same running container and image (in memory; a
+     restart starts the count again). It begins the operation under the
+     maintenance lock (operators get 409), writes the record fail-closed, and
+     runs the plan through the startup executor's steps. Status reports it.
+  4. *Real-Docker qualification* in all four cells, with negative controls.
+- **Admission: checked once, on fresh facts, before the record is written.**
+  - The policy is on, the lock is free and the settle window is over.
+  - The container runs, and container and fixed tag are on the same image X.
+  - X is the image `installed.json` names, or the target of a kept interrupted
+    upgrade record of this agent.
+  - The restore target R is the image that change replaced (`installed.json`
+    `replaced_*`, or the record's prior). R is in `gated.json`. X may be the
+    newest gated entry: an upgrade A→B that passed, was gated, and later fails
+    restores A, which is the main case this slice exists for.
+  - R's reference passes the repo-bound exact-digest check and the image
+    allowlist, and R is local.
+  - `dataCompat` (slice 6a) is compatible for R's labels and the data epoch.
+  - Fewer than 2 runtime recoveries were begun for X (write-ahead counter).
+  - Anything else is reported (`recovery_required/<reason>`), never acted on.
+    A stack that is down, an unknown or no-container sample, or no provenance
+    is reported only.
+- **Each step then expects the state its predecessor leaves, as
+  `reconcilePlan` already does.** Before the retag: tag and container on X.
+  Before `up`: the tag on R and the container still on X (the state the
+  retag leaves, decided as `verdictFinishRollback`). After `up`: a fresh gate
+  of R, then container, tag and R's local image verified by id. The
+  compatibility check is repeated before `up`, the step that starts R on the
+  data. A state no step of this recovery explains stops it with nothing more
+  changed.
+- **After a crash** the record is an armed image-change record: with
+  `reconcile_on_startup = "converge"` the startup reconcile decides it with
+  the same branch, which already decides the post-retag state (tag on R,
+  container on X) as `finish_rollback`, and with the same compatibility
+  check before `up`; with `"off"` it is reported (AGT-004). A runtime recovery retires only its own record; a kept
+  interrupted-upgrade record stays until an existing rule retires it.
+- **Audit:** `runtime.recover:started` before the first mutation and
+  `runtime.recover:succeeded|failed` at the end, audit before retire, as
+  every other recovery.
+
+- **Slice 6a (owner decision 2026-11-28): the compatibility contract comes
+  first.** Culvert had no data-schema marker and no image label, so nothing
+  could prove an earlier image reads the data. The owner chose to add the
+  contract before slice 6 (contract UPG-003, docs/engineering/data-epoch.md):
+  a data epoch marker under `/data` that only rises (absent = epoch 1), image
+  labels `io.culvert.data-epoch.min/max`, and a read-only
+  `culvert --print-data-epoch` the agent runs through the `cli` service. An
+  image without the labels is never put back. Every build so far is epoch 1,
+  so nothing is written yet; raising the epoch carries backup and restore
+  obligations that a tripwire test enforces.
 
 **Slice 7 — forward resumption of an interrupted health gate
 (approved as its own, independently qualified slice).**
