@@ -467,6 +467,7 @@ func (s *Server) verifyRunningImage(acc *upgradeApplyAccumulator) stageRun {
 		// report stage, and terminal removal will retire the record).
 		s.endGateBestEffort(acc.opID, journal.StepGateTarget, journal.CheckpointPassed)
 		s.advanceJournalPhaseBestEffort(acc, journal.PhaseVerified)
+		s.noteInstalledBestEffort(acc)
 		return []byte(fmt.Sprintf("verify: running_image_id=%s running_digests=%s",
 			ri.RunningImageID, joinDigests(acc.runningAfterDigests))), nil, nil
 	}
