@@ -196,3 +196,24 @@ proxy_repo = "ghcr.io/kidcarmi/culvert"
 # An agent older than this setting refuses to start with it present: remove
 # it before downgrading.
 #runtime_health_interval = "0s"
+
+# Runtime recovery (ADR-0062 slice 6). "off" (the default) or
+# "restore_last_gated"; needs runtime_health_interval on. When the image an
+# upgrade of this agent installed fails the health check 3 readings in a row
+# (same container, same image), the agent puts back the image that upgrade
+# replaced, as its own operation (runtime.recover, holding the maintenance
+# lock: other operations get 409 meanwhile). It acts only when all of these
+# hold, read fresh: the fixed tag is on the running image; this agent
+# installed that image (installed.json, or a kept upgrade record of its own);
+# the image it replaced passed the check before (gated.json), is local, has a
+# <proxy_repo>@sha256 reference the image_allowlist admits, and declares a
+# data-epoch range that includes the data's (an unlabelled image is never
+# restored); and fewer than 2 recoveries were begun for that install. It then
+# retags, recreates, health-checks and verifies by image id, exactly as the
+# startup reconcile finishes an interrupted rollback, and a crash in between
+# is finished by the next start with reconcile_on_startup = "converge".
+# Anything else is reported in GET /v1/status runtime_recovery and changes
+# nothing. A hand retag or a hand `compose up` is never acted on.
+# An agent older than this setting refuses to start with it present: remove
+# it before downgrading.
+#runtime_recovery = "off"

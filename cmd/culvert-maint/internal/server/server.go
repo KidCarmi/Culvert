@@ -102,6 +102,10 @@ type Status struct {
 	// RuntimeHealth is what the runtime health observer last saw (ADR-0062
 	// slice 5). Set only when runtime_health_interval is on.
 	RuntimeHealth *RuntimeHealthStatus `json:"runtime_health,omitempty"`
+
+	// RuntimeRecovery is the runtime recovery's state (ADR-0062 slice 6).
+	// Set only when runtime_recovery is on.
+	RuntimeRecovery *RuntimeRecoveryStatus `json:"runtime_recovery,omitempty"`
 }
 
 // RuntimeHealthStatus reports the runtime health evidence. State is one of
@@ -229,6 +233,10 @@ type Options struct {
 	// The observer runs only when it is set, HealthProbeFactory and Runner
 	// are set, and Cfg.RuntimeHealthInterval is positive.
 	RuntimeHealth *runtimehealth.Store
+	// RuntimeRecovery is the runtime recovery's state (ADR-0062 slice 6). The
+	// recovery runs only when it is set, runtime_recovery is on and the
+	// observer runs; the status provider reads the same tracker.
+	RuntimeRecovery *RuntimeRecoveryTracker
 }
 
 // DefaultOpDrainTimeout is the shutdown drain window for in-flight orchestrator
@@ -489,6 +497,7 @@ func (s *Server) Serve(ctx context.Context) error {
 	obsCtx, stopObserver := context.WithCancel(ctx)
 	defer stopObserver()
 	s.startRuntimeObserver(obsCtx)
+	s.startRuntimeRecovery(obsCtx)
 
 	// Shutdown on ctx done. The shutdown grace timer must be detached
 	// from ctx (which is already cancelled when this fires), so we

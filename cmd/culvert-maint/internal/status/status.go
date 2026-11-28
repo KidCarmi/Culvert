@@ -57,6 +57,10 @@ type Provider struct {
 	// adds nothing to the status.
 	health      *runtimehealth.Store
 	healthEvery time.Duration
+	// recovery is the runtime recovery's tracker and recoveryPolicy its
+	// policy (ADR-0062 slice 6). nil (runtime_recovery off) adds nothing.
+	recovery       *server.RuntimeRecoveryTracker
+	recoveryPolicy string
 	// now overrides time.Now (tests).
 	now func() time.Time
 }
@@ -67,6 +71,23 @@ type Provider struct {
 func (p *Provider) WithRuntimeHealth(st *runtimehealth.Store, every time.Duration) *Provider {
 	p.health, p.healthEvery = st, every
 	return p
+}
+
+// WithRuntimeRecovery makes the provider report the runtime recovery
+// (Status.RuntimeRecovery). Only wired when runtime_recovery is on. Returns p.
+func (p *Provider) WithRuntimeRecovery(t *server.RuntimeRecoveryTracker, policy string) *Provider {
+	p.recovery, p.recoveryPolicy = t, policy
+	return p
+}
+
+// addRuntimeRecovery fills Status.RuntimeRecovery from the tracker (memory
+// only, no Docker and no file).
+func (p *Provider) addRuntimeRecovery(st *server.Status) {
+	if p.recovery == nil {
+		return
+	}
+	rr := p.recovery.Snapshot(p.recoveryPolicy)
+	st.RuntimeRecovery = &rr
 }
 
 // runtimeHealthStaleAfter: a sample older than this many intervals describes
@@ -176,6 +197,7 @@ func (p *Provider) Snapshot(ctx context.Context) (server.Status, error) {
 	p.addPinnedTag(ctx, &st)
 	p.addReconcile(&st)
 	p.addRuntimeHealth(&st)
+	p.addRuntimeRecovery(&st)
 	return st, nil
 }
 

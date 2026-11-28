@@ -359,7 +359,10 @@ func applyBlocklistDeltaSnapshot(remainder ConfigSnapshot, chain []blocklistDelt
 var gcDeltaRemainderCache deltaRemainderCache
 
 type deltaRemainderCache struct {
-	mu       sync.Mutex
+	mu sync.Mutex
+	// store: see configMarshalCache — a version identifies a snapshot only
+	// within one ConfigStore.
+	store    *ConfigStore
 	version  int64
 	caFP     string
 	enrolled bool
@@ -373,10 +376,11 @@ type deltaRemainderCache struct {
 func (c *deltaRemainderCache) serve(version int64, caFP string, enrolled bool) (json.RawMessage, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.bytes != nil && c.version == version && c.caFP == caFP && c.enrolled == enrolled {
+	store := globalConfigStore
+	if c.bytes != nil && c.store == store && c.version == version && c.caFP == caFP && c.enrolled == enrolled {
 		return c.bytes, nil
 	}
-	snap := globalConfigStore.Get()
+	snap := store.Get()
 	if snap.Version != version {
 		// A publish landed between the caller reading `cur`/building the chain and
 		// this fetch. Refuse rather than cache a remainder from snap.Version under
@@ -395,13 +399,13 @@ func (c *deltaRemainderCache) serve(version int64, caFP string, enrolled bool) (
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "marshal remainder: %v", err)
 	}
-	c.version, c.caFP, c.enrolled, c.bytes = version, caFP, enrolled, b
+	c.store, c.version, c.caFP, c.enrolled, c.bytes = store, version, caFP, enrolled, b
 	return b, nil
 }
 
 func (c *deltaRemainderCache) reset() {
 	c.mu.Lock()
-	c.version, c.caFP, c.enrolled, c.bytes = 0, "", false, nil
+	c.store, c.version, c.caFP, c.enrolled, c.bytes = nil, 0, "", false, nil
 	c.mu.Unlock()
 }
 
