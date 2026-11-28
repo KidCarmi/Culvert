@@ -393,6 +393,79 @@ entry appears, not by polling `GET /v1/status`, because the status handler
 itself reads Docker (the running image and the fixed tag) while interrupted
 operations exist; that would hide whether the reconcile read Docker.
 
+## Runtime recovery (ADR-0062 slice 6, contract AGT-010)
+
+Six rows (`agt900_realdocker_e2e_runtime_recovery_test.go`, `--cases '^rr_'`).
+The agent runs with `runtime_health_interval = "1m"` (the smallest), the
+converge reconcile, and `runtime_recovery = "restore_last_gated"` (except
+`rr_off`). Every row starts from an install of the agent's own: the observer
+gates the prior, then `POST /v1/upgrades/apply` to good succeeds
+(`installed.json`: good replaced prior). Then a `/ctl` switch makes an image
+fail `/ready`; the trigger is three consecutive kept `not_ready` samples.
+
+The data epoch is real: the fake proxy answers `cli --print-data-epoch` from
+the `/data/.data-epoch` marker in the proxy's data volume, as the real binary
+does, and the harness writes a marker with `docker exec <proxy> /app
+-set-data-epoch <json>` (the marker a migrating image leaves). All three
+images are labelled `io.culvert.data-epoch.min/max = 1/1`. In sudoers mode the
+read goes through the shipped `cli` profile service and the installed
+`compose.cli.data_epoch` sudoers rule.
+
+Every row also checks that each `compose run` the agent issued was the
+read-only `cli --print-data-epoch`.
+
+| Case | Setup | Expected |
+|---|---|---|
+| rr_restore | good is gated, then fails `/ready` | `recovered/rollback_armed_tag_not_moved`; the agent ran exactly `tag:prior,up`; prior runs under the tag and answers ready; no `runtime.recover` record left; audit `runtime.recover` started → `runtime.recover:reconciled` succeeded → `runtime.recover` succeeded (actor `agent:runtime-recovery`); attempt counter 1 |
+| rr_incompatible | marker `{"schema":1,"epoch":2}`, then good fails | `refused/restore_incompatible` before any operation: no op, no record, no audit entry, no attempt, no tag or `up`; good still runs |
+| rr_hand_change | after the install, an operator pulls bad, tags it and `compose up`s by hand; bad fails `/ready` | `refused/no_provenance`: the agent did not install bad, and changes nothing |
+| rr_restore_fails | good and prior both fail `/ready` | `failed/prior_not_ready`; exactly one `up`; prior under the tag; record kept, stamped `failed:recovery_required`, armed; audit started → `:reconciled` failed → failed; attempt counter 1 |
+| rr_crash_after_tag | held at `up_before:2` (the recovery's own `up`: the tag already on prior, good still running), SIGKILL; restart with converge | the armed record was written before the retag; startup decides `finish_rollback/rollback_interrupted`, converged; that start runs `up` only (and reads the data epoch again); prior runs and answers ready; record retired; audit started → `failed(agent_restart_interrupted)` (the record's actor) → `:reconciled` succeeded (reconcile) |
+| rr_off | the same install and failing good, no `runtime_recovery` | more than 3 `not_ready` samples kept; no `runtime_recovery` in status; the agent changed nothing; no entry, record or attempt |
+
+Mutants (`--negative-control`, each must make its row FAIL):
+
+| Mutant | Change | Row |
+|---|---|---|
+| rr_compat_always_ok | `dataCompat` returns compatible for anything (both the admission check and the PR 2 decision gate) | rr_incompatible |
+| rr_installed_any_image | `installed.json` is taken to name any running image | rr_hand_change |
+| rr_no_trigger | the observer no longer hands its samples to the trigger | rr_restore |
+
+### Recorded results: 2026-11-28 (both modes, both stores)
+
+Source `529ee4f` (clean tree), Docker 29.10.0, Compose 5.7.1. The harness
+was then left unchanged; later commits touch documentation only.
+
+| Mode / store | PASS | FAIL | ERROR | GAP | checks ok | time |
+|---|---|---|---|---|---|---|
+| root/containerd | 6 | 0 | 0 | 0 | 46 | 2225 s |
+| sudoers/containerd | 6 | 0 | 0 | 0 | 46 | 2261 s |
+| root/classic | 6 | 0 | 0 | 0 | 46 | 2221 s |
+| sudoers/classic | 6 | 0 | 0 | 0 | 46 | 2257 s |
+
+Negative control (`--negative-control`, root/containerd, `529ee4f`): every
+mutant caught by a failed contract check, none by an ERROR.
+
+| Mutant | Row | Observed |
+|---|---|---|
+| rr_compat_always_ok | rr_incompatible | `recovered`: the prior was restored over data it cannot read (tag=prior run=prior) |
+| rr_installed_any_image | rr_hand_change | `failed/decision_recovery_required_docker_state_unrecognised`: an operation was begun and a record written for an image the agent never installed. Docker still did not change (tag=bad run=bad): PR 2's decision found the running image to be neither the record's target nor its prior, a second guard behind the provenance check |
+| rr_no_trigger | rr_restore | no attempt at all; good still running |
+
+One expectation was corrected during the qualification. The first
+root/containerd run (`a11ce96`) failed `rr_crash_after_tag` on a single
+check: it expected the interruption entry from `agent:startup`. The agent
+attributes it to the record's actor (`agent:runtime-recovery`), as it does for
+every interrupted operation (`agent:startup` only when a record names none),
+so the expectation was wrong, not the agent. Every Docker, journal and
+decision check of that run held. All four cells above were run after the
+correction.
+
+Not covered by these rows (unit-tested in PR 3; see AGT-010): the attempt
+cap across two sources, a terminal audit entry that cannot be written, a
+change between the two admission checks, an unlabelled restore image, and
+the counter file's bound.
+
 ## Recorded results: 2026-11-23, run 2 (both modes, both stores)
 
 **Environment:**

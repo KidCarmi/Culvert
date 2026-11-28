@@ -31,6 +31,14 @@ services:
       timeout: 3s
       retries: 12
       start_period: 5s
+  # The shipped file's one-shot `cli` profile, reduced to what the agent runs
+  # through it: `run --rm cli --print-data-epoch` (ADR-0062 slice 6a) reads
+  # the data epoch from the same /data volume the proxy writes.
+  cli:
+    image: culvert/proxy:pinned
+    profiles: ["cli"]
+    volumes:
+      - proxy-data:/data
 
 volumes:
   proxy-data:

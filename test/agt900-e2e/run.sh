@@ -153,7 +153,9 @@ for v in prior good bad; do
   sed '1{/^\/\/go:build ignore$/d}' "$HERE/fakeproxy/main.go" > "$W/img-$v/main.go"
   printf 'module fakeproxy\n\ngo 1.22\n' > "$W/img-$v/go.mod"
   # /usr/bin/wget: the shipped compose file's proxy healthcheck (multi-call binary)
-  printf 'FROM scratch\nCOPY app /app\nCOPY app /usr/bin/wget\nENTRYPOINT ["/app"]\n' > "$W/img-$v/Dockerfile"
+  # The data-epoch labels (ADR-0062 slice 6a): every fake reads epoch 1 only, so
+  # a data marker at epoch 2 is data none of them can read.
+  printf 'FROM scratch\nLABEL io.culvert.data-epoch.min="1" io.culvert.data-epoch.max="1"\nCOPY app /app\nCOPY app /usr/bin/wget\nENTRYPOINT ["/app"]\n' > "$W/img-$v/Dockerfile"
   ready=ok; [ "$v" = bad ] && ready=fail
   (cd "$W/img-$v" && GOTOOLCHAIN=local CGO_ENABLED=0 go build -trimpath -ldflags "-X main.version=$v -X main.ready=$ready" -o app .) \
     || incomplete "building the fake proxy ($v)"
@@ -178,8 +180,12 @@ declare -A MUTANT_CASES=(
   [data_as_image]='^(data_rollback_record)$'
   [no_deadline_check]='^(reconcile_deadline_abandoned)$'
   [no_running_check]='^(container_paused)$'
+  # runtime recovery (ADR-0062 slice 6, PR 4)
+  [rr_compat_always_ok]='^(rr_incompatible)$'
+  [rr_installed_any_image]='^(rr_hand_change)$'
+  [rr_no_trigger]='^(rr_restore)$'
 )
-MUTANTS_ALL="adopt_restarted no_write_ahead retire_before_audit standalone_partial_noop data_as_image no_deadline_check no_running_check"
+MUTANTS_ALL="adopt_restarted no_write_ahead retire_before_audit standalone_partial_noop data_as_image no_deadline_check no_running_check rr_compat_always_ok rr_installed_any_image rr_no_trigger"
 apply_mutant() { # name dir
   local srv="$2/internal/server" f
   case "$1" in
@@ -211,6 +217,15 @@ PY
     no_running_check) # a stopped proxy container is treated as running
       f="$srv/reconcile_decision_v2.go"
       sed -i 's/^\tif ids\.run != "" && !in\.ContainerRunning {$/\tif false \&\& ids.run != "" \&\& !in.ContainerRunning { \/\/ NEGATIVE CONTROL: stopped container not detected/' "$f" ;;
+    rr_compat_always_ok) # every restore image is taken as compatible with the data
+      f="$srv/data_compat.go"
+      sed -i 's/^\(func dataCompat(.*) (verdict compatVerdict, reason string) {\)$/\1\n\treturn compatOK, compatReasonCompatibleWithin \/\/ NEGATIVE CONTROL: compatibility never checked/' "$f" ;;
+    rr_installed_any_image) # any running image counts as one this agent installed
+      f="$srv/runtime_recovery_admit.go"
+      sed -i 's/^\tif in != nil \&\& normID(in\.ImageID) == normID(x) {$/\tif in != nil { \/\/ NEGATIVE CONTROL: provenance not checked/' "$f" ;;
+    rr_no_trigger) # the observer never hands its samples to the trigger
+      f="$srv/runtime_observer.go"
+      sed -i 's/^\ts\.noteRuntimeSample(\&smp)$/\t_ = smp \/\/ NEGATIVE CONTROL: the observer never triggers/' "$f" ;;
     adopt_restarted)
       f="$srv/reconcile_decision_v2.go"
       sed -i 's/^\tcase in\.Phase != journal\.PhaseVerified:$/\tcase in.Phase != journal.PhaseVerified \&\& in.Phase != journal.PhaseRestarted: \/\/ NEGATIVE CONTROL: adopts an ungated target/' "$f" ;;

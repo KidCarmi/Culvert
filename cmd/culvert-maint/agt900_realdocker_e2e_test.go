@@ -2128,6 +2128,9 @@ func TestAGT900RealDocker(t *testing.T) {
 	for _, c := range e2eRuntimeHealthCases(t, e) {
 		all = append(all, named(c))
 	}
+	for _, c := range e2eRuntimeRecoveryCases(t, e) {
+		all = append(all, named(c))
+	}
 	names := make([]string, 0, len(all))
 	ran := 0
 	for _, c := range all {

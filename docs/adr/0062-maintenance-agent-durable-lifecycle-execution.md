@@ -517,6 +517,17 @@ gaps and make the #2051 executor the single path every recovery takes.
      PR 4); AGT-001 and AGT-009 amended. The main application's pass-through
      of `runtime_recovery` is a follow-up, as `runtime_health`'s was.
   4. *Real-Docker qualification* in all four cells, with negative controls.
+     *As qualified (2026-11-28):* six rows (`test/agt900-e2e`, `^rr_`) pass
+     in root and sudoers mode on the containerd and classic stores (24/24 on
+     `529ee4f`): a restore with exactly `tag:prior,up`; a refusal, with
+     nothing begun, of a restore the data epoch forbids and of an image an
+     operator moved by hand; a failed restore kept and audited with one
+     `up`; a kill between the retag and the `up` finished by the next start;
+     and nothing at all with the policy off. Every `compose run` the agent
+     issued was the read-only data-epoch read, through the shipped `cli`
+     service and sudoers rule in sudoers mode. Three mutants (compatibility
+     never checked, provenance never checked, no trigger) are each caught by
+     their row.
 - **Admission: checked once, on fresh facts, before the record is written.**
   - The policy is on, the lock is free and the settle window is over.
   - The container runs, and container and fixed tag are on the same image X.
