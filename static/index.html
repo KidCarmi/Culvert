@@ -4729,6 +4729,7 @@ Firefox (all platforms):
       <div class="panel" style="margin-top:16px;display:none" id="cluster-ha-panel">
         <div class="panel-header"><span class="panel-title">High Availability</span></div>
         <div style="padding:20px">
+          <div class="banner warn" id="ha-authority-banner" role="alert" style="display:none;margin-bottom:16px;align-items:flex-start"></div>
           <div id="ha-disabled-section">
             <p style="color:var(--muted);font-size:.85rem;margin-bottom:16px">
               Enable Active/Passive HA to run a standby Control Plane that automatically takes over
@@ -19549,6 +19550,30 @@ async function promoteHA() {
   }
 }
 
+// haRenderAuthority - ADR-0064: this node cannot show it leads (a restarted
+// legacy leader), or it leads but may not publish (nodes hold configuration it
+// never replicated). Both refuse configuration changes; say why and what to do.
+// Server text is escaped (CWE-79).
+function haRenderAuthority(r) {
+  const box = document.getElementById('ha-authority-banner');
+  let html = '';
+  if (r.authority === 'revalidating') {
+    html = '<div style="flex:1;min-width:0"><strong>Leadership not established after restart.</strong> '
+      + escHtml(String(r.authority_reason || '')) + '<br>' + escHtml(String(r.authority_action || '')) + '</div>';
+  } else if (r.publish_gate && r.publish_gate.held) {
+    const g = r.publish_gate;
+    const rows = (g.ahead_nodes || []).map(n =>
+      `<li><code>${escHtml(String(n.node))}</code> reports v${escHtml(String(n.version))} (${escHtml(String(n.source))})</li>`).join('');
+    html = '<div style="flex:1;min-width:0"><strong>Publication held.</strong> '
+      + escHtml(String(r.publish_hold_reason || ''))
+      + `<br>This node replicated through v${escHtml(String(g.watermark))}; its own versions start at v${escHtml(String(g.first_own_version))}.`
+      + (g.conflict ? '<br>' + escHtml(String(g.conflict)) : '')
+      + `<ul style="margin:6px 0 6px 18px;overflow-wrap:anywhere">${rows}</ul>` + escHtml(String(g.action || '')) + '</div>';
+  }
+  box.innerHTML = html;
+  box.style.display = html ? '' : 'none';
+}
+
 // haShowPromoteWarning - the promotion succeeded on a standby that had not
 // synced the old leader's configuration. Shown until dismissed; the same text
 // is in the audit entry. Server text is escaped (CWE-79).
@@ -19569,6 +19594,7 @@ async function loadHA(isCP) {
   try {
     const r = await api('/api/cluster/ha');
     if (!r) return;
+    haRenderAuthority(r);
     const disabledSec = document.getElementById('ha-disabled-section');
     const enabledSec = document.getElementById('ha-enabled-section');
     if (r.enabled) {

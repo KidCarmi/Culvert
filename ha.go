@@ -657,6 +657,9 @@ func (h *HAState) StartAsStandbyWithUndo(ctx context.Context, leaderAddr, token 
 		return
 	}
 	h.setTopologyLocked("standby", leaderAddr, haTransitionStandby)
+	if h == haTopologySource() {
+		disarmPublishGate() // the bounds described a leadership that is over
+	}
 	h.token = token
 	h.since = time.Now()
 	h.autoFailover = autoFailover
@@ -1086,6 +1089,9 @@ func (h *HAState) syncFromLeader(ctx context.Context, client *DataPlaneClient, t
 	ok := applyHABundle(&bundle, token)
 	if ok {
 		h.markSyncOK() // ADR-0005 S4: freshness-gate input
+		if h == haTopologySource() {
+			setInheritedPublishGate(bundle.PublishGate) // ADR-0064 part D
+		}
 		// Seed the standby's epoch from the leader's term (ADR-0004 Slice 1c/1e,
 		// Codex P2): without this a standby starts at term 0, so its first
 		// promotion reports term 1 — identical to the original leader's term 1,
@@ -1244,6 +1250,7 @@ func (h *HAState) promote(reason string) {
 		logger.Printf("HA: promote (%s) requested but no promote context available — ignoring", reason)
 		return
 	}
+	gate := h.beginPublishGateArming() // ADR-0064 part D: where this node's own versions begin
 
 	// ADR-0005 S2: every path to leadership goes through the fence. Denied
 	// or transport-unknown ⇒ no promotion. A grant whose onPromote then
@@ -1335,6 +1342,7 @@ func (h *HAState) promote(reason string) {
 	h.stopLoops()
 	h.startLeaseKeepalive() // after stopLoops(): it halts the keepalive too
 	h.republishTopology()   // after the keepalive: renewal never waits on publication
+	gate.arm(newTerm, promoteEpoch)
 
 	logger.Printf("HA: now serving as leader (promoted from standby, term=%d)", newTerm)
 }

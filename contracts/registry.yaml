@@ -989,6 +989,38 @@ contracts:
     validation: integration
     compatibility: "A legacy HA leader that restarts while its standby is down or partitioned no longer leads until the standby polls it again (automatic) or an operator promotes it. An older standby build is recognised by its poll. Lease mode is unchanged."
 
+  - id: CLU-006
+    area: cluster-sync
+    status: enforced
+    owner_approved: false
+    invariant: "A control plane that became leader by an HA promotion never hands a data plane older configuration at a higher version. A data plane that reports a version the promoted node never replicated (between its replicated watermark and its first own version, or above its current version) is answered unchanged and keeps what it has; publication is then held: configuration changes are refused, consistent data planes keep being served, and the HA status lists the nodes and versions. A failover in which no data plane is ahead is never held. The hold and its bounds survive a restart and a second failover. Leadership and publishing authorization are separate: a hold does not remove leadership, and it never blocks a commit into the control plane's own store."
+    authority: "Publication gate (ha_publish_gate.go) at the distribution doors (controlplane_server.go GetConfig, controlplane_delta.go GetConfigDelta, heartbeat)."
+    code:
+      - "ha_publish_gate.go"
+    configs: []
+    transitions:
+      permitted:
+        - "an operator releasing a hold through POST /api/cluster/ha/publish-release, audited with the diff; forced when the previous leader is reachable"
+        - "serving HASync during a hold, with the gate carried in the bundle"
+      forbidden:
+        - "serving a data plane a snapshot when it reports a version inside an open gap or above the current version"
+        - "holding publication on a failover in which no data plane is ahead"
+        - "freezing a data plane that is consistent with the promoted node"
+        - "blocking the commit a promotion makes to carry its fencing epoch (ADR-0005)"
+        - "adopting configuration from a data plane"
+    tests:
+      - {file: "ha_publish_gate_test.go", name: TestPublishGate_ConsistentFailoverProceedsWithoutHold}
+      - {file: "ha_publish_gate_test.go", name: TestPublishGate_AheadDataPlaneIsNeverRolledBack}
+      - {file: "ha_publish_gate_test.go", name: TestPublishGate_ConflictingFleetGenerations}
+      - {file: "ha_publish_gate_test.go", name: TestPublishGate_HoldSurvivesRestart}
+      - {file: "ha_publish_gate_test.go", name: TestPublishGate_OperatorRelease}
+      - {file: "ha_publish_gate_test.go", name: TestPublishGate_HoldAndGapsAreInheritedAcrossASecondFailover}
+      - {file: "ha_publish_gate_test.go", name: TestPublishGate_NotArmedWithoutAPromotion}
+      - {file: "ha_publish_gate_test.go", name: TestPublishGate_DemotionDisarms}
+      - {file: "ha_publish_gate_test.go", name: TestPublishGate_FailedLeasePromotionArmsNothing}
+    validation: integration
+    compatibility: "Additive on the wire: the HA bundle gains publish_gate, ignored by older standbys (which then do not inherit a hold). A data plane build that sends no known_version is served as before unless a hold is active, when it receives Unavailable and keeps its last-good configuration. A control plane that was never promoted has no gate."
+
   - id: REC-001
     area: failure-recovery
     status: enforced

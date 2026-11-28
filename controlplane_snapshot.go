@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -504,7 +505,11 @@ type ConfigStore struct {
 	// (CHAOS-01). Armed by armVersionPersistence at CP activation; empty in
 	// DP-only processes and in tests that build a bare ConfigStore.
 	versionPath string
-	subs        []chan struct{}
+	// markNext / markedVersion record the version of the first commit after
+	// markNextCommit (ADR-0064: where a promoted node's own versions begin).
+	markNext      bool
+	markedVersion int64
+	subs          []chan struct{}
 	// lastPublishErr records the reason the most recent Update was REJECTED at
 	// commit (P1 commit-time validation) — an over-cap snapshot is not published,
 	// so the fleet stays on the last valid config instead of every DP silently
@@ -911,6 +916,9 @@ func (s *ConfigStore) commitLocked(kind publishKind, snap ConfigSnapshot) config
 	// counter and the committed snapshot's own version (a replicated leader
 	// snapshot is folded in by seedReplicatedSnapshot; the max is the backstop).
 	s.version = max(s.version, s.snap.Version) + 1
+	if s.markNext {
+		s.markNext, s.markedVersion = false, s.version // ADR-0064: a promotion's first own version
+	}
 	snap.Version = s.version
 	snap.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
 	c.newHosts = snap.BlockedHosts
@@ -2258,4 +2266,43 @@ func buildCPAddressList() []string {
 		return nil // no HA = no address list needed (clusterRoleMu deliberately not touched)
 	}
 	return cpAddressListFor(true, haStatus.PeerAddr, clusterRoleSnapshot().grpcAddr)
+}
+
+// markNextCommit asks the store to remember the version of its next commit.
+func (s *ConfigStore) markNextCommit() {
+	s.mu.Lock()
+	s.markNext, s.markedVersion = true, 0
+	s.mu.Unlock()
+}
+
+// markedCommitVersion returns the version recorded since markNextCommit (0:
+// nothing committed since) and disarms the mark.
+func (s *ConfigStore) markedCommitVersion() int64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.markNext = false
+	return s.markedVersion
+}
+
+// raiseVersionAtLeast lifts the version counter to v (never lowers it), so the
+// next commit is above v. The floor is persisted by that commit.
+func (s *ConfigStore) raiseVersionAtLeast(v int64) {
+	s.mu.Lock()
+	if v > s.version {
+		s.version = v
+	}
+	s.mu.Unlock()
+}
+
+// snapshotContentFingerprint identifies a snapshot's distributed CONTENT: it
+// ignores the fields a leadership change or a re-commit alone moves (version,
+// fencing epoch, control-plane address list, CA fingerprint label, timestamp).
+func snapshotContentFingerprint(snap ConfigSnapshot) string {
+	snap.Version, snap.Epoch, snap.CPAddresses, snap.CAFingerprint, snap.UpdatedAt = 0, 0, nil, "", ""
+	b, err := json.Marshal(snap)
+	if err != nil {
+		return ""
+	}
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:])
 }

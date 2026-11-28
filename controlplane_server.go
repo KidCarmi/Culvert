@@ -109,6 +109,14 @@ func (s *controlPlaneServer) GetConfig(ctx context.Context, req json.RawMessage)
 	}
 	var greq getConfigRequest
 	_ = json.Unmarshal(req, &greq) // tolerate empty/"{}"/garbage → KnownVersion 0
+	// ADR-0064 part D: a data plane holding a version this promoted node never
+	// replicated keeps what it has — it is never handed older content at a
+	// higher version.
+	if keep, gerr := publishGateForDataPlane(gatePeerLabel(ctx), "get_config", greq.KnownVersion); gerr != nil {
+		return nil, gerr
+	} else if keep {
+		return json.Marshal(configUnchangedReply{ConfigUnchanged: true, Version: greq.KnownVersion})
+	}
 	if greq.KnownVersion > 0 && greq.KnownVersion >= globalConfigStore.Version() {
 		return json.Marshal(configUnchangedReply{ConfigUnchanged: true, Version: greq.KnownVersion})
 	}
@@ -347,6 +355,9 @@ func (s *controlPlaneServer) PushMetrics(ctx context.Context, raw json.RawMessag
 	nodeMetricsMu.Lock()
 	nodeMetrics[report.NodeID] = report
 	nodeMetricsMu.Unlock()
+	// ADR-0064 part D: the heartbeat is the authenticated, per-node statement
+	// of the version a data plane runs — the publication gate's best evidence.
+	publishGateDecide(report.NodeID, "heartbeat", report.ConfigVersion, report.Epoch, report.SyncedFP)
 
 	// Update heartbeat. M5 PR-B: carry the DP's reported build version so the
 	// cluster node list shows which culvert version each node is actually on.
@@ -860,6 +871,12 @@ type HAStateBundle struct {
 	// own term (ADR-0004 Slice 1c, Codex P2) and a promotion yields a strictly
 	// higher epoch — making the /healthz split-brain signal meaningful.
 	LeaderTerm uint64 `json:"leader_term,omitempty"`
+	// PublishGate is the leader's publication gate (ADR-0064 part D; nil: none).
+	// A standby keeps it and starts from it when promoted, so an open gap or a
+	// hold survives a second failover. HASync is served during a hold: refusing
+	// it would let the standby go stale and remove failover capacity exactly
+	// when the cluster is degraded.
+	PublishGate *publishGateState `json:"publish_gate,omitempty"`
 	// Epoch is the leader's fencing epoch (ADR-0005 S3; 0 = legacy mode).
 	// The PULLER verifies it against its own lease backend before importing
 	// (Finding 7 — a zombie leader serving stale state cannot be imported).
@@ -1117,6 +1134,7 @@ func (s *controlPlaneServer) HASync(ctx context.Context, raw json.RawMessage) (j
 		CACertPEM:        string(globalClusterCA.CACertPEM()),
 		CAKeyEncrypted:   caKeyEncrypted,
 		Config:           published,
+		PublishGate:      publishGateForBundle(), // ADR-0064 part D: inherited by the standby
 		Version:          published.Version,
 		PromoteRequested: globalHA.plannedPromotion.Load(),   // ADR-0004 Slice 1e: coordinated handoff
 		LeaderTerm:       globalHA.Status().Term,             // ADR-0004 Slice 1c/P2: seed standby epoch
@@ -1555,4 +1573,13 @@ func wrapUnary(fn func(context.Context, json.RawMessage) (json.RawMessage, error
 		}
 		return fn(ctx, raw)
 	}
+}
+
+// gatePeerLabel names a config caller for the publication gate's diff: its
+// peer address (config requests carry no node ID).
+func gatePeerLabel(ctx context.Context) string {
+	if ip := peerSourceIP(ctx); ip != "" {
+		return "ip:" + ip
+	}
+	return "ip:unknown"
 }

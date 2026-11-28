@@ -61,6 +61,28 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Security
 
+- **A promoted HA control plane no longer rolls data planes back.** A standby
+  that takes over numbers its configuration above everything the old leader
+  issued. A data plane that had applied a version the standby never received
+  was therefore handed older configuration as if it were newer. The promoted
+  node now compares the version each data plane reports (on every config poll
+  and heartbeat) with what it replicated. A data plane that is ahead is told
+  "unchanged" and keeps its configuration. **Operator-visible effect:** such a
+  failover enters a *publication hold*: configuration changes return 503
+  `ha_write_hold`, data planes that are not ahead keep being served, the
+  `ha_resume_unfenced` alert fires once, and `GET /api/cluster/ha` and the HA
+  panel list the nodes, their versions and the action. The hold survives a
+  restart and a second failover. It ends when an admin releases it with `POST
+  /api/cluster/ha/publish-release` (audited; publishes this node's
+  configuration to the nodes that were ahead; needs `{"force": true}` while
+  the previous leader is still reachable). A failover in which no data plane
+  is ahead — the normal case — is not held and needs no action. Limits: the
+  previous leader's newer configuration is not adopted automatically yet, so
+  every hold needs that release; a promoted node whose clock is behind the old
+  leader's version counter cannot detect the condition; and a data plane build
+  that reports no version gets `Unavailable` during a hold. (ADR-0064;
+  contract `CLU-006`.)
+
 - **A restarted HA leader without a fencing lease no longer resumes leadership
   on its saved role alone.** If the standby had promoted while the leader was
   down, both led. The restarted node now resumes only when it has evidence: no

@@ -449,6 +449,12 @@ func (s *controlPlaneServer) GetConfigDelta(ctx context.Context, req json.RawMes
 	// new one is exposed, and a Data Plane would apply it without ratcheting.
 	// The stamp already carries the role-less floor (configEpochLocked).
 	cur, epoch := globalConfigStore.committedVersionEpoch()
+	// ADR-0064 part D: same rule as GetConfig — never roll a data plane back.
+	if keep, gerr := publishGateForDataPlane(gatePeerLabel(ctx), "get_config_delta", dreq.KnownVersion); gerr != nil {
+		return nil, gerr
+	} else if keep {
+		return json.Marshal(getConfigDeltaReply{Mode: "unchanged", TargetVersion: dreq.KnownVersion, Epoch: epoch})
+	}
 	if dreq.KnownVersion == cur {
 		// Idle-drift detection: if the DP reports a fingerprint for the current
 		// version that disagrees with ours, it has drifted (e.g. a half-applied

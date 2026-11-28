@@ -1,6 +1,8 @@
 # ADR-0064: HA restart authority (legacy) and the publication safety gate
 
-- **Status:** Proposed — design note recorded before implementation (owner decisions of 2026-11-28).
+- **Status:** Part C implemented. Part D implemented as the detection-and-hold safety net with operator
+  release; automatic reconciliation and replicate-before-distribute are NOT implemented — see
+  "Implementation record" at the end for what was decided, what was stopped and why.
 - **Builds on:** ADR-0004 (legacy HA), ADR-0005 (fencing lease; its commit semantics are NOT changed here),
   contract `CLU-004`. Composes with ADR-0063 (state authority, draft).
 - **Owner decisions (verbatim, abridged):** (C) "In legacy mode, a restarting leader must revalidate its
@@ -115,3 +117,57 @@ reconciled. Operator edits: refused during a hold. Old leader gone for good: ope
 - A data-plane whole-snapshot fingerprint and the epoch each version was committed under would let the
   gate verify adoption end to end instead of by version plus blocklist fingerprint.
 - A data-plane "serve my last-good snapshot" RPC would make *adopt from node X* possible.
+
+## Implementation record (2026-11-28)
+
+**Implemented.** Part C as designed (`ha_legacy_authority.go`, `ha_write_gate.go`, contract `CLU-005`).
+Part D: the gate (`ha_publish_gate.go`, contract `CLU-006`) with these refinements over the note above:
+
+- The unaccounted range is a list of **gaps**, one per promotion, `(watermark, first own version)`. The
+  first own version is recorded by the store at the promotion's first commit, not read afterwards, so a
+  data plane that fetched that commit is never misread as ahead.
+- **HASync stays served during a hold** and the bundle carries the gate. A standby keeps it and starts from
+  it when promoted, so a hold and every open gap survive a second failover. Refusing HASync would have made
+  the standby stale after 10 minutes and removed failover capacity exactly when the cluster is degraded.
+- **Operator release** (`POST /api/cluster/ha/publish-release`): shows the diff, is audited and idempotent,
+  publishes above every reported version (a data plane ignores a version not above its own), and is refused
+  with `ha_reconciliation_possible` while the previous leader is reachable unless `force` is set.
+
+**Limit of detection.** A gap exists only when the promotion's first version is more than one above the
+watermark, which the wall-clock seed normally guarantees. A promoted node whose clock is behind the old
+leader's version counter numbers its first version `watermark+1` and cannot tell an ahead data plane from
+its own; that case is undetected, as today.
+
+**Not implemented — automatic reconciliation (`HAPeerSnapshot`).** In lease mode the previous leader
+self-fences and resyncs from the new leader within one sync interval, overwriting the very state that would
+be adopted. Preserving it needs the demoted leader to refuse bundles that do not cover what it led through,
+the new leader to pull and adopt that state, and a rule for the case where the new leader has accepted
+edits of its own in the meantime. That is a protocol of its own; it was not started rather than half-built.
+Until it exists every hold ends by operator release.
+
+**Not implemented — replicate-before-distribute.** Evaluated, and stopped on two points that need an owner
+decision:
+
+1. *It moves an ADR-0005 invariant.* ADR-0005 advertises a new epoch only once a COMMITTED snapshot carries
+   it, because data planes ratchet to the epoch and reject snapshots stamped below it. If the leader
+   distributes an older, standby-acknowledged snapshot while the committed one carries a new epoch, data
+   planes are handed a snapshot stamped below the epoch they have just ratcheted to and reject it until the
+   standby catches up. The rule would have to become "…once a DISTRIBUTABLE snapshot carries it".
+2. *It is complete only if the standby's freshness window is tied to the leader's wait bound.* The leader
+   must stop waiting for a silent standby at some bound `T`, or one dead standby stalls all distribution.
+   After `T` it distributes current; a standby that is still eligible to promote (today: for 10 minutes)
+   can then take over without those versions. Prevention is complete only if a standby stops being
+   eligible before the leader stops waiting, i.e. the S4 freshness window drops from 10 minutes to below
+   `T`. With `T` = 10 minutes an urgent block is delayed up to 10 minutes whenever the standby is down;
+   with a short `T` the window must shrink to about a minute, which is a lease-path change and removes
+   automatic failover for standbys that lost contact slightly earlier. A standby that polls but refuses
+   bundles needs the same bound.
+
+   What it would buy: the common failure — the leader dies within one sync interval of a publish — would
+   leave no data plane ahead, so no hold and no operator. Costs: one extra retained snapshot (about one
+   marshalled snapshot at 2 M hosts), delta chains truncated at the acknowledged version, and distribution
+   latency of one sync interval unless the standby long-polls.
+
+**Possible future evidence (not built; adopting state from a data plane is a security-boundary change):**
+a whole-snapshot fingerprint and the commit epoch per version in the heartbeat; a data-plane RPC that
+serves its last-good snapshot.

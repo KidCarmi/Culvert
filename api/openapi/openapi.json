@@ -1272,11 +1272,23 @@
         "additionalProperties": true,
         "description": "High-availability status.",
         "properties": {
+          "authority": {
+            "description": "Present as \"revalidating\" while a restarted leader without a fencing lease has not established exclusive leadership; authority_reason and authority_action accompany it.",
+            "type": "string"
+          },
           "auto_promote_blocked": {
             "description": "Standby only. Empty when an automatic promotion would not be refused on synchronization grounds; otherwise the reason (no successful state sync yet in this standby stint, or the last one is older than the 10 minute freshness window). Evaluated on every read. Always empty when the node has no automatic failover path.",
             "type": "string"
           },
           "enabled": {
+            "type": "boolean"
+          },
+          "leadership_held": {
+            "description": "Whether this node holds HA leadership for leadership-dependent operations.",
+            "type": "boolean"
+          },
+          "publish_authorized": {
+            "description": "Whether this leader may distribute new configuration and accept configuration changes. False during a publication hold (publish_hold_reason and publish_gate describe it).",
             "type": "boolean"
           },
           "role": {
@@ -11197,6 +11209,68 @@
         "x-culvert-audit-event": "cluster.ha.promote",
         "x-culvert-danger-level": "high",
         "x-culvert-idempotency": "non-idempotent",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "admin",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
+    "/api/cluster/ha/publish-release": {
+      "post": {
+        "description": "Exception path. Accepts this control plane's configuration as authoritative and ends a publication hold: the data planes listed as ahead are then served it and roll back. Idempotent (a gate that is not held returns released=false). Refused with 409 `ha_reconciliation_possible` while the previous leader is reachable, unless the body sets `force`.",
+        "operationId": "releaseHAPublishHold",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": false,
+                "properties": {
+                  "force": {
+                    "description": "Release even though the previous leader is reachable.",
+                    "type": "boolean"
+                  }
+                },
+                "type": "object"
+              }
+            }
+          },
+          "required": false
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Release result."
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          },
+          "409": {
+            "$ref": "#/components/responses/PlainConflict"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Release a publication hold",
+        "tags": [
+          "cluster"
+        ],
+        "x-culvert-audit-event": "cluster.ha.publish_release",
+        "x-culvert-danger-level": "high",
+        "x-culvert-idempotency": "idempotent",
         "x-culvert-introduced-version": "1.0.0",
         "x-culvert-permission": "admin",
         "x-culvert-stability": "stable",

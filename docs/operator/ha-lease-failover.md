@@ -216,6 +216,27 @@ the standby is permanently gone, promote the restarted node (HA panel or
 `POST /api/cluster/ha/promote`); the response and the audit entry carry a
 warning, because nothing can show that the standby did not promote.
 
+## Publication hold after a failover
+
+A promoted control plane checks the configuration version every data plane
+reports. If one reports a version the promoted node never replicated (the old
+leader published it and failed before the standby synced), that data plane is
+left on its configuration and publication is **held**:
+
+- `GET /api/cluster/ha` shows `publish_authorized: false`, `publish_hold_reason`
+  and `publish_gate` with `watermark`, `first_own_version`, `ahead_nodes`
+  (node, version, epoch, blocklist fingerprint, source) and `action`.
+- Configuration changes return 503 `ha_write_hold`. Data planes that are not
+  ahead keep receiving this node's configuration. Leadership is unaffected.
+- To end it, compare the listed nodes with what this node holds, then `POST
+  /api/cluster/ha/publish-release`. The listed nodes are then given this
+  node's configuration (they lose what only they had). While the previous
+  leader still answers on the cluster port the call returns 409
+  `ha_reconciliation_possible`; bring that leader back as the leader instead,
+  or repeat with `{"force": true}`.
+
+A failover in which no data plane is ahead is not held.
+
 ## Break-glass
 
 - **Manual promotion** (UI button / `POST /api/cluster/ha/promote`) still
