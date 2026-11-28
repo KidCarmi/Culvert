@@ -355,6 +355,9 @@ func (s *controlPlaneServer) PushMetrics(ctx context.Context, raw json.RawMessag
 	nodeMetricsMu.Lock()
 	nodeMetrics[report.NodeID] = report
 	nodeMetricsMu.Unlock()
+	// ADR-0064 part D: the heartbeat is the authenticated, per-node statement
+	// of the version a data plane runs — the publication gate's best evidence.
+	publishGateDecide(report.NodeID, "heartbeat", report.ConfigVersion, report.Epoch, report.SyncedFP)
 
 	// Update heartbeat. M5 PR-B: carry the DP's reported build version so the
 	// cluster node list shows which culvert version each node is actually on.
@@ -868,6 +871,12 @@ type HAStateBundle struct {
 	// own term (ADR-0004 Slice 1c, Codex P2) and a promotion yields a strictly
 	// higher epoch — making the /healthz split-brain signal meaningful.
 	LeaderTerm uint64 `json:"leader_term,omitempty"`
+	// PublishGate is the leader's publication gate (ADR-0064 part D; nil: none).
+	// A standby keeps it and starts from it when promoted, so an open gap or a
+	// hold survives a second failover. HASync is served during a hold: refusing
+	// it would let the standby go stale and remove failover capacity exactly
+	// when the cluster is degraded.
+	PublishGate *publishGateState `json:"publish_gate,omitempty"`
 	// Epoch is the leader's fencing epoch (ADR-0005 S3; 0 = legacy mode).
 	// The PULLER verifies it against its own lease backend before importing
 	// (Finding 7 — a zombie leader serving stale state cannot be imported).
@@ -1121,10 +1130,10 @@ func (s *controlPlaneServer) HASync(ctx context.Context, raw json.RawMessage) (j
 
 	published := globalConfigStore.Get()
 	bundle := HAStateBundle{
-		ClusterState:     stateJSON,
-		CACertPEM:        string(globalClusterCA.CACertPEM()),
-		CAKeyEncrypted:   caKeyEncrypted,
-		Config:           published,
+		ClusterState:   stateJSON,
+		CACertPEM:      string(globalClusterCA.CACertPEM()),
+		CAKeyEncrypted: caKeyEncrypted,
+		Config:         published, PublishGate: publishGateForBundle(), // ADR-0064: the standby inherits the gate
 		Version:          published.Version,
 		PromoteRequested: globalHA.plannedPromotion.Load(),   // ADR-0004 Slice 1e: coordinated handoff
 		LeaderTerm:       globalHA.Status().Term,             // ADR-0004 Slice 1c/P2: seed standby epoch
@@ -1322,6 +1331,7 @@ func registerConfigService(srv grpc.ServiceRegistrar) {
 			{MethodName: "PushAuditEvents", Handler: gatedUnary("PushAuditEvents", svc.PushAuditEvents)},
 			{MethodName: "RenewCert", Handler: gatedUnary("RenewCert", svc.RenewCert)},
 			{MethodName: "HASync", Handler: gatedUnary("HASync", svc.HASync)},
+			{MethodName: "HAPeerSnapshot", Handler: gatedUnary("HAPeerSnapshot", svc.HAPeerSnapshot)},
 		},
 		Streams: []grpc.StreamDesc{},
 	}, nil)
@@ -1496,6 +1506,7 @@ var cpRPCPolicies = map[string]cpRPCPolicy{
 	"PushMetrics":     {true, "a standby accepting heartbeats would report DPs connected to a node that cannot manage them"},
 	"SyncRateLimits":  {true, "cluster rate-limit state must converge on the leader, not a standby"},
 	"PushAuditEvents": {true, "audit events accepted by a standby are not on the leader's record"},
+	"HAPeerSnapshot":  {false, "served by a DEMOTED leader to the leader that replaced it (HA-token authenticated; ADR-0064) — the node that answers is by construction not the leader"},
 	"HASync":          {true, "only the leader may serve replication bundles (the puller's epoch check is lease-mode only)"},
 	"Enroll":          {true, "issuance — additionally haIssuanceAllowed inside the handler (ADR-0005 S3)"},
 	"RenewCert":       {true, "issuance — additionally haIssuanceAllowed inside the handler (ADR-0005 S3)"},
@@ -1521,9 +1532,12 @@ func haServingAllowed() (ok bool, reason string) {
 // unclassified method fails CLOSED (gated): a new RPC is never served by a
 // standby by omission.
 func gatedUnary(method string, fn func(context.Context, json.RawMessage) (json.RawMessage, error)) func(any, context.Context, func(any) error, grpc.UnaryServerInterceptor) (any, error) {
-	inner := wrapUnary(fn)
+	inner := wrapUnary(publishGated(method, fn)) // ADR-0064: the gate in front of the config-serving handlers
 	p, classified := cpRPCPolicies[method]
 	leaderGated := !classified || p.leaderGated
+	if method == "HASync" {
+		return haSyncGatedUnary(fn)
+	}
 	return func(srv any, ctx context.Context, dec func(any) error, ic grpc.UnaryServerInterceptor) (any, error) {
 		// Lifecycle first, for EVERY method: a node that has not finished
 		// starting answers CULVERT_NODE_STARTING and nothing else, and a
@@ -1543,6 +1557,30 @@ func gatedUnary(method string, fn func(context.Context, json.RawMessage) (json.R
 	}
 }
 
+// haSyncGatedUnary is HASync's gated handler. It differs from the generic one
+// in ORDER only: the request is decoded first and shown to the legacy restart
+// revalidation (ADR-0064 part C), which may establish this node's leadership
+// from the standby's own poll, and only then is the leader gate evaluated — so
+// the poll that proves authority is itself answered.
+func haSyncGatedUnary(fn func(context.Context, json.RawMessage) (json.RawMessage, error)) func(any, context.Context, func(any) error, grpc.UnaryServerInterceptor) (any, error) {
+	return func(_ any, ctx context.Context, dec func(any) error, _ grpc.UnaryServerInterceptor) (any, error) {
+		// Lifecycle first, as for every method (gatedUnary): a starting node
+		// answers CULVERT_NODE_STARTING and nothing else.
+		if refusal := nodeServingRefusal("HASync"); refusal != nil {
+			return nil, refusal
+		}
+		var raw json.RawMessage
+		if err := dec(&raw); err != nil {
+			return nil, err
+		}
+		noteStandbyPollWhileRevalidating(raw)
+		if ok, reason := haServingAllowed(); !ok {
+			return nil, status.Errorf(codes.Unavailable, "HASync refused: %s", reason)
+		}
+		return fn(ctx, raw)
+	}
+}
+
 func wrapUnary(fn func(context.Context, json.RawMessage) (json.RawMessage, error)) func(any, context.Context, func(any) error, grpc.UnaryServerInterceptor) (any, error) {
 	return func(_ any, ctx context.Context, dec func(any) error, _ grpc.UnaryServerInterceptor) (any, error) {
 		var raw json.RawMessage
@@ -1551,4 +1589,13 @@ func wrapUnary(fn func(context.Context, json.RawMessage) (json.RawMessage, error
 		}
 		return fn(ctx, raw)
 	}
+}
+
+// gatePeerLabel names a config caller for the publication gate's diff: its
+// peer address (config requests carry no node ID).
+func gatePeerLabel(ctx context.Context) string {
+	if ip := peerSourceIP(ctx); ip != "" {
+		return "ip:" + ip
+	}
+	return "ip:unknown"
 }

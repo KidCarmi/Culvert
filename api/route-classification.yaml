@@ -803,6 +803,16 @@ routes:
     audit_expected: true
     danger_level: high
     documented: true
+  - route: "/api/cluster/ha/publish-release"
+    method: "POST"
+    handler: "apiClusterHAPublishRelease"
+    domain: "cluster"
+    visibility: admin-supported
+    min_role: "admin"
+    mutating: true
+    audit_expected: true
+    danger_level: high
+    documented: true
   - route: "/api/cluster/labels"
     method: "POST"
     handler: "apiClusterLabels"

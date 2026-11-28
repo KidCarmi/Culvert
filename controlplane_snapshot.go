@@ -504,7 +504,11 @@ type ConfigStore struct {
 	// (CHAOS-01). Armed by armVersionPersistence at CP activation; empty in
 	// DP-only processes and in tests that build a bare ConfigStore.
 	versionPath string
-	subs        []chan struct{}
+	// markNext / markedVersion record the version of the first commit after
+	// markNextCommit (ADR-0064: where a promoted node's own versions begin).
+	markNext      bool
+	markedVersion int64
+	subs          []chan struct{}
 	// lastPublishErr records the reason the most recent Update was REJECTED at
 	// commit (P1 commit-time validation) — an over-cap snapshot is not published,
 	// so the fleet stays on the last valid config instead of every DP silently
@@ -911,6 +915,9 @@ func (s *ConfigStore) commitLocked(kind publishKind, snap ConfigSnapshot) config
 	// counter and the committed snapshot's own version (a replicated leader
 	// snapshot is folded in by seedReplicatedSnapshot; the max is the backstop).
 	s.version = max(s.version, s.snap.Version) + 1
+	if s.markNext {
+		s.markNext, s.markedVersion = false, s.version // ADR-0064: a promotion's first own version
+	}
 	snap.Version = s.version
 	snap.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
 	c.newHosts = snap.BlockedHosts
@@ -1370,7 +1377,10 @@ func publishCurrentConfigSnapshot() error {
 	// (ha_authority.go). Publication AUTHORIZATION — whether what is committed
 	// may be served to the fleet — is a separate question, asked where a
 	// snapshot is handed out (nodeServingRefusal).
-	if !nodeLeadershipHeld() {
+	// A promotion in flight is the one publisher that does not hold leadership
+	// YET: ADR-0005 requires its activation publish to commit, carrying the new
+	// epoch, before the role is taken (ha_epoch_commit.go).
+	if !nodeLeadershipHeld() && !haPromotionCommitting() {
 		return globalConfigStore.rejectPublish(publishFull, errPublishWithoutLeadership)
 	}
 	return globalConfigStore.UpdateFrom(CurrentConfigSnapshot)
@@ -2276,4 +2286,30 @@ func buildCPAddressList() []string {
 		return nil // no HA = no address list needed (clusterRoleMu deliberately not touched)
 	}
 	return cpAddressListFor(true, haStatus.PeerAddr, clusterRoleSnapshot().grpcAddr)
+}
+
+// markNextCommit asks the store to remember the version of its next commit.
+func (s *ConfigStore) markNextCommit() {
+	s.mu.Lock()
+	s.markNext, s.markedVersion = true, 0
+	s.mu.Unlock()
+}
+
+// markedCommitVersion returns the version recorded since markNextCommit (0:
+// nothing committed since) and disarms the mark.
+func (s *ConfigStore) markedCommitVersion() int64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.markNext = false
+	return s.markedVersion
+}
+
+// raiseVersionAtLeast lifts the version counter to v (never lowers it), so the
+// next commit is above v. The floor is persisted by that commit.
+func (s *ConfigStore) raiseVersionAtLeast(v int64) {
+	s.mu.Lock()
+	if v > s.version {
+		s.version = v
+	}
+	s.mu.Unlock()
 }

@@ -22,14 +22,19 @@ package main
 // legacy restart revalidation and publication gate), which extends
 // haLeaderAnswerOf.
 
-import "time"
+import (
+	"time"
+
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+)
 
 // haLeaderAnswer classifies what a sync round proved about the leader.
 type haLeaderAnswer int
 
 const (
 	haNoAnswer         haLeaderAnswer = iota // nothing: transport failure or an unclassified refusal
-	haAnsweredReply                          // a bundle came back (applied or not)
+	haAnsweredReply                          // a bundle came back (applied or not), or the leader rejected our token
 	haAnsweredStarting                       // "I am starting" — alive, bounded by haStartingGrace
 	haAnsweredHolding                        // "publication not authorized" — a live leader deliberately holding
 )
@@ -55,6 +60,9 @@ func haLeaderAnswerOf(err error) haLeaderAnswer {
 		return haAnsweredStarting
 	case isCPPublishNotAuthorizedStatus(err):
 		return haAnsweredHolding
+	case status.Code(err) == codes.PermissionDenied:
+		// ADR-0064: only a serving leader evaluates the HA token.
+		return haAnsweredReply
 	}
 	return haNoAnswer
 }

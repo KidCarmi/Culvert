@@ -1,29 +1,78 @@
 package main
 
-// ha_authority.go — leadership and publication authority, as two SEPARATE
-// questions (node_lifecycle.go lists the consumers).
-//
-// THIS FILE IS A STUB. Both functions answer what the code did before they
-// existed, so introducing the call sites changes no behaviour. The HA
-// authority change (ADR 0064) replaces this file with the real answers: the
-// lease or the legacy restart revalidation for leadership, and the
-// publication safety gate for publishing. Keep every consumer on these two
-// functions; do not re-derive either answer anywhere else.
+import "sync/atomic"
 
-// haLeadershipHeld reports whether this node holds the authority that
-// leadership-dependent operations need: publishing a snapshot, a distributed
-// admin mutation, a cluster-CA rotation, serving as the HA leader.
+// ha_authority.go — leadership and publication authority, as SEPARATE
+// questions (ADR-0064; node_lifecycle.go lists the consumers). Keep every
+// consumer on these functions; do not re-derive an answer anywhere else.
 //
-// Stub: true. Today none of those paths asks an authority question beyond the
-// checks they already make themselves (haServingAllowed, haIssuanceAllowed),
-// which stay in place.
-func haLeadershipHeld() bool { return true }
+//	haLeadershipHeld       the lease (lease mode) or the legacy restart
+//	                       revalidation (ha_legacy_authority.go)
+//	haPublishAuthorized    the publication safety gate (ha_publish_gate.go)
+//	haDistributionRefused  the narrow case in which nothing at all may be
+//	                       handed out: a leader role without the lease
 
-// haPublishAuthorized reports whether this node may distribute a
-// configuration snapshot to data planes and standbys, with the reason when it
-// may not. It is NOT implied by leadership: a node can lead and still be
-// refused publication.
+// haLeadershipHeld reports whether this node holds HA leadership for
+// leadership-dependent operations: the leader role, and in lease mode the
+// fence. A standalone (HA off) control plane holds it trivially. It is one of
+// the two predicates the node-lifecycle surface reads (ADR-0064); the other is
+// haPublishAuthorized.
+func haLeadershipHeld() bool {
+	if _, gated := globalHA.intentGate(); gated {
+		return false
+	}
+	st := globalHA.Status()
+	if !st.Enabled {
+		return true
+	}
+	return st.Role == "leader" && globalHA.WriteAllowed()
+}
+
+// haPublishAuthorized is the ONE publishing-authorization predicate (ADR-0064):
+// leadership is haLeadershipHeld; this is whether a leader may distribute new
+// content and accept configuration changes. The state-authority contract's declared-emptying check
+// is to be consulted here as well, not in a second gate.
+func haPublishAuthorized() (ok bool, reason string) {
+	if reason, refused := haDistributionRefused(); refused {
+		return false, reason
+	}
+	if !publishGateApplies() {
+		return true, ""
+	}
+	publishGate.mu.Lock()
+	defer publishGate.mu.Unlock()
+	loadPublishGateLocked()
+	if publishGate.st.Armed && publishGate.st.Held {
+		return false, publishGate.st.HoldReason
+	}
+	return true, ""
+}
+
+// haDistributionRefused reports whether this node must hand out NO
+// configuration at all — to data planes or to a standby. That is narrower than
+// "not publish-authorized": during a publication hold the gate answers each
+// data plane itself (consistent ones are served, ahead ones keep their state)
+// and HASync stays served. Here the node has no authority to distribute
+// anything: it holds the leader ROLE without the fencing lease (a resume the
+// lease denied, with no standby to join — the ADR-0005 S2 stance). The lease
+// is the authority, so a node without it is a stale leader as far as anyone
+// else can tell, and its configuration must not reach the fleet. Data planes
+// keep their last-good configuration, as on any failed poll.
 //
-// Stub: authorized. Today a ready, leader-gated node serves its committed
-// snapshot.
-func haPublishAuthorized() (ok bool, reason string) { return true, "" }
+// The listener's blanket CULVERT_PUBLISH_NOT_AUTHORIZED refusal keys on THIS
+// predicate, not on haPublishAuthorized.
+func haDistributionRefused() (reason string, refused bool) {
+	if globalHA.unfencedLeader() {
+		return "this node holds the HA leader role without the fencing lease, so it is not authorized to distribute configuration", true
+	}
+	return "", false
+}
+
+// haPromotionsInFlight counts promote() calls between their start and their
+// end (beginPublishGateArming / armIfPromoted).
+var haPromotionsInFlight atomic.Int32
+
+// haPromotionCommitting reports whether a promotion of this node is in flight.
+// Its activation publish must commit before leadership is exposed (ADR-0005),
+// so it is the one publish made without haLeadershipHeld.
+func haPromotionCommitting() bool { return haPromotionsInFlight.Load() > 0 }

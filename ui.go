@@ -135,7 +135,7 @@ func newAdminUIHandler() http.Handler { //nolint:funlen // route registration; e
 	// ADMIN-plane panic backstop (outermost). The admin chain never hijacks, so a
 	// clean 500 is valid when nothing was committed; trackedRW preserves
 	// ResponseController + SSE Flusher. Registers no route (C1/D0 unaffected).
-	return withAdminPanicRecovery(uiIPGuardMiddleware(securityMiddleware(uiAuthMiddleware(uiMetadataEnforcement(mux)))))
+	return withAdminPanicRecovery(uiIPGuardMiddleware(securityMiddleware(uiAuthMiddleware(haWriteGateMiddleware(uiMetadataEnforcement(mux))))))
 }
 
 func newAdminUIServer(port int) *http.Server {

@@ -16,8 +16,13 @@ package main
 // in ha_failover_sync_eligibility_test.go.
 
 import (
+	"context"
+	"encoding/json"
 	"testing"
 	"time"
+
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
 	"github.com/KidCarmi/Culvert/internal/halease"
 )
@@ -25,7 +30,7 @@ import (
 func eligSyncAlertLatched(h *HAState) bool {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
-	return h.syncPanicAlerted
+	return h.syncRefusedAlerted
 }
 
 // The exact sequence: good sync at T, then the live leader serves a bundle the
@@ -59,7 +64,7 @@ func TestLegacyAutoFailover_LiveLeaderRefusedBundleNeverPromotes(t *testing.T) {
 		t.Errorf("sync_fail_count = %v, want 0: an answered round is not a step toward the unreachable threshold", n)
 	}
 	if !eligSyncAlertLatched(p.h) {
-		t.Error("the stalled replication must page (ha_sync_panic latch)")
+		t.Error("the stalled replication must page (its own fire-once latch)")
 	}
 	diag := diagnoseClusterFrom(clusterInputs{haStatus: p.h.Status()}, time.Now())
 	if diag.OK || diag.Detail == "" {
@@ -153,5 +158,47 @@ func TestLeaseMode_AnsweredButRejectedRoundsStillCountTowardFailover(t *testing.
 	}
 	if !p.s.guardedTick() || !p.h.IsLeader() {
 		t.Fatal("lease mode: a standby must still replace a leader that answers without the fence")
+	}
+}
+
+// A refusal and a panic are different faults with separate fire-once latches:
+// one must not swallow the other's alert.
+func TestLegacyAutoFailover_RefusalDoesNotSwallowALaterPanicAlert(t *testing.T) {
+	resetCrashGuardStateForTest()
+	t.Cleanup(resetCrashGuardStateForTest)
+	p := newEligPair(t)
+	p.leader.serve(p.refused)
+	p.s.guardedSyncOnce()
+	p.h.mu.RLock()
+	refused, panicked := p.h.syncRefusedAlerted, p.h.syncPanicAlerted
+	p.h.mu.RUnlock()
+	if !refused || panicked {
+		t.Fatalf("after a refused round: refused latch=%v panic latch=%v, want true/false", refused, panicked)
+	}
+	p.s.syncFn = func() bool { panic("apply-path fault after the refusal") }
+	p.s.guardedTick()
+	p.h.mu.RLock()
+	panicked = p.h.syncPanicAlerted
+	p.h.mu.RUnlock()
+	if !panicked {
+		t.Fatal("a panic after a refusal fired no alert: the refusal's latch swallowed it")
+	}
+}
+
+// A leader that rejects the HA token is definitely alive: an answered round.
+func TestLegacyAutoFailover_TokenRejectedByLiveLeaderIsAnAnsweredRound(t *testing.T) {
+	p := newEligPair(t)
+	p.leader.serve(p.good)
+	p.s.guardedSyncOnce()
+	p.s.client = &DataPlaneClient{callForTest: func(context.Context, string, json.RawMessage) (json.RawMessage, error) {
+		return nil, status.Error(codes.PermissionDenied, "invalid HA token")
+	}}
+	for i := 0; i < haStandbyMaxFail*2; i++ {
+		if p.s.guardedTick() || p.h.IsLeader() {
+			t.Fatalf("round %d: promoted against a leader that answered PermissionDenied", i)
+		}
+	}
+	if got := p.h.Status().SyncRefused; got != haStandbyMaxFail*2 {
+		t.Errorf("sync_refused = %d, want %d", got, haStandbyMaxFail*2)
 	}
 }

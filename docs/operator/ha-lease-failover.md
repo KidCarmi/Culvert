@@ -125,15 +125,19 @@ The TTL is the **failover-latency ↔ tolerance trade**:
     standby stays read-only until an operator promotes it manually. Either
     way, reaching 3/3 means "stop waiting and try", not "leadership taken".
   - `last_sync_ok` — RFC3339 timestamp of the last successful sync apply.
-  - `sync_refused` — consecutive rounds in which the leader **answered** but
-    this standby did not apply its bundle (refused, or failed while applying).
+  - `sync_refused` — rounds since the last successful sync (or since the node
+    entered standby) in which the leader **answered** but this standby did
+    not apply its bundle (refused, or failed while applying). Rounds the
+    leader did not answer neither add to it nor reset it; it is always 0 in
+    lease mode.
     The leader is up and replication is stalled; the log line before `HA: the
     leader … answered but its state bundle was NOT applied` names the refusal.
     In legacy mode these rounds do not count toward `sync_fail_count` and
     restart it, so the standby never promotes against a leader that is
     answering; the `ha_sync_panic` alert fires once. In lease mode they still
-    count (the lease decides). A leader that answers with an RPC error, such
-    as a rejected HA token, is counted as unreachable in both modes.
+    count (the lease decides). A leader that rejects the HA token, or says it
+    is still starting, also counts as having answered; any other RPC error is
+    counted as unreachable.
   - `auto_promote_blocked` — empty when an automatic promotion would not be
     refused on synchronization grounds; otherwise the reason (`no successful
     state sync yet …`, or `last state sync … ago exceeds the 10m0s freshness
@@ -201,6 +205,48 @@ The TTL is the **failover-latency ↔ tolerance trade**:
   re-enters standby against it.
 - **Standby also down during failover** — nothing promotes; the lease sits
   expired until a node returns and acquires it.
+
+## Restarting a leader in legacy mode (no lease)
+
+A leader that restarts does not resume on its saved role. It resumes when its
+standby polls it (within one ~5 s sync interval of the standby seeing it
+again), or at once when no standby ever synced from it. If the standby
+promoted meanwhile, the restarted node joins it as standby by itself. Until
+one of these happens `GET /api/cluster/ha` reports `authority: revalidating`
+with `authority_reason` and `authority_action`, `/healthz` is 503, cluster
+RPCs that need a leader and admin configuration changes are refused (503
+`ha_write_hold`), and the proxy keeps enforcing its last configuration. If
+the standby is permanently gone, promote the restarted node (HA panel or
+`POST /api/cluster/ha/promote`); the response and the audit entry carry a
+warning, because nothing can show that the standby did not promote.
+
+## Publication hold after a failover
+
+A promoted control plane checks the configuration version every data plane
+reports. If one reports a version the promoted node never replicated (the old
+leader published it and failed before the standby synced), that data plane is
+left on its configuration and publication is **held**:
+
+- `GET /api/cluster/ha` shows `publish_authorized: false`, `publish_hold_reason`
+  and `publish_gate` with `watermark`, `first_own_version`, `ahead_nodes`
+  (node, version, epoch, blocklist fingerprint, source) and `action`.
+- Configuration changes return 503 `ha_write_hold`. Data planes that are not
+  ahead keep receiving this node's configuration. Leadership is unaffected.
+- It usually ends without you: the demoted leader kept a copy of what it had
+  committed (`ha_preserved_snapshot.json` in its data directory), and this
+  node fetches, validates and adopts it, then publishes and releases the hold
+  (audit action `cluster.ha-auto-reconcile`). `publish_gate.reconcile_note`
+  says why an attempt did not: the old leader is unreachable, both leaders
+  changed configuration, the copy is older than what a node reports, or it
+  failed validation. Attempts repeat every 15 seconds.
+- If it cannot end that way, compare the listed nodes with what this node
+  holds, then `POST /api/cluster/ha/publish-release`. The listed nodes are then given this
+  node's configuration (they lose what only they had). While the previous
+  leader still answers on the cluster port the call returns 409
+  `ha_reconciliation_possible`; bring that leader back as the leader instead,
+  or repeat with `{"force": true}`.
+
+A failover in which no data plane is ahead is not held.
 
 ## Break-glass
 

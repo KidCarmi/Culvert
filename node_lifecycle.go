@@ -210,6 +210,13 @@ func cpStartingStatusFields(err error) (phase string, elapsedSeconds int64, ok b
 var (
 	nodeLeadershipHeld    = haLeadershipHeld
 	nodePublishAuthorized = haPublishAuthorized
+	// nodeDistributionRefused decides the BLANKET refusal of the
+	// snapshot-serving RPCs. It is narrower than "not publish-authorized": during
+	// a publication hold (ADR-0064) the gate answers each data plane itself —
+	// consistent ones are served, ahead ones keep their state — and HASync stays
+	// served so the standby stays eligible and inherits the hold. Refusing
+	// everything on haPublishAuthorized would freeze consistent data planes.
+	nodeDistributionRefused = haDistributionRefused
 )
 
 // cpSnapshotServingMethods are the RPCs that hand a peer a configuration
@@ -223,7 +230,7 @@ func nodeServingRefusal(method string) error {
 		return cpStartingStatus(method)
 	}
 	if cpSnapshotServingMethods[method] {
-		if ok, reason := nodePublishAuthorized(); !ok {
+		if reason, refused := nodeDistributionRefused(); refused {
 			return cpPublishNotAuthorizedStatus(method, reason)
 		}
 	}

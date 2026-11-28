@@ -177,12 +177,18 @@ type HAState struct {
 	syncPanics       int
 	syncPanicAlerted bool
 
-	// syncRefused counts CONSECUTIVE standby sync rounds in which the leader
-	// answered but its bundle was not applied (refused or failed in the apply
-	// path). Like a contained panic, such a round is this node's fault, not
-	// evidence that the leader is gone; in legacy mode it is kept out of the
-	// failure streak (noteRefusedRound). Reset by the next successful sync.
-	syncRefused int
+	// syncRefused counts the standby sync rounds SINCE THE LAST SUCCESSFUL SYNC
+	// (or since this node entered standby) in which the leader answered but
+	// its bundle was not applied (refused or failed in the apply path). Rounds
+	// the leader did not answer neither add to it nor reset it. Counted in
+	// legacy mode only (noteRefusedRound); always 0 with a fencing lease, where
+	// such a round is an ordinary failed round. Like a contained panic, the
+	// round is this node's fault, not evidence that the leader is gone.
+	// syncRefusedAlerted is its own fire-once latch, re-armed by the next
+	// successful sync: sharing the panic latch would let a refusal swallow the
+	// alert of a later panic, and the other way round.
+	syncRefusedAlerted bool
+	syncRefused        int
 
 	// testResumeUnreachableWait / testResumeRetryBackoff shorten THIS
 	// instance's resume-acquire budget for an unreachable fencing backend
@@ -221,8 +227,9 @@ type HAStatus struct {
 	SyncFailCount int    `json:"sync_fail_count,omitempty"` // standby-side: consecutive HASync failures since last success
 	LastSyncOK    string `json:"last_sync_ok,omitempty"`    // standby-side: RFC3339 of the last successful HASync apply
 	SyncPanics    int    `json:"sync_panics,omitempty"`     // standby-side: sync rounds contained by the panic guard (CHAOS-25)
-	// SyncRefused is the standby-side count of consecutive sync rounds in which
-	// the leader answered but its bundle was not applied; 0 after a success.
+	// SyncRefused is the standby-side number of sync rounds since the last
+	// successful sync in which the leader answered but its bundle was not
+	// applied. Legacy mode only; always 0 with a fencing lease.
 	SyncRefused int `json:"sync_refused,omitempty"`
 	// AutoPromoteBlocked is the standby-side reason an AUTOMATIC promotion
 	// would be refused right now on synchronization grounds (never synced, or
@@ -680,6 +687,9 @@ func (h *HAState) StartAsStandbyWithUndo(ctx context.Context, leaderAddr, token 
 	// passing the check guarantees this Add happens-before it.
 	h.wg.Add(1)
 	h.mu.Unlock()
+	if h == haTopologySource() {
+		disarmPublishGate() // outside h.mu: the bounds described a leadership that is over
+	}
 	h.republishTopology()
 
 	// Persist HA config so standby restarts know HA is enabled.
@@ -829,6 +839,7 @@ func (h *HAState) notePanicRound(leaderAddr string) {
 func (h *HAState) clearSyncPanicAlert() {
 	h.mu.Lock()
 	h.syncPanicAlerted = false
+	h.syncRefusedAlerted = false
 	h.syncRefused = 0
 	h.mu.Unlock()
 }
@@ -844,11 +855,11 @@ func (h *HAState) noteRefusedRound(leaderAddr string) {
 	h.mu.Lock()
 	h.syncRefused++
 	n := h.syncRefused
-	first := !h.syncPanicAlerted
-	h.syncPanicAlerted = true
+	first := !h.syncRefusedAlerted
+	h.syncRefusedAlerted = true
 	h.mu.Unlock()
 
-	logger.Printf("HA: the leader %q answered but its state bundle was NOT applied (consecutive_rounds=%d) — "+
+	logger.Printf("HA: the leader %q answered but its state bundle was NOT applied (rounds_since_last_sync=%d) — "+
 		"state replication is stalled although the leader is reachable. This round does not count toward "+
 		"the leader-unreachable threshold, so this node will not auto-promote against a live leader. See the "+
 		"preceding line for the refusal; fix it on the leader (or upgrade this standby) to resume replication.",
@@ -905,7 +916,13 @@ func (s *standbyLoopState) countSyncFailure() bool {
 // haStartingGrace, and such answers count as failures again. It also starts
 // the clock on the first one.
 func (s *standbyLoopState) startingGraceOver(answer haLeaderAnswer) bool {
-	if answer != haAnsweredStarting {
+	// A HOLDING answer (CULVERT_PUBLISH_NOT_AUTHORIZED) shares the grace and
+	// its clock (ADR-0064). The only node that sends it holds the leader role
+	// WITHOUT the fencing lease — as far as anyone else can tell, a stale
+	// leader. A legacy standby must not treat that as proof of a live,
+	// authoritative leader for ever: it would never fail over. Lease-mode
+	// standbys never reach here (every failed round counts; Acquire decides).
+	if answer != haAnsweredStarting && answer != haAnsweredHolding {
 		return false
 	}
 	if s.startingSince.IsZero() {
@@ -1092,12 +1109,17 @@ func (h *HAState) warnManualFailoverRequired(leaderAddr string) {
 func (h *HAState) syncFromLeader(ctx context.Context, client *DataPlaneClient, token string) (applied bool, leaderAnswered haLeaderAnswer) {
 	// ADR-0005 S0: advertise this standby's own address so the leader can record
 	// it as the failback target (the topology otherwise never tells the leader).
-	reqBytes, _ := json.Marshal(map[string]string{"token": token, "standby_addr": h.advertiseAddr()})
+	// role/term (ADR-0064 part C): the poll is this node's own statement that it
+	// is a standby, which a restarting legacy leader needs before it resumes.
+	reqBytes, _ := json.Marshal(map[string]any{
+		"token": token, "standby_addr": h.advertiseAddr(), "role": "standby", "term": h.Status().Term,
+	})
 	raw, err := client.call(ctx, methodHASync, json.RawMessage(reqBytes))
 	if err != nil {
 		logger.Printf("HA: HASync RPC error: %v", err)
-		// A leader that says it is STARTING answered: it is alive, which is
-		// the opposite of evidence that it is gone (ADR-0065).
+		// A leader that says it is STARTING answered (ADR-0065); so did one
+		// that holds publication or rejects this node's token (ADR-0064): it
+		// is alive, which is the opposite of evidence that it is gone.
 		return false, haLeaderAnswerOf(err)
 	}
 	// Record the HA bundle size so the NEXT HASync poll's deadline scales with
@@ -1121,6 +1143,9 @@ func (h *HAState) syncFromLeader(ctx context.Context, client *DataPlaneClient, t
 	ok := applyHABundle(&bundle, token)
 	if ok {
 		h.markSyncOK() // ADR-0005 S4: freshness-gate input
+		if h == haTopologySource() {
+			setInheritedPublishGate(bundle.PublishGate) // ADR-0064 part D
+		}
 		// Seed the standby's epoch from the leader's term (ADR-0004 Slice 1c/1e,
 		// Codex P2): without this a standby starts at term 0, so its first
 		// promotion reports term 1 — identical to the original leader's term 1,
@@ -1279,6 +1304,7 @@ func (h *HAState) promote(reason string) {
 		logger.Printf("HA: promote (%s) requested but no promote context available — ignoring", reason)
 		return
 	}
+	defer h.beginPublishGateArming().armIfPromoted(h) // ADR-0064 part D: where this node's own versions begin
 
 	// ADR-0005 S2: every path to leadership goes through the fence. Denied
 	// or transport-unknown ⇒ no promotion. A grant whose onPromote then
@@ -1757,6 +1783,7 @@ func apiClusterHA(w http.ResponseWriter, r *http.Request) {
 		// -ha-etcd-endpoints wiring; the endpoints themselves are startup
 		// config — read-once, restart-scoped — so the panel shows STATUS).
 		addLeaseHealth(resp, globalHA)
+		addAuthorityStatus(resp)
 		// M5: recent role-transition history (promotions + self-fences), newest
 		// first. Raw facts for the HA panel; empty when nothing has transitioned.
 		resp["failover_events"] = globalHAFailoverRing.Load().list()
@@ -1889,6 +1916,10 @@ func apiClusterHAPromote(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !requireRole(w, r, RoleAdmin) {
+		return
+	}
+	if globalHA.legacyRevalidationPending() {
+		apiAssertLegacyLeadership(w, r)
 		return
 	}
 	// Read BEFORE promoting: once this node is leader the sync state it was

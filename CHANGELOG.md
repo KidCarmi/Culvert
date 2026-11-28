@@ -61,6 +61,66 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Security
 
+- **A control plane that holds the leader role without the fencing lease no
+  longer serves configuration.** A restarted leader that the lease refused,
+  with no standby to rejoin, kept the leader role read-only but still answered
+  config polls and standby syncs. The lease is the authority: such a node now
+  answers `GetConfig`, `GetConfigDelta` and `HASync` with `Unavailable`
+  (`CULVERT_PUBLISH_NOT_AUTHORIZED`), and data planes keep their last applied
+  configuration, as on any failed poll. A data plane that has never received a
+  configuration cannot get its first one from such a node.
+- **A promoted HA control plane no longer rolls data planes back.** A standby
+  that takes over numbers its configuration above everything the old leader
+  issued. A data plane that had applied a version the standby never received
+  was therefore handed older configuration as if it were newer. The promoted
+  node now compares the version each data plane reports (on every config poll
+  and heartbeat) with what it replicated. A data plane that is ahead is told
+  "unchanged" and keeps its configuration. **Operator-visible effect:** such a
+  failover enters a *publication hold*: configuration changes return 503
+  `ha_write_hold`, data planes that are not ahead keep being served, the
+  `ha_resume_unfenced` alert fires once, and `GET /api/cluster/ha` and the HA
+  panel list the nodes, their versions and the action. The hold survives a
+  restart and a second failover. It normally ends by itself: a leader that is demoted
+  keeps a copy of the configuration it had committed, the new leader fetches
+  it over the cluster channel, and — if it covers everything the data planes
+  report, the new leader has made no configuration change of its own since it
+  took over, and it passes the usual validation — adopts it, publishes it as a
+  new version and releases the hold (audit action `cluster.ha-auto-reconcile`).
+  When that is not possible (`reconcile_note` in the status says why: the old
+  leader is gone, both sides changed configuration, the copy is too old) an
+  admin ends the hold with `POST /api/cluster/ha/publish-release` (audited;
+  publishes this node's configuration to the nodes that were ahead; needs
+  `{"force": true}` while the previous leader is still reachable).
+  Configuration changes are refused during a hold on purpose: a change made
+  then would turn a recoverable state into a conflict. A failover in which no data plane
+  is ahead — the normal case — is not held and needs no action. Limits: when the
+  previous leader failed for good before it could be demoted, its newer
+  configuration exists only on the data planes that applied it, is never taken
+  from them, and the hold needs the release; an older control-plane build has
+  no copy to offer; and a data plane build that reports no version gets
+  `Unavailable` during a hold. The React UI does not show the hold yet (the
+  legacy HA panel does). (ADR-0064;
+  contract `CLU-009`.)
+
+- **A restarted HA leader without a fencing lease no longer resumes leadership
+  on its saved role alone.** If the standby had promoted while the leader was
+  down, both led. The restarted node now resumes only when it has evidence: no
+  standby ever synced from it, or its standby polls it (the poll is answered,
+  so it does not count toward the standby's failover). If the peer answers as
+  leader of a later term the node joins it as standby by itself. A peer that
+  merely cannot be reached proves nothing. **Operator-visible effect:** until
+  then the node holds no HA role — `/healthz` is 503, leader-gated cluster
+  RPCs and certificate issuance are refused, and admin changes to distributed
+  configuration return 503 `ha_write_hold` with the reason — while the proxy
+  keeps enforcing its last configuration and the admin UI, logs and
+  diagnostics stay readable. `GET /api/cluster/ha` shows `authority:
+  revalidating` and the recovery action; `ha_resume_unfenced` fires once. A
+  leader that restarts while its standby is permanently gone needs one
+  operator action: promote it (HA panel or `POST /api/cluster/ha/promote`),
+  which is audited with a warning. Lease mode is unchanged. Remaining limit: a
+  standby whose polls reach the leader while every reply is lost can still
+  promote (only a fencing lease closes that). (ADR-0064; contract `CLU-008`.)
+
 - **A restarting control plane no longer hands data planes an empty
   configuration, and a restarting data plane no longer loses the control
   plane's state.** Cluster start-up ran before the node's configuration stores
@@ -159,9 +219,9 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   applied`, fires the `ha_sync_panic` ("HA standby sync fault") alert once,
   reports `sync_refused` on `GET /api/cluster/ha` and the HA panel, and the
   cluster diagnosis turns unhealthy. Replication stays stalled until the
-  refusal is fixed. Lease mode is unchanged. Limit: a leader that answers with
-  an RPC error (for example a rejected HA token) is still treated as
-  unreachable.
+  refusal is fixed. Lease mode is unchanged. A leader that rejects the HA token, or reports
+  that it is still starting, also counts as answering; any other RPC error is
+  still treated as unreachable.
 - **A demoted HA leader no longer re-promotes itself on state it synced before
   it led (lease mode).** A node that synced as a standby, was promoted, then
   lost the fencing lease and re-entered standby against the new leader kept

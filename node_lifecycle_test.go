@@ -236,9 +236,12 @@ func TestNodeLifecycle_RealServerServesNothingUntilReady(t *testing.T) {
 	}
 	suWantLoadedConfig(t, "once ready", snap)
 
-	prev := nodePublishAuthorized
-	nodePublishAuthorized = func() (bool, string) { return false, "the publication safety gate is closed" }
-	t.Cleanup(func() { nodePublishAuthorized = prev })
+	// The blanket refusal keys on haDistributionRefused (a leader role without
+	// the lease), not on haPublishAuthorized: during a publication hold the
+	// gate answers each data plane itself (ADR-0064).
+	prev := nodeDistributionRefused
+	nodeDistributionRefused = func() (string, bool) { return "this node holds the leader role without the fencing lease", true }
+	t.Cleanup(func() { nodeDistributionRefused = prev })
 	for m := range cpSnapshotServingMethods {
 		if _, err := nlCall(t, addr, m); !isCPPublishNotAuthorizedStatus(err) {
 			t.Errorf("%s with publication not authorized answered %v, want %s", m, err, cpPublishRefusedMarker)

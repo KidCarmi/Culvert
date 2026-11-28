@@ -261,6 +261,12 @@ func TestChaos71_CPAddrRepublish_PromotionRepublishesTheCommittedAddressList(t *
 	cpWithGlobalHARole(t, "standby", deadLeader)
 
 	addr := fmt.Sprintf("127.0.0.1:%d", cpFreePort(t))
+	// This drives the activation that promote() runs as onPromote, without
+	// promote() itself. A standby publishes only inside a promotion in flight
+	// (ADR-0064: publishing needs leadership, and ADR-0005 makes the
+	// promotion's own commit the exception), so say that one is.
+	haPromotionsInFlight.Add(1)
+	t.Cleanup(func() { haPromotionsInFlight.Add(-1) })
 	done := make(chan error, 1)
 	go func() { done <- enableControlPlane(addr, "", "", "", clusterDB) }()
 	select {

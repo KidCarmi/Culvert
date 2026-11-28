@@ -162,8 +162,8 @@ decision, for the same reason, as the CHAOS-25 contained-panic round, and the sa
 `ha_sync_panic` alert, plus `sync_refused` on the HA status and a failing cluster diagnosis.
 **Lease mode is unchanged and still counts every failed round**: a leader that answers after losing the
 fence is the one a standby must replace, and `Acquire` arbitrates. Limit: only a returned reply counts
-as an answer; a leader that answers with a gRPC status (for example a rejected token) is still counted
-as unreachable.
+as an answer, plus (ADR-0064) a `PermissionDenied` and the leader's "starting" refusal; any other gRPC
+status is still counted as unreachable.
 
 **Known limit — very large bundles.** Staleness is measured when the threshold is reached, not when the
 outage began. The HASync deadline scales with the last bundle size up to 300 s, so against a leader
