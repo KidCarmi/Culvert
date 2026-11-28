@@ -143,7 +143,7 @@ var haFetchPeerSnapshot = func(ctx context.Context) (*haPreservedSnapshot, error
 	token, rc := h.token, h.resync
 	addrs := []string{h.standbyAddr, h.peerAddr}
 	h.mu.RUnlock()
-	var lastErr error = fmt.Errorf("no previous-leader address is known")
+	lastErr := fmt.Errorf("no previous-leader address is known")
 	for _, addr := range addrs {
 		if addr == "" {
 			continue
@@ -220,7 +220,7 @@ func reconcileRefusal(st *publishGateState, rec *haPreservedSnapshot, ourTerm ui
 		return fmt.Sprintf("lineage: the preserved configuration is from term %d, not below this leader's term %d", rec.Term, ourTerm)
 	case ourEpoch != 0 && (rec.Epoch <= 0 || rec.Epoch >= ourEpoch):
 		return fmt.Sprintf("lineage: the preserved configuration carries fencing epoch %d, not below this leader's epoch %d", rec.Epoch, ourEpoch)
-	case !(st.Phase == "reconciling" && st.AdoptingVersion == rec.Version) && currentFP != st.ContentFP:
+	case (st.Phase != "reconciling" || st.AdoptingVersion != rec.Version) && currentFP != st.ContentFP:
 		// Not checked when resuming an interrupted adoption of this very
 		// snapshot: the committed content may already be the adopted one, and
 		// nothing else can have changed it — operator mutations are refused for
