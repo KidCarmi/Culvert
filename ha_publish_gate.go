@@ -472,6 +472,7 @@ type publishGateArming struct {
 // replicated watermark and asks the store to remember the promotion's first
 // commit. Only the process's own HA state arms the gate.
 func (h *HAState) beginPublishGateArming() publishGateArming {
+	haPromotionsInFlight.Add(1)
 	if h != haTopologySource() {
 		return publishGateArming{}
 	}
@@ -495,6 +496,7 @@ func (h *HAState) beginPublishGateArming() publishGateArming {
 // armIfPromoted completes the arming when the promotion it was begun for made
 // this node the leader; a promotion that failed arms nothing.
 func (a publishGateArming) armIfPromoted(h *HAState) {
+	haPromotionsInFlight.Add(-1)
 	if !a.active || !h.IsLeader() {
 		globalConfigStoreUnmark(a.active)
 		return

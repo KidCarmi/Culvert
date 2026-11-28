@@ -1,5 +1,7 @@
 package main
 
+import "sync/atomic"
+
 // ha_authority.go — leadership and publication authority, as SEPARATE
 // questions (ADR-0064; node_lifecycle.go lists the consumers). Keep every
 // consumer on these functions; do not re-derive an answer anywhere else.
@@ -66,10 +68,11 @@ func haDistributionRefused() (reason string, refused bool) {
 	return "", false
 }
 
-// haPromotionCommitting reports whether a promotion of this node is in flight:
-// the once-guard is taken and the node has not yet taken the leader role. Its
-// activation publish must commit before leadership is exposed (ADR-0005), so
-// it is the one publish made without haLeadershipHeld.
-func haPromotionCommitting() bool {
-	return globalHA.promoted.Load() && globalHA.Status().Role == "standby"
-}
+// haPromotionsInFlight counts promote() calls between their start and their
+// end (beginPublishGateArming / armIfPromoted).
+var haPromotionsInFlight atomic.Int32
+
+// haPromotionCommitting reports whether a promotion of this node is in flight.
+// Its activation publish must commit before leadership is exposed (ADR-0005),
+// so it is the one publish made without haLeadershipHeld.
+func haPromotionCommitting() bool { return haPromotionsInFlight.Load() > 0 }
