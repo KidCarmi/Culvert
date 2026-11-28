@@ -350,13 +350,47 @@ operation, no journal record, no audit entry):
 | `stale` | no reading for three intervals |
 
 `last_good` names the image id, its reference and digest, and when it passed.
-It is evidence only: nothing in this release restores it. Container ids are
-not reported.
+The observer itself never restores anything; only the opt-in runtime recovery
+below acts, and only on an image this agent installed. Container ids are not
+reported.
 
 The admin console shows the same state and the last-known-good image in the
 Support view's maintenance-agent panel, read through `GET
 /api/maintenance-agent` (`runtime_health`, absent when the agent's observer is
 off). No alert fires on it yet.
+
+### Runtime recovery (`runtime_recovery`)
+
+Off by default, and accepted only with `runtime_health_interval` on. With
+`runtime_recovery = "restore_last_gated"`, when the image an upgrade of this
+agent installed fails the check 3 readings in a row (same container, same
+image), the agent puts back the image that upgrade replaced, as its own
+operation `runtime.recover` (other state-changing requests get 409 while it
+runs). It does so only when every condition holds on fresh reads:
+
+- the fixed tag is on the running image, and this agent installed it (its last
+  verified upgrade, or a kept upgrade record of its own);
+- the image it replaced passed the check before, is local, has a
+  `<proxy_repo>@sha256:…` reference `image_allowlist` admits, and declares a
+  data-epoch range that includes the data's (an unlabelled image is never
+  restored);
+- fewer than 2 recoveries were begun for that install.
+
+It then retags, recreates, checks `/ready` and verifies by image id, exactly as
+the startup reconcile finishes an interrupted rollback; a crash in between is
+finished by the next start with `reconcile_on_startup = "converge"`. Anything
+else is reported and changes nothing. A hand retag or a hand `compose up` is
+never acted on. See `packaging/culvert-maint/config.example.toml` and contract
+AGT-010.
+
+`GET /v1/status` gains `runtime_recovery` (absent when off): the policy, the
+`threshold` and how many failed readings in a row have been seen
+(`not_ready_streak`), whether a recovery is `running`, and the `last` attempt:
+`outcome` (`refused` (nothing begun), `recovered` or `failed`), its `reason`,
+when, the image ids and, when an operation was begun, its `op_id`. The admin
+console shows it in the same Support panel, read through `GET
+/api/maintenance-agent` (`runtime_recovery`; a policy or outcome the console
+does not know is shown as `unknown`). No alert fires on it yet.
 
 ### After the agent stops during a restore
 

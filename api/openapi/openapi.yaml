@@ -1445,11 +1445,42 @@ components:
         /v1/status. `available:false` means the agent could not be reached
         or is not configured, with `reason` carrying the cause; otherwise
         carries agent_version, privilege_mode(+privilege_warning), and
-        compose_stack_up(+compose_error), and `runtime_health` when the agent's
-        runtime health observer is on.
+        compose_stack_up(+compose_error), `runtime_health` when the agent's
+        runtime health observer is on, and `runtime_recovery` when its
+        runtime recovery is on.
       additionalProperties: true
       properties:
         runtime_health: { $ref: '#/components/schemas/MaintAgentRuntimeHealth' }
+        runtime_recovery: { $ref: '#/components/schemas/MaintAgentRuntimeRecovery' }
+    MaintAgentRuntimeRecovery:
+      type: object
+      description: >-
+        The maintenance agent's runtime recovery (ADR-0062 slice 6, contract
+        AGT-010): it restores the image an upgrade of its own replaced when
+        that image keeps failing its health check. Policy, how many
+        consecutive failed checks of the threshold have been seen, whether a
+        recovery is running, and the last attempt. A policy or outcome this
+        build does not know is reported as unknown. Image ids only; never a
+        container id.
+      required: [policy, threshold, not_ready_streak, running]
+      additionalProperties: false
+      properties:
+        policy: { type: string, enum: ['off', restore_last_gated, unknown] }
+        threshold: { type: integer }
+        not_ready_streak: { type: integer }
+        running: { type: boolean }
+        last:
+          type: object
+          description: The last evaluation that went past the trigger. A refusal begins no operation (no op_id).
+          required: [at, outcome, reason]
+          additionalProperties: false
+          properties:
+            at: { type: string, format: date-time }
+            op_id: { type: string }
+            outcome: { type: string, enum: [refused, recovered, failed, unknown] }
+            reason: { type: string }
+            image_id: { type: string }
+            restore_image_id: { type: string }
     MaintAgentRuntimeHealth:
       type: object
       description: >-

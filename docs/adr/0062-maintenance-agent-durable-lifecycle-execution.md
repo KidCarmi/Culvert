@@ -514,8 +514,11 @@ gaps and make the #2051 executor the single path every recovery takes.
      failure), so a kill at any point is finished at the next start (Codex
      review on #2140). Status: `runtime_recovery` (policy,
      threshold, streak, running, last attempt). Contract AGT-010 (open until
-     PR 4); AGT-001 and AGT-009 amended. The main application's pass-through
-     of `runtime_recovery` is a follow-up, as `runtime_health`'s was.
+     PR 4); AGT-001 and AGT-009 amended. The main application's
+     `/api/maintenance-agent` passes `runtime_recovery` through (closed
+     policy and outcome sets, anything else shown as unknown; strings
+     bounded) and the legacy Support panel shows it (2026-11-28); no alert
+     fires on it yet.
   4. *Real-Docker qualification* in all four cells, with negative controls.
      *As qualified (2026-11-28):* six rows (`test/agt900-e2e`, `^rr_`) pass
      in root and sudoers mode on the containerd and classic stores (24/24 on

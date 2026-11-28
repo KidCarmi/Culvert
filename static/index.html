@@ -16617,6 +16617,24 @@ function renderMaintAgentStatus(data) {
       rows.push(['Last known good', escHtml(String(rh.last_good_error))]);
     }
   }
+  // ADR-0062 slice 6: the agent's runtime recovery (absent when its
+  // runtime_recovery is off).
+  const rr = data.runtime_recovery;
+  if (rr && rr.policy) {
+    let txt = escHtml(String(rr.policy));
+    if (rr.running) txt += ' - <span style="color:var(--orange, var(--red));font-weight:600">recovering now</span>';
+    else txt += ' - ' + escHtml(String(rr.not_ready_streak)) + ' of ' + escHtml(String(rr.threshold)) + ' failed checks in a row';
+    rows.push(['Runtime recovery', txt]);
+    const last = rr.last;
+    if (last && last.outcome) {
+      const lc = last.outcome === 'recovered' ? 'var(--green)' : (last.outcome === 'failed' ? 'var(--red)' : 'var(--orange, var(--red))');
+      let lt = '<span style="color:' + lc + ';font-weight:600">' + escHtml(String(last.outcome)) + '</span>';
+      if (last.reason) lt += ' (' + escHtml(String(last.reason)) + ')';
+      if (last.at) lt += ' - ' + escHtml(String(last.at));
+      if (last.op_id) lt += ' - op ' + escHtml(String(last.op_id));
+      rows.push(['Last recovery', lt]);
+    }
+  }
   let warning = '';
   if (data.privilege_warning) {
     warning = '<p class="hint" style="color:var(--red);font-weight:600">' + escHtml(String(data.privilege_warning)) + '</p>';
