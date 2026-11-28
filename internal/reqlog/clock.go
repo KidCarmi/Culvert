@@ -1,9 +1,9 @@
-package main
+package reqlog
 
-// store_logclock.go — the per-request wall-clock stamp for LogEntry.Time.
+// clock.go — the per-request wall-clock stamp for Entry.Time.
 //
-// persistLogEntry is the single chokepoint every request-log record flows
-// through: every proxied request that writes a feed entry (HTTP, CONNECT,
+// package main's persistLogEntry is the single chokepoint every request-log
+// record flows through: every proxied request that writes a feed entry (HTTP, CONNECT,
 // WebSocket, SOCKS5), every TUNNEL_CLOSED accounting row, and every
 // SSL-inspected inner request. It rendered the human-readable clock field with
 // time.Now().Format("15:04:05") on each call.
@@ -25,7 +25,7 @@ package main
 // i.e. the clock render alone was ~42% of the serial cost of recording a
 // request, for a value that changes once a second.
 //
-// logClockStamp memoises the render for the current wall-clock second. The
+// Stamp memoises the render for the current wall-clock second. The
 // output is EXACT, not approximate: for a given location, the unix second
 // fully determines the "15:04:05" rendering, so a hit returns the identical
 // bytes Format would have produced. This is a COST change, not a semantic one.
@@ -43,37 +43,44 @@ import (
 	"time"
 )
 
-// logEntryTimeLayout is the LogEntry.Time rendering. One-second resolution is
+// TimeLayout is the Entry.Time rendering. One-second resolution is
 // what makes the memo below exact; changing it to a sub-second layout would
 // invalidate the caching contract and must be done at the same time.
-const logEntryTimeLayout = "15:04:05"
+const TimeLayout = "15:04:05"
 
-// logClock is one memoised render of a wall-clock second.
-type logClock struct {
+// clockRender is one memoised render of a wall-clock second.
+type clockRender struct {
 	sec int64          // unix second the string renders
 	loc *time.Location // location the string was rendered in
-	str string         // the rendered logEntryTimeLayout value
+	str string         // the rendered TimeLayout value
 }
 
-// logClockCache holds the most recent render. A pointer swap keeps readers
-// lock-free on the request path; concurrent misses may both render and both
-// store, which is harmless because the value they compute is identical.
-var logClockCache atomic.Pointer[logClock]
+// clock holds the most recent render. A pointer swap keeps readers lock-free
+// on the request path; concurrent misses may both render and both store, which
+// is harmless because the value they compute is identical. The zero value is
+// ready to use, so a test owns its own instance instead of resetting a shared
+// one.
+type clock struct {
+	last atomic.Pointer[clockRender]
+}
 
-// logClockStamp renders now in logEntryTimeLayout, reusing the previous render
-// when now falls in the same wall-clock second and location. The result is
-// byte-identical to now.Format(logEntryTimeLayout).
-func logClockStamp(now time.Time) string {
+// stamp renders now in TimeLayout, reusing the previous render when now falls
+// in the same wall-clock second and location. The result is byte-identical to
+// now.Format(TimeLayout).
+func (c *clock) stamp(now time.Time) string {
 	sec := now.Unix()
 	loc := now.Location()
-	if c := logClockCache.Load(); c != nil && c.sec == sec && c.loc == loc {
-		return c.str
+	if r := c.last.Load(); r != nil && r.sec == sec && r.loc == loc {
+		return r.str
 	}
-	s := now.Format(logEntryTimeLayout)
-	logClockCache.Store(&logClock{sec: sec, loc: loc, str: s})
+	s := now.Format(TimeLayout)
+	c.last.Store(&clockRender{sec: sec, loc: loc, str: s})
 	return s
 }
 
-// resetLogClockCacheForTest drops the memoised render so a test can measure the
-// cold path deterministically.
-func resetLogClockCacheForTest() { logClockCache.Store(nil) }
+// entryClock is the one production instance, beside the ring it stamps for.
+var entryClock clock
+
+// Stamp renders now in TimeLayout for Entry.Time, memoised per wall-clock
+// second and location.
+func Stamp(now time.Time) string { return entryClock.stamp(now) }

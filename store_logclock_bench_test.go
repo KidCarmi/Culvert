@@ -20,15 +20,16 @@ package main
 // pointer load off a read-mostly cache line, and BenchmarkLogClockStampParallel
 // measures 14.9 ns/op on 4 cores — i.e. it scales linearly.
 //
-// Run locally:
+// The three BenchmarkLogClockStamp* render benchmarks live beside the memo in
+// internal/reqlog (clock_bench_test.go). Run locally:
 //
-//	go test -run '^$' -bench 'BenchmarkLogClockStamp|BenchmarkPersistLogEntry' -benchmem .
+//	go test -run '^$' -bench 'BenchmarkPersistLogEntry' -benchmem .
+//	go test -run '^$' -bench 'BenchmarkLogClockStamp' -benchmem ./internal/reqlog
 
 import (
 	"io"
 	"log"
 	"testing"
-	"time"
 )
 
 // benchDiscardLogger keeps the measurement on the code under test rather than
@@ -39,41 +40,6 @@ func benchDiscardLogger(b *testing.B) {
 	if logger == nil {
 		logger = log.New(io.Discard, "", log.LstdFlags)
 	}
-}
-
-// BenchmarkLogClockStamp measures the steady-state render — the case ~all
-// production traffic hits, since any rate above 1 req/s produces repeated
-// calls inside the same wall-clock second.
-func BenchmarkLogClockStamp(b *testing.B) {
-	b.ReportAllocs()
-	var s string
-	for i := 0; i < b.N; i++ {
-		s = logClockStamp(time.Now())
-	}
-	_ = s
-}
-
-// BenchmarkLogClockStampFormat is the pre-change baseline it replaces, kept so
-// the delta stays reproducible on any runner rather than only in a comment.
-func BenchmarkLogClockStampFormat(b *testing.B) {
-	b.ReportAllocs()
-	var s string
-	for i := 0; i < b.N; i++ {
-		s = time.Now().Format(logEntryTimeLayout)
-	}
-	_ = s
-}
-
-// BenchmarkLogClockStampParallel exposes any contention the memo introduces.
-// Readers take a single atomic pointer load, so the expectation is that it
-// scales; a regression here would mean the cache line has become a bottleneck.
-func BenchmarkLogClockStampParallel(b *testing.B) {
-	b.ReportAllocs()
-	b.RunParallel(func(pb *testing.PB) {
-		for pb.Next() {
-			_ = logClockStamp(time.Now())
-		}
-	})
 }
 
 // BenchmarkPersistLogEntry measures the full per-request record build and
