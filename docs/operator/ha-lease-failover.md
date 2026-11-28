@@ -232,8 +232,15 @@ left on its configuration and publication is **held**:
   (node, version, epoch, blocklist fingerprint, source) and `action`.
 - Configuration changes return 503 `ha_write_hold`. Data planes that are not
   ahead keep receiving this node's configuration. Leadership is unaffected.
-- To end it, compare the listed nodes with what this node holds, then `POST
-  /api/cluster/ha/publish-release`. The listed nodes are then given this
+- It usually ends without you: the demoted leader kept a copy of what it had
+  committed (`ha_preserved_snapshot.json` in its data directory), and this
+  node fetches, validates and adopts it, then publishes and releases the hold
+  (audit action `cluster.ha-auto-reconcile`). `publish_gate.reconcile_note`
+  says why an attempt did not: the old leader is unreachable, both leaders
+  changed configuration, the copy is older than what a node reports, or it
+  failed validation. Attempts repeat every 15 seconds.
+- If it cannot end that way, compare the listed nodes with what this node
+  holds, then `POST /api/cluster/ha/publish-release`. The listed nodes are then given this
   node's configuration (they lose what only they had). While the previous
   leader still answers on the cluster port the call returns 409
   `ha_reconciliation_possible`; bring that leader back as the leader instead,

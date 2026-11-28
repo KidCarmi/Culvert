@@ -80,15 +80,26 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   `ha_write_hold`, data planes that are not ahead keep being served, the
   `ha_resume_unfenced` alert fires once, and `GET /api/cluster/ha` and the HA
   panel list the nodes, their versions and the action. The hold survives a
-  restart and a second failover. It ends when an admin releases it with `POST
-  /api/cluster/ha/publish-release` (audited; publishes this node's
-  configuration to the nodes that were ahead; needs `{"force": true}` while
-  the previous leader is still reachable). A failover in which no data plane
-  is ahead — the normal case — is not held and needs no action. Limits: the
-  previous leader's newer configuration is not adopted automatically yet, so
-  every hold needs that release; a promoted node whose clock is behind the old
-  leader's version counter cannot detect the condition; and a data plane build
-  that reports no version gets `Unavailable` during a hold. (ADR-0064;
+  restart and a second failover. It normally ends by itself: a leader that is demoted
+  keeps a copy of the configuration it had committed, the new leader fetches
+  it over the cluster channel, and — if it covers everything the data planes
+  report, the new leader has made no configuration change of its own since it
+  took over, and it passes the usual validation — adopts it, publishes it as a
+  new version and releases the hold (audit action `cluster.ha-auto-reconcile`).
+  When that is not possible (`reconcile_note` in the status says why: the old
+  leader is gone, both sides changed configuration, the copy is too old) an
+  admin ends the hold with `POST /api/cluster/ha/publish-release` (audited;
+  publishes this node's configuration to the nodes that were ahead; needs
+  `{"force": true}` while the previous leader is still reachable).
+  Configuration changes are refused during a hold on purpose: a change made
+  then would turn a recoverable state into a conflict. A failover in which no data plane
+  is ahead — the normal case — is not held and needs no action. Limits: when the
+  previous leader failed for good before it could be demoted, its newer
+  configuration exists only on the data planes that applied it, is never taken
+  from them, and the hold needs the release; an older control-plane build has
+  no copy to offer; and a data plane build that reports no version gets
+  `Unavailable` during a hold. The React UI does not show the hold yet (the
+  legacy HA panel does). (ADR-0064;
   contract `CLU-009`.)
 
 - **A restarted HA leader without a fencing lease no longer resumes leadership

@@ -1,8 +1,8 @@
 # ADR-0064: HA restart authority (legacy) and the publication safety gate
 
-- **Status:** Part C implemented. Part D implemented as the detection-and-hold safety net with operator
-  release; automatic reconciliation and replicate-before-distribute are NOT implemented — see
-  "Implementation record" at the end for what was decided, what was stopped and why.
+- **Status:** Implemented: part C; part D with automatic reconciliation from the previous leader's
+  preserved configuration and operator release as the exception path. Replicate-before-distribute is a
+  rejected alternative. See "Implementation record" at the end.
 - **Builds on:** ADR-0004 (legacy HA), ADR-0005 (fencing lease; its commit semantics are NOT changed here),
   contract `CLU-004`. Composes with ADR-0063 (state authority, draft).
 - **Owner decisions (verbatim, abridged):** (C) "In legacy mode, a restarting leader must revalidate its
@@ -144,35 +144,61 @@ watermark, which the wall-clock seed normally guarantees. A promoted node whose 
 leader's version counter numbers its first version `watermark+1` and cannot tell an ahead data plane from
 its own; that case is undetected, as today.
 
-**Not implemented — automatic reconciliation (`HAPeerSnapshot`).** In lease mode the previous leader
-self-fences and resyncs from the new leader within one sync interval, overwriting the very state that would
-be adopted. Preserving it needs the demoted leader to refuse bundles that do not cover what it led through,
-the new leader to pull and adopt that state, and a rule for the case where the new leader has accepted
-edits of its own in the meantime. That is a protocol of its own; it was not started rather than half-built.
-Until it exists every hold ends by operator release.
+**Automatic reconciliation (implemented, `ha_publish_reconcile.go`).**
 
-**Not implemented — replicate-before-distribute.** Evaluated, and stopped on two points that need an owner
-decision:
+- *Preserve before overwrite.* A leader that is demoted — self-fence, a foreign lease holder observed, a
+  restart that finds the peer leading — writes its committed snapshot with version, term and epoch to
+  `ha_preserved_snapshot.json`, atomically, before it enters standby (`enterStandbyResync`). A resync never
+  deletes it; only a later demotion from a later leadership replaces it.
+- *Fetch.* `HAPeerSnapshot`, a new `ConfigService` RPC: HA-token authenticated exactly like `HASync`, not
+  leader-gated (the node that answers is by construction not the leader), answered only by a Control
+  Plane. Nothing is ever fetched from a data plane; its reported version is evidence only.
+- *Adopt only when all hold:* the preserved version covers every version reported in a gap; the fleet
+  reports no conflicting generations; the new leader's committed content is still what its promotion
+  published (no own configuration commits since); the preserved term is below ours and, with a lease, its
+  epoch too; and `applyConfigSnapshot` accepts it — the same validation as every other snapshot door,
+  including the ruleset gate. It is then published as a new version above every reported and known version
+  (CLU-002), the hold is released, and `cluster.ha-auto-reconcile` is audited with the diff.
+- *Otherwise* the hold stays, `reconcile_note` on the status says why, the attempt is retried every 15 s,
+  and the operator release remains the exception path.
+- *Idempotence.* The gate file records phase `reconciling` and the version being adopted before anything
+  is applied. A crash after the apply or after the publish leaves a held gate; the resumed attempt applies
+  and publishes the same content and releases. The "no own commits" check is skipped only when resuming
+  that journaled adoption — operator mutations are refused for the whole of a hold, so nothing else can
+  have changed the content.
+
+**Admin writes during a hold are refused, on purpose.** A configuration change accepted while two
+lineages are unreconciled would be a commit of the new leader's own, which turns a recoverable state into a
+conflicting one. They are refused with 503 `ha_write_hold` and the reason; reads, authentication,
+diagnostics and the HA endpoints stay available.
+
+**Version seed.** A promotion raises the version counter to at least
+`max(watermark, store version, every inherited reported version) + 2^20` before its first commit
+(`haPromotionVersionJump`). The first own version is therefore above the watermark, above every version
+seen in a bundle (the watermark is ratcheted by every bundle, applied or refused) and above every reported
+version known at promotion, whatever the clocks say. Without it a promoted node whose clock is behind the
+previous leader's counter numbers its first version `watermark+1` — the number of the previous leader's
+next, unreplicated version — and the two are indistinguishable (shown by the negative control of
+`TestPublishGate_PromotionVersionJumpMakesTheGapClockIndependent`: first own version 1 against a watermark
+of 4242). The earlier "Limit of detection" paragraph is superseded by this.
+
+**Rejected alternative — replicate-before-distribute** (the leader distributes to data planes only versions
+its standby has acknowledged). Rejected for two reasons:
 
 1. *It moves an ADR-0005 invariant.* ADR-0005 advertises a new epoch only once a COMMITTED snapshot carries
-   it, because data planes ratchet to the epoch and reject snapshots stamped below it. If the leader
-   distributes an older, standby-acknowledged snapshot while the committed one carries a new epoch, data
-   planes are handed a snapshot stamped below the epoch they have just ratcheted to and reject it until the
-   standby catches up. The rule would have to become "…once a DISTRIBUTABLE snapshot carries it".
+   it, because data planes ratchet to the epoch and reject snapshots stamped below it. Distributing an
+   older, standby-acknowledged snapshot while the committed one carries a new epoch hands data planes a
+   snapshot stamped below the epoch they have just ratcheted to.
 2. *It is complete only if the standby's freshness window is tied to the leader's wait bound.* The leader
-   must stop waiting for a silent standby at some bound `T`, or one dead standby stalls all distribution.
-   After `T` it distributes current; a standby that is still eligible to promote (today: for 10 minutes)
-   can then take over without those versions. Prevention is complete only if a standby stops being
-   eligible before the leader stops waiting, i.e. the S4 freshness window drops from 10 minutes to below
-   `T`. With `T` = 10 minutes an urgent block is delayed up to 10 minutes whenever the standby is down;
-   with a short `T` the window must shrink to about a minute, which is a lease-path change and removes
-   automatic failover for standbys that lost contact slightly earlier. A standby that polls but refuses
-   bundles needs the same bound.
+   must stop waiting for a silent standby at some bound, or one dead standby stalls all distribution; after
+   it, a standby that is still eligible to promote can take over without those versions. With the
+   10-minute window an urgent block is delayed up to 10 minutes whenever the standby is down; a short bound
+   means shrinking the S4 window to about a minute, a lease-path change that removes automatic failover for
+   standbys that lost contact slightly earlier.
 
-   What it would buy: the common failure — the leader dies within one sync interval of a publish — would
-   leave no data plane ahead, so no hold and no operator. Costs: one extra retained snapshot (about one
-   marshalled snapshot at 2 M hosts), delta chains truncated at the acknowledged version, and distribution
-   latency of one sync interval unless the standby long-polls.
+**GUI parity.** The legacy HA panel shows the authority state, the hold with its per-node diff and
+`reconcile_note`, and the promotion warning. The release action is API-only. The React cluster view shows
+none of it yet; the deferral is recorded in `docs/design/FRONTEND-FEATURE-PARITY.md` (FE-V30).
 
 **Possible future evidence (not built; adopting state from a data plane is a security-boundary change):**
 a whole-snapshot fingerprint and the commit epoch per version in the heartbeat; a data-plane RPC that
